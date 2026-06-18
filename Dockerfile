@@ -65,7 +65,7 @@ RUN bash -c "source /opt/ros/${ROS_DISTRO}/setup.bash && \
 RUN python3 -m pip config set global.break-system-packages true
 RUN pip3 install meson
 
-WORKDIR /root
+WORKDIR /root/turtlebot3_ws
 RUN git clone -b v0.5.2 --depth 1 https://github.com/raspberrypi/libcamera.git && \
     cd libcamera && \
     meson setup build --buildtype=release -Dpipelines=rpi/vc4,rpi/pisp -Dipas=rpi/vc4,rpi/pisp -Dv4l2=true -Dgstreamer=enabled -Dtest=false -Dlc-compliance=disabled -Dcam=disabled -Dqcam=disabled -Ddocumentation=disabled -Dpycamera=enabled && \
