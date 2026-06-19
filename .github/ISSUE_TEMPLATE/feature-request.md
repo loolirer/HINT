@@ -15,10 +15,10 @@ assignees: ''
 - [ ] Development Goal
 
 ### 🎯 Goal
-> *Explain what will you do*
+*Explain what will you do*
 
 ### 🧠 Rationale
-> *Explain why are you doing this*
+*Explain why are you doing this*
 
 --- 
 
