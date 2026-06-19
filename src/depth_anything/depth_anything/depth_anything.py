@@ -150,11 +150,11 @@ class DepthAnything(Node):
 def main():
     rclpy.init()
     node = DepthAnything()
+
     try:
         rclpy.spin(node)
+        
     except KeyboardInterrupt:
-        pass
-    finally:
         node.destroy_node()
         rclpy.shutdown()
 
