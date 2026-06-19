@@ -39,7 +39,6 @@ setup(
     entry_points={
         'console_scripts': [
             "depth_anything = depth_anything.depth_anything:main",
-            "depth_anything_ov = depth_anything.depth_anything_ov:main",
         ],
     },
 )
