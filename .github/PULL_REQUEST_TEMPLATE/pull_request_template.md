@@ -16,11 +16,11 @@
 
 ## ✨ Quality Assurance
 
-### Automated Testing
+### 🧪 Automated Testing
 - [ ] Unit tests added/updated and passing
 - [ ] Integration or E2E tests added/updated
 
-### Evidence
+### 📸 Evidence
 <details>
 <summary>Click to expand Visual Proof</summary>
 
