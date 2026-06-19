@@ -17,10 +17,10 @@ assignees: ''
 - [ ] Refactor / Tech Debt
 
 ### 🎯 Expected Behavior
-> *Explain what the application should do under normal conditions*
+*Explain what the application should do under normal conditions*
 
 ### 🧠 Steps to Reproduce & Actual Behavior
-> *List the exact steps to trigger the bug, and describe what actually happens instead of the expected behavior*
+*List the exact steps to trigger the bug, and describe what actually happens instead of the expected behavior*
 
 --- 
 
