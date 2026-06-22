@@ -17,6 +17,9 @@ LK_PARAMS = dict(
 )
 SUBPIX_CRITERIA = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_MAX_ITER, 20, 0.03)
 
+_ORB     = cv2.ORB_create(nfeatures=500)
+_MATCHER = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+
 
 class LKTrackerNode(Node):
     def __init__(self):
@@ -59,6 +62,8 @@ class LKTrackerNode(Node):
         self.bbox_corners_init = None   # 4x1x2 bbox corners in init frame
         self.smoothed_corners  = None   # 4x1x2 EMA-smoothed corners
         self.init_patch        = None   # grayscale crop of init_bbox, stored at startup
+        self.orb_kp_abs        = None   # ORB keypoint coords in absolute image frame (immutable)
+        self.orb_des           = None   # ORB descriptors for the init region (immutable)
         self._set_status(status)
 
     def _set_status(self, status):
@@ -116,7 +121,18 @@ class LKTrackerNode(Node):
             self.pts_prev          = pts.copy()
             self.bbox_corners_init = self._bbox_corners(init_bbox)
             self.smoothed_corners  = self.bbox_corners_init.copy()
-            self.initialized       = True
+
+            # Compute ORB fingerprint for the init region — stored immutably for re-detection
+            kp, des = _ORB.detectAndCompute(gray[y:y + bh, x:x + bw], None)
+            if des is not None and len(kp) > 0:
+                self.orb_kp_abs = np.array([[k.pt[0] + x, k.pt[1] + y] for k in kp], dtype=np.float32)
+                self.orb_des    = des
+            else:
+                self.orb_kp_abs = np.empty((0, 2), dtype=np.float32)
+                self.orb_des    = None
+                self.get_logger().warn("ORB found no descriptors at init — re-detection disabled.")
+
+            self.initialized = True
             self._set_status(STATUS_TRACKING)
             self.get_logger().info(f"Tracking initialized with {len(pts)} features.")
             self._publish_debug(frame, msg)
@@ -130,14 +146,14 @@ class LKTrackerNode(Node):
 
         # --- Similarity transform (4 DOF) ---
         if len(good_cur) < min_features:
-            self._handle_lost(frame, msg, reason="too few features")
+            self._handle_occlusion(gray, frame, msg, reason="too few features")
             return
 
         M, inliers = cv2.estimateAffinePartial2D(
             good_init, good_cur, method=cv2.RANSAC, ransacReprojThreshold=3.0
         )
         if M is None or inliers is None:
-            self._handle_lost(frame, msg, reason="transform failed")
+            self._handle_occlusion(gray, frame, msg, reason="transform failed")
             return
 
         # Compute inlier ratio BEFORE filtering so we have the full denominator
@@ -153,7 +169,7 @@ class LKTrackerNode(Node):
         occluded = (score < self._p("ncc_thresh")) or (inlier_ratio < self._p("inlier_ratio_thresh"))
 
         if occluded:
-            self._handle_lost(frame, msg, reason="occluded", score=score, inlier_ratio=inlier_ratio)
+            self._handle_occlusion(gray, frame, msg, reason="occluded", score=score, inlier_ratio=inlier_ratio)
             return
 
         inlier_mask = inliers.ravel() == 1
@@ -210,18 +226,88 @@ class LKTrackerNode(Node):
     # ------------------------------------------------------------------
     # Helpers
 
-    def _handle_lost(self, frame, msg, reason="lost", score=None, inlier_ratio=None):
-        """Tracking is uncertain — assume features are forever lost, require new bbox."""
-        if self.smoothed_corners is not None:
+    def _handle_occlusion(self, gray, frame, msg, reason, score=None, inlier_ratio=None):
+        """Try ORB re-detection first; on failure, enter occluded state and retry next frame."""
+        if self._try_recover_orb(gray):
+            roi_out = self._corners_to_roi(self.smoothed_corners)
+            self.pub_bbox.publish(roi_out)
             pts_poly = self.smoothed_corners.reshape(-1, 1, 2).astype(np.int32)
-            cv2.polylines(frame, [pts_poly], True, (0, 215, 255), 2)
-        label = f"OCCLUDED ({reason})"
-        if score        is not None: label += f"  ncc={score:.2f}"
-        if inlier_ratio is not None: label += f"  inliers={inlier_ratio:.2f}"
-        cv2.putText(frame, label, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 215, 255), 2)
+            cv2.polylines(frame, [pts_poly], True, (0, 255, 128), 2)
+            cv2.putText(frame, "RECOVERED", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 128), 2)
+        else:
+            if self.smoothed_corners is not None:
+                pts_poly = self.smoothed_corners.reshape(-1, 1, 2).astype(np.int32)
+                cv2.polylines(frame, [pts_poly], True, (0, 215, 255), 2)
+            label = f"OCCLUDED ({reason})"
+            if score        is not None: label += f"  ncc={score:.2f}"
+            if inlier_ratio is not None: label += f"  inliers={inlier_ratio:.2f}"
+            cv2.putText(frame, label, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 215, 255), 2)
+            self._set_status(STATUS_OCCLUDED)
+            # Clear LK points so next frame immediately retries ORB;
+            # keep smoothed_corners, bbox_corners_init, orb_* for re-detection
+            empty = np.empty((0, 1, 2), dtype=np.float32)
+            self.pts_init  = empty
+            self.pts_prev  = empty
+            self.prev_gray = gray
         self._publish_debug(frame, msg)
-        # Features are considered forever lost — reset and wait for new bbox
-        self._reset(STATUS_OCCLUDED)
+
+    def _try_recover_orb(self, gray):
+        """ORB descriptor match + RANSAC similarity to re-detect the target after occlusion.
+
+        Searches a region around smoothed_corners. Requires >=8 RANSAC inliers and
+        scale within [0.5, 2.0] of the init scale to reject false positives.
+        Returns True and updates pts_init/pts_prev/smoothed_corners on success.
+        """
+        if self.smoothed_corners is None or self.orb_des is None or len(self.orb_des) < 4:
+            return False
+
+        # Search region: expand current bbox by 50% in each direction from its center
+        xs = self.smoothed_corners[:, 0, 0]
+        ys = self.smoothed_corners[:, 0, 1]
+        cx, cy = float(xs.mean()), float(ys.mean())
+        hw = max(float(xs.max() - xs.min()) * 0.75, 30.0)
+        hh = max(float(ys.max() - ys.min()) * 0.75, 30.0)
+        x0 = max(0, int(cx - hw))
+        y0 = max(0, int(cy - hh))
+        x1 = min(gray.shape[1], int(cx + hw))
+        y1 = min(gray.shape[0], int(cy + hh))
+        if x1 - x0 < 10 or y1 - y0 < 10:
+            return False
+
+        kp_cur, des_cur = _ORB.detectAndCompute(gray[y0:y1, x0:x1], None)
+        if des_cur is None or len(kp_cur) < 4:
+            return False
+
+        matches = _MATCHER.knnMatch(self.orb_des, des_cur, k=2)
+        good = [ms[0] for ms in matches if len(ms) == 2 and ms[0].distance < 0.75 * ms[1].distance]
+        if len(good) < 8:
+            return False
+
+        # src: original init-frame coords (absolute); dst: current-frame coords (absolute)
+        src = self.orb_kp_abs[[m.queryIdx for m in good]].reshape(-1, 1, 2)
+        dst = np.array(
+            [[kp_cur[m.trainIdx].pt[0] + x0, kp_cur[m.trainIdx].pt[1] + y0] for m in good],
+            dtype=np.float32,
+        ).reshape(-1, 1, 2)
+
+        M, inliers = cv2.estimateAffinePartial2D(
+            src, dst, method=cv2.RANSAC, ransacReprojThreshold=5.0
+        )
+        if M is None or inliers is None or int(inliers.sum()) < 8:
+            return False
+
+        # Reject if scale change is implausible (outside ±50% of 1.0)
+        scale = np.sqrt(M[0, 0] ** 2 + M[0, 1] ** 2)
+        if scale < 0.5 or scale > 2.0:
+            return False
+
+        mask = inliers.ravel() == 1
+        self.pts_init         = src[mask]
+        self.pts_prev         = dst[mask]
+        self.smoothed_corners = cv2.transform(self.bbox_corners_init, M)
+        self.prev_gray        = gray
+        self._set_status(STATUS_TRACKING)
+        return True
 
     def _detect_features(self, gray, bbox):
         x, y, w, h = [int(v) for v in bbox]
@@ -262,6 +348,9 @@ class LKTrackerNode(Node):
 
     def _lk_fb(self, prev_gray, gray, pts):
         """LK optical flow with forward-backward consistency filtering."""
+        if pts is None or len(pts) == 0:
+            empty = np.empty((0, 1, 2), dtype=np.float32)
+            return empty, np.zeros(0, dtype=bool)
         pts_fwd, st_fwd, _ = cv2.calcOpticalFlowPyrLK(prev_gray, gray,      pts,     None, **LK_PARAMS)
         pts_bwd, st_bwd, _ = cv2.calcOpticalFlowPyrLK(gray,      prev_gray, pts_fwd, None, **LK_PARAMS)
         fb_error = np.abs(pts - pts_bwd).max(axis=2).ravel()
