@@ -31,6 +31,7 @@ RUN apt-get update && \
     ros-${ROS_DISTRO}-camera-ros \
     ros-${ROS_DISTRO}-urdf \
     ros-${ROS_DISTRO}-rmw-cyclonedds-cpp \
+    ros-${ROS_DISTRO}-compressed-image-transport
     && rm -rf /var/lib/apt/lists/*
 
 RUN apt-get update && \
