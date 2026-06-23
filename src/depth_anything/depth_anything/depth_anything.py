@@ -44,22 +44,22 @@ class DepthAnything(Node):
             self.declare_parameter("device", "AUTO").get_parameter_value().string_value
         )
 
-        # Fixed depth range for visualization. Clamping/normalizing against a fixed
-        # [depth_min, depth_max] keeps gray levels stable across frames, instead of
-        # rescaling per-frame (which flickers). Tune these to your model's raw output
-        # range -- the node logs the live min/max periodically to help you calibrate.
-        self.depth_min = (
-            self.declare_parameter("depth_min", 0.0).get_parameter_value().double_value
+        # Percentile clipping: normalize each frame between its p_low and p_high
+        # percentiles instead of a fixed range. This handles DA3's scale drift between
+        # frames (monocular relative depth has no consistent absolute scale).
+        self._p_low = (
+            self.declare_parameter("percentile_low", 2.0).get_parameter_value().double_value
         )
-        self.depth_max = (
-            self.declare_parameter("depth_max", 2.0).get_parameter_value().double_value
+        self._p_high = (
+            self.declare_parameter("percentile_high", 98.0).get_parameter_value().double_value
+        )
+        # EMA alpha on the *normalized* map (after percentile clipping).
+        # Lower = smoother but more lag. 0.3 is a good starting point.
+        self._ema_alpha = (
+            self.declare_parameter("ema_alpha", 1.0).get_parameter_value().double_value
         )
         self._frame_count = 0
-        self.prev_raw_depth = None
-        self.alpha = 0.8  # Smoothing factor: 1.0 = no smoothing, 0.0 = frozen. Tune between 0.2 and 0.8.
-        self.diff_threshold = 0.15 * (
-            self.depth_max - self.depth_min
-        )  # Ignore changes larger than 15% of range
+        self._prev_normed = None
 
         self.get_logger().info(
             f"Loading ONNX model '{model_path}' on device '{device}'"
@@ -107,43 +107,27 @@ class DepthAnything(Node):
         result = self.compiled_model([inp])[self.output_layer]
         raw_output = np.squeeze(result)  # -> (H, W)
 
-        if self.prev_raw_depth is None:
-            self.prev_raw_depth = raw_output
+        # Per-frame percentile normalization — adapts to DA3's scale drift per frame.
+        lo = np.percentile(raw_output, self._p_low)
+        hi = np.percentile(raw_output, self._p_high)
+        normed = np.clip((raw_output - lo) / (hi - lo + 1e-5), 0.0, 1.0)
+
+        # EMA on the *normalized* map for temporal smoothing.
+        if self._prev_normed is None:
+            self._prev_normed = normed
         else:
-            # Find the absolute difference between this frame and the last frame
-            diff = np.abs(raw_output - self.prev_raw_depth)
+            self._prev_normed = self._ema_alpha * normed + (1.0 - self._ema_alpha) * self._prev_normed
 
-            # Create a mask of pixels where the change is small enough to be considered "noise"
-            noise_mask = diff < self.diff_threshold
-
-            # Apply EMA smoothing ONLY to the noisy pixels.
-            # Fast moving pixels update instantly (raw_output), preventing ghosting.
-            smoothed_output = np.where(
-                noise_mask,
-                (self.alpha * raw_output) + ((1.0 - self.alpha) * self.prev_raw_depth),
-                raw_output,
-            )
-
-            raw_output = smoothed_output
-            self.prev_raw_depth = smoothed_output
-
-        # Log the live raw range every ~30 frames so the fixed range can be tuned.
         self._frame_count += 1
         if self._frame_count % 30 == 1:
             self.get_logger().info(
                 f"raw depth range: min={float(raw_output.min()):.3f} "
                 f"max={float(raw_output.max()):.3f} "
-                f"(clamping to [{self.depth_min}, {self.depth_max}])"
+                f"clip=[{lo:.3f}, {hi:.3f}]"
             )
 
-        # Fixed-range normalization: stable gray levels across frames.
-        rng = self.depth_max - self.depth_min
-        clamped = np.clip(raw_output, self.depth_min, self.depth_max)
-        normalized_base = ((clamped - self.depth_min) / (rng + 1e-5) * 255).astype(
-            np.uint8
-        )
-        depth_image = cv2.bitwise_not(normalized_base)  # Black = Close, White = Far
-
+        depth_u8 = (self._prev_normed * 255).astype(np.uint8)
+        depth_image = cv2.bitwise_not(depth_u8)  # black = close, white = far
         self.pub_distance.publish(self.bridge.cv2_to_imgmsg(depth_image, "mono8"))
 
 
