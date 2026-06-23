@@ -24,7 +24,7 @@ def generate_launch_description():
             )
         ),
         launch_arguments={
-            "config_filepath":       teleop_config,
+            "config_filepath": teleop_config,
             "publish_stamped_twist": "true",
         }.items(),
     )
@@ -35,8 +35,10 @@ def generate_launch_description():
         name="cartographer_node",
         output="screen",
         arguments=[
-            "-configuration_directory", cartographer_config_dir,
-            "-configuration_basename", "turtlebot3_lds_2d.lua",
+            "-configuration_directory",
+            cartographer_config_dir,
+            "-configuration_basename",
+            "turtlebot3_lds_2d.lua",
         ],
     )
 
@@ -57,18 +59,23 @@ def generate_launch_description():
     rviz2 = Node(
         package="rviz2",
         executable="rviz2",
-        arguments=["-d", os.path.join(
-            get_package_share_directory("hint"),
-            "viz",
-            "hint.rviz",
-        )],
+        arguments=[
+            "-d",
+            os.path.join(
+                get_package_share_directory("hint"),
+                "viz",
+                "hint.rviz",
+            ),
+        ],
         output="screen",
     )
 
-    return LaunchDescription([
-        teleop,
-        cartographer,
-        occupancy_grid,
-        lk_tracker,
-        rviz2,
-    ])
+    return LaunchDescription(
+        [
+            teleop,
+            cartographer,
+            occupancy_grid,
+            lk_tracker,
+            rviz2,
+        ]
+    )
