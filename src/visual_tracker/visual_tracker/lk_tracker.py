@@ -82,6 +82,7 @@ class LKTrackerNode(Node):
             None  # ORB keypoint coords in absolute image frame (immutable)
         )
         self.orb_des = None  # ORB descriptors for the init region (immutable)
+        self._ever_tracked = False  # True once at least one clean LK frame completes
         self._set_status(status)
 
     def _set_status(self, status):
@@ -116,15 +117,13 @@ class LKTrackerNode(Node):
         # --- Initialization from pending bbox ---
         if not self.initialized:
             if self.pending_bbox is None:
-                status = self.tracking_status
-                color = (0, 0, 255) if status == STATUS_OCCLUDED else (128, 128, 128)
                 cv2.putText(
                     frame,
-                    f"{status.upper()} — awaiting /tracking/input_bbox",
+                    "UNTRACKED — awaiting /tracking/input_bbox",
                     (50, 50),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.7,
-                    color,
+                    (128, 128, 128),
                     2,
                 )
                 self._publish_debug(frame, msg)
@@ -281,6 +280,7 @@ class LKTrackerNode(Node):
         self.pts_init = good_init.reshape(-1, 1, 2)
         self.pts_prev = good_cur.reshape(-1, 1, 2)
         self.prev_gray = gray
+        self._ever_tracked = True
         self._publish_debug(frame, msg)
 
     # ------------------------------------------------------------------
@@ -316,6 +316,13 @@ class LKTrackerNode(Node):
             cv2.putText(
                 frame, label, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 215, 255), 2
             )
+            # Only enter occlusion-recovery if we've had at least one clean
+            # tracking frame. Without that, the init bbox was likely bad (stale
+            # message, featureless region) — reset cleanly instead.
+            if not self._ever_tracked:
+                self._reset(STATUS_UNTRACKED)
+                self._publish_debug(frame, msg)
+                return
             self._set_status(STATUS_OCCLUDED)
             # Clear LK points so next frame immediately retries ORB;
             # keep smoothed_corners, bbox_corners_init, orb_* for re-detection
