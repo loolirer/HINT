@@ -31,7 +31,7 @@ RUN apt-get update && \
     ros-${ROS_DISTRO}-camera-ros \
     ros-${ROS_DISTRO}-urdf \
     ros-${ROS_DISTRO}-rmw-cyclonedds-cpp \
-    ros-${ROS_DISTRO}-compressed-image-transport
+    ros-${ROS_DISTRO}-compressed-image-transport \
     && rm -rf /var/lib/apt/lists/*
 
 RUN apt-get update && \
@@ -79,6 +79,7 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> ~/.bashrc && \
     echo "source ${COLCON_WS}/install/setup.bash" >> ~/.bashrc && \
     echo "alias cb='colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release'" >> ~/.bashrc && \
+    echo "alias kh='pkill -TERM -f \"ros2 launch\" 2>/dev/null; pkill -TERM -f \"ros2 run\" 2>/dev/null; sleep 1; pkill -9 -f \"ros2\" 2>/dev/null; pkill -9 -f lk_tracker 2>/dev/null; pkill -9 -f visual_servo 2>/dev/null; pkill -9 -f cartographer 2>/dev/null; pkill -9 rviz2 2>/dev/null; ros2 daemon stop 2>/dev/null; ros2 daemon start 2>/dev/null; echo done'" >> ~/.bashrc && \
     echo "export ROS_DOMAIN_ID=30" >> ~/.bashrc && \
     echo 'export LD_LIBRARY_PATH=/usr/local/lib/aarch64-linux-gnu:$LD_LIBRARY_PATH' >> ~/.bashrc && \
     echo "export TURTLEBOT3_MODEL=waffle_pi" >> ~/.bashrc && \
