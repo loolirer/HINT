@@ -56,6 +56,15 @@ def generate_launch_description():
         output="screen",
     )
 
+    visual_servo = Node(
+        package="visual_servoing",
+        executable="visual_servo",
+        output="screen",
+        remappings=[
+            ("/tracking/bbox", "/tracking/bbox"),
+        ],
+    )
+
     rviz2 = Node(
         package="rviz2",
         executable="rviz2",
@@ -76,6 +85,7 @@ def generate_launch_description():
             cartographer,
             occupancy_grid,
             lk_tracker,
+            visual_servo,
             rviz2,
         ]
     )
