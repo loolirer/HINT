@@ -1,0 +1,14 @@
+teleop_twist_joy_node:
+  ros__parameters:
+    joy_config: 'xbox'
+
+    axis_linear.x: 1
+    axis_angular.yaw: 0 
+    
+    scale_linear.x: 0.26
+    scale_angular.yaw: 0.91
+    
+    axis_linear_sign.x: -1.0
+
+    require_enable_button: false
+    enable_button: 4
