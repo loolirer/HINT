@@ -14,9 +14,9 @@ class VisualServoingNode(Node):
 
         # --- Control gains ---
         # Angular: proportional on normalised centre error e ∈ [-1, 1] → rad/s
-        self.declare_parameter("k_yaw", 1.5)
+        self.declare_parameter("k_yaw", 0.05)
         # Linear: proportional on remaining area-ratio error → m/s
-        self.declare_parameter("k_lin", 2.5)
+        self.declare_parameter("k_lin", 0.1)
 
         # --- Limits ---
         self.declare_parameter("max_linear_vel",  0.26)   # m/s  (Waffle Pi rated max)
@@ -36,8 +36,9 @@ class VisualServoingNode(Node):
         # 20 Hz control loop — decoupled from bbox publication rate
         self.create_timer(0.05, self._control_loop)
 
-        self._bbox      = None
-        self._bbox_time = None
+        self._bbox        = None
+        self._bbox_time   = None
+        self._was_moving  = False  # True when last cycle published non-zero velocity
 
         self.get_logger().info("Visual servoing ready — listening on /tracking/bbox.")
 
@@ -54,12 +55,14 @@ class VisualServoingNode(Node):
         cmd.header.stamp    = now.to_msg()
         cmd.header.frame_id = "base_link"
 
-        # Publish zero and bail if bbox is absent or stale
+        # Stop (once) then go silent if bbox is absent or stale
         stale = self._bbox is None or (
             (now - self._bbox_time).nanoseconds * 1e-9 > self._p("bbox_timeout")
         )
         if stale:
-            self._pub.publish(cmd)
+            if self._was_moving:
+                self._pub.publish(cmd)  # one zero command to halt the robot
+                self._was_moving = False
             return
 
         img_w = float(self._p("image_width"))
@@ -86,6 +89,7 @@ class VisualServoingNode(Node):
 
         cmd.twist.linear.x  = v
         cmd.twist.angular.z = w
+        self._was_moving = v > 0.0 or abs(w) > 1e-3
         self._pub.publish(cmd)
 
 
