@@ -29,9 +29,7 @@ class GapDetectorNode(Node):
         # Gaussian kernel width (pixels) for 1-D profile smoothing; must be odd.
         self.declare_parameter("smoothing_kernel", 7)
 
-        self.create_subscription(
-            Image, "/camera/depth/image_raw", self._cb, 1
-        )
+        self.create_subscription(Image, "/camera/depth/image_raw", self._cb, 1)
         self._pub_point = self.create_publisher(PointStamped, "/gap_detector/point", 10)
         self._pub_debug = self.create_publisher(Image, "/gap_detector/debug", 10)
 
@@ -53,9 +51,7 @@ class GapDetectorNode(Node):
 
         # Gaussian smoothing collapses per-pixel noise into a smooth envelope.
         k = int(self._p("smoothing_kernel")) | 1  # force odd
-        profile_smooth = cv2.GaussianBlur(
-            profile.reshape(1, -1), (k, 1), 0
-        ).reshape(-1)
+        profile_smooth = cv2.GaussianBlur(profile.reshape(1, -1), (k, 1), 0).reshape(-1)
 
         # Trough column = darkest = farthest = safest direction.
         gap_x = int(np.argmin(profile_smooth))
@@ -87,9 +83,7 @@ class GapDetectorNode(Node):
         peak_top = sample_row - int(p_norm[gap_x] * graph_h)
 
         # Red cross at the gap position on the sample row.
-        cv2.drawMarker(
-            debug, (gap_x, sample_row), (0, 0, 255), cv2.MARKER_CROSS, 12, 1
-        )
+        cv2.drawMarker(debug, (gap_x, sample_row), (0, 0, 255), cv2.MARKER_CROSS, 12, 1)
 
         self._pub_debug.publish(self.bridge.cv2_to_imgmsg(debug, "bgr8"))
 
