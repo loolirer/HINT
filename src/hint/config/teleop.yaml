@@ -10,5 +10,5 @@ teleop_twist_joy_node:
     
     axis_linear_sign.x: -1.0
 
-    require_enable_button: false
+    require_enable_button: true
     enable_button: 4
