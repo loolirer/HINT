@@ -60,9 +60,6 @@ def generate_launch_description():
         package="visual_servoing",
         executable="visual_servo",
         output="screen",
-        remappings=[
-            ("/tracking/bbox", "/tracking/bbox"),
-        ],
     )
 
     rviz2 = Node(
