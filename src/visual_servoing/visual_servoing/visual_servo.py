@@ -33,7 +33,7 @@ class VisualServoingNode(Node):
         self.declare_parameter("max_linear_vel", 0.26)
         self.declare_parameter("max_angular_vel", 1.82)
         self.declare_parameter("stop_area_ratio", 0.75)
-        self.declare_parameter("min_linear_vel", 0.05)   # m/s — robot dead zone floor
+        self.declare_parameter("min_linear_vel", 0.05)  # m/s — robot dead zone floor
         self.declare_parameter("min_angular_vel", 0.05)  # rad/s — robot dead zone floor
         self.declare_parameter("init_timeout", 5.0)
         self.declare_parameter("control_rate", 20.0)
@@ -84,7 +84,9 @@ class VisualServoingNode(Node):
 
     def _goal_cb(self, goal_request):
         if not self._goal_lock.acquire(blocking=False):
-            self.get_logger().warn("Rejecting goal — another approach is already running.")
+            self.get_logger().warn(
+                "Rejecting goal — another approach is already running."
+            )
             return GoalResponse.REJECT
         return GoalResponse.ACCEPT
 
@@ -181,9 +183,9 @@ class VisualServoingNode(Node):
                 return result
 
             # --- Control law (unchanged from original) ---
-            cx_error = (
-                img_w / 2.0 - (bbox.x_offset + bbox.width / 2.0)
-            ) / (img_w / 2.0)
+            cx_error = (img_w / 2.0 - (bbox.x_offset + bbox.width / 2.0)) / (
+                img_w / 2.0
+            )
             w = self._p("k_yaw") * cx_error
             w = max(-self._p("max_angular_vel"), min(self._p("max_angular_vel"), w))
 
