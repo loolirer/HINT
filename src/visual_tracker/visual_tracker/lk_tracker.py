@@ -39,7 +39,7 @@ class LKTrackerNode(Node):
         self.declare_parameter("ncc_redetect_thresh", 0.75)
         self.declare_parameter("inlier_ratio_thresh", 0.60)
         self.declare_parameter("max_features", 300)
-        self.declare_parameter("min_features", 30)
+        self.declare_parameter("min_features", 10)
 
         # --- Publishers ---
         self.pub_bbox = self.create_publisher(RegionOfInterest, "/tracking/bbox", 10)
