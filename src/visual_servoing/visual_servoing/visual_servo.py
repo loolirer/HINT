@@ -28,11 +28,13 @@ class VisualServoingNode(Node):
         # --- Parameters ---
         self.declare_parameter("image_width", 640)
         self.declare_parameter("image_height", 480)
-        self.declare_parameter("k_yaw", 0.05)
-        self.declare_parameter("k_lin", 0.1)
+        self.declare_parameter("k_yaw", 0.20)
+        self.declare_parameter("k_lin", 0.25)
         self.declare_parameter("max_linear_vel", 0.26)
         self.declare_parameter("max_angular_vel", 1.82)
         self.declare_parameter("stop_area_ratio", 0.75)
+        self.declare_parameter("min_linear_vel", 0.05)   # m/s — robot dead zone floor
+        self.declare_parameter("min_angular_vel", 0.05)  # rad/s — robot dead zone floor
         self.declare_parameter("init_timeout", 5.0)
         self.declare_parameter("control_rate", 20.0)
 
@@ -100,6 +102,7 @@ class VisualServoingNode(Node):
 
     def _run(self, goal_handle):
         goal = goal_handle.request
+        self._bbox = None  # discard any bbox from a previous run
 
         # Delegate initialisation to the tracker.
         resp = self._call_set_target(goal.roi, goal.stamp)
@@ -186,6 +189,16 @@ class VisualServoingNode(Node):
 
             v = self._p("k_lin") * max(0.0, stop_ratio - area_ratio)
             v = min(v, float(self._p("max_linear_vel")))
+
+            # If both outputs are below the robot's dead zone, declare arrived.
+            if v < self._p("min_linear_vel") and abs(w) < self._p("min_angular_vel"):
+                self._call_stop_tracking()
+                self._stop_robot()
+                result = ApproachTarget.Result()
+                result.success = True
+                result.message = "Reached target (velocity below minimum threshold)"
+                goal_handle.succeed()
+                return result
 
             cmd = TwistStamped()
             cmd.header.stamp = self.get_clock().now().to_msg()
