@@ -6,7 +6,7 @@ Bringup package for HINT — groups the launch file, RViz2 configuration, and te
 
 | Path | Purpose |
 |---|---|
-| `launch/bringup.launch.py` | Main bringup: teleop, visual tracker, RViz2 |
+| `launch/bringup.launch.py` | Main bringup: teleop, Cartographer SLAM, visual tracker, visual servo, RViz2 |
 | `config/teleop.yaml` | `teleop_twist_joy` parameters (axes, scales, enable button) |
 | `viz/hint.rviz` | RViz2 layout pre-loaded with the tracking debug view |
 
@@ -29,7 +29,7 @@ ros2 launch hint bringup.launch.py
 | `scale_linear.x` | 0.26 m/s | Maximum linear speed |
 | `scale_angular.yaw` | 0.91 rad/s | Maximum angular speed |
 | `axis_linear_sign.x` | -1.0 | Inverts forward direction |
-| `require_enable_button` | false | No deadman switch required |
+| `require_enable_button` | true | Deadman switch required |
 | `enable_button` | 4 | LB button enables turbo (when `require_enable_button: true`) |
 
 Edit the file and rebuild to apply changes:

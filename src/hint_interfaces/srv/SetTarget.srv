@@ -1,0 +1,5 @@
+sensor_msgs/RegionOfInterest roi
+builtin_interfaces/Time stamp
+---
+bool accepted
+string message

@@ -1,0 +1,10 @@
+# Goal
+sensor_msgs/RegionOfInterest roi
+builtin_interfaces/Time stamp
+---
+# Result
+bool success
+string message
+---
+# Feedback
+string state
