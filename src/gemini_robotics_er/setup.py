@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = "vlm_grounding"
+package_name = "gemini_robotics_er"
 
 setup(
     name=package_name,
@@ -14,7 +14,7 @@ setup(
     zip_safe=True,
     maintainer="loolirer",
     maintainer_email="lorenzo.oliveira@ee.ufcg.edu.br",
-    description="VLM-based visual grounding node using Gemini Robotics-ER",
+    description="Gemini Robotics-ER nodes for HINT",
     license="Apache-2.0",
     extras_require={
         "test": [
@@ -23,7 +23,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "vlm_grounding = vlm_grounding.vlm_grounding:main",
+            "description_detector = gemini_robotics_er.description_detector:main",
         ],
     },
 )

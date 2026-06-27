@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>vlm_grounding</name>
+  <name>gemini_robotics_er</name>
   <version>0.0.0</version>
-  <description>VLM-based visual grounding node using Gemini Robotics-ER</description>
+  <description>Gemini Robotics-ER nodes for HINT</description>
   <maintainer email="lorenzo.oliveira@ee.ufcg.edu.br">loolirer</maintainer>
   <license>Apache-2.0</license>
 

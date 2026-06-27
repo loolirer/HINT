@@ -1,8 +1,20 @@
-# vlm_grounding
+# gemini_robotics_er
 
-VLM-based visual grounding node for HINT. Converts a text description into a bounding box (ROI) on a subscribed camera frame using the Gemini Robotics-ER model (default), then hands the ROI off to the IBVS pipeline.
+ROS2 package of nodes powered by the Gemini Robotics-ER model for HINT.
 
-## Action
+## Nodes
+
+| Executable | Description |
+|---|---|
+| `description_detector` | Grounds a natural-language description to a bounding box (ROI) on a camera frame |
+
+---
+
+## description_detector
+
+Converts a text description into a bounding box (ROI) using the Gemini Robotics-ER model, then hands the ROI off to the IBVS pipeline. Subscribes to `/camera/image_raw/compressed` and keeps a ring buffer of the last 30 frames; the action goal carries only a stamp to select the frame.
+
+### Action
 
 `~/ground_description` (`hint_interfaces/action/GroundDescription`)
 
@@ -16,14 +28,14 @@ VLM-based visual grounding node for HINT. Converts a text description into a bou
 | **Result** `stamp` | `builtin_interfaces/Time` | Stamp of the frame that was grounded |
 | **Feedback** `state` | `string` | `"RUNNING"` while the API call is in flight |
 
-## Topics
+### Topics
 
 | Topic | Type | Direction |
 |---|---|---|
-| `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Sub — buffered ring buffer of the last 30 frames |
-| `~/debug` | `sensor_msgs/Image` | Pub — latest grounded bbox drawn on the input frame |
+| `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Sub — ring buffer of last 30 frames |
+| `~/debug` | `sensor_msgs/Image` | Pub — latest grounded bbox drawn on the matched frame |
 
-## Parameters
+### Parameters
 
 | Parameter | Default | Effect |
 |---|---|---|
@@ -32,12 +44,14 @@ VLM-based visual grounding node for HINT. Converts a text description into a bou
 | `temperature` | `0.0` | Sampling temperature (0.0 for deterministic output) |
 | `api_timeout` | `10.0` | Seconds before the API call is abandoned and the action is aborted |
 
+---
+
 ## API key setup
 
 Place your Gemini API key in `secrets/gemini_api_key.txt` at the repository root, then pass the path as a parameter:
 
 ```bash
-ros2 run vlm_grounding vlm_grounding \
+ros2 run gemini_robotics_er description_detector \
   --ros-args -p api_key_path:=/root/turtlebot3_ws/src/../secrets/gemini_api_key.txt
 ```
 
@@ -46,7 +60,7 @@ Alternatively, export `GEMINI_API_KEY` in the container's environment and omit t
 ## Build
 
 ```bash
-colcon build --symlink-install --packages-select hint_interfaces vlm_grounding
+colcon build --symlink-install --packages-select hint_interfaces gemini_robotics_er
 source install/setup.bash
 ```
 
@@ -55,8 +69,7 @@ source install/setup.bash
 ## Test
 
 ```bash
-# Ground on the latest camera frame
-ros2 action send_goal /vlm_grounding_node/ground_description \
+ros2 action send_goal /description_detector_node/ground_description \
   hint_interfaces/action/GroundDescription \
-  "{stamp: {sec: 0, nanosec: 0}, description: 'the red door on the left'}"
+  "{stamp: {sec: 0, nanosec: 0}, description: 'the door on the left'}"
 ```

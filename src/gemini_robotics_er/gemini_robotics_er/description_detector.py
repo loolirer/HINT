@@ -28,9 +28,9 @@ _BBOX_PROMPT = (
 )
 
 
-class VLMGroundingNode(Node):
+class DescriptionDetectorNode(Node):
     def __init__(self):
-        super().__init__("vlm_grounding_node")
+        super().__init__("description_detector_node")
 
         self.declare_parameter("api_key_path", "")
         self.declare_parameter("model_id", MODEL_ID)
@@ -61,7 +61,9 @@ class VLMGroundingNode(Node):
             callback_group=ReentrantCallbackGroup(),
         )
 
-        self.get_logger().info("VLM grounding node ready — call ~/ground_description.")
+        self.get_logger().info(
+            "Description detector ready — call ~/ground_description."
+        )
 
     # ------------------------------------------------------------------
     # Action callbacks
@@ -282,7 +284,7 @@ class VLMGroundingNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = VLMGroundingNode()
+    node = DescriptionDetectorNode()
     executor = MultiThreadedExecutor()
     executor.add_node(node)
     try:
