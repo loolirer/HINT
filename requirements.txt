@@ -2,3 +2,4 @@ depth-anything-3
 openvino-dev
 onnxruntime
 onnxscript
+google-genai

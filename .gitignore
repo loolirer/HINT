@@ -1,3 +1,6 @@
+# Secrets — never commit real API keys
+secrets/gemini_api_key.txt
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
