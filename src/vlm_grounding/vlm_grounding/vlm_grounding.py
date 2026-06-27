@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+from collections import deque
 
 import cv2
 import rclpy
@@ -39,7 +40,8 @@ class VLMGroundingNode(Node):
         self._client = genai.Client(api_key=self._load_api_key())
         self._bridge = CvBridge()
         self._goal_lock = threading.Lock()
-        self._latest_compressed: CompressedImage | None = None
+        # Ring buffer: last 30 frames keyed by (sec, nanosec) for stamp-based lookup.
+        self._frame_buffer: deque = deque(maxlen=30)
 
         self._debug_pub = self.create_publisher(Image, "~/debug", 10)
         self.create_subscription(
@@ -83,7 +85,8 @@ class VLMGroundingNode(Node):
     # Camera subscriber
 
     def _camera_cb(self, msg):
-        self._latest_compressed = msg
+        key = (msg.header.stamp.sec, msg.header.stamp.nanosec)
+        self._frame_buffer.append((key, msg))
 
     # ------------------------------------------------------------------
     # Main execution
@@ -93,22 +96,17 @@ class VLMGroundingNode(Node):
 
         self._publish_feedback(goal_handle, "RUNNING")
 
-        # Resolve image source to a cv2 BGR frame.
-        if goal.image.width > 0:
-            cv_bgr = self._bridge.imgmsg_to_cv2(goal.image, desired_encoding="bgr8")
-            stamp = goal.image.header.stamp
-        elif self._latest_compressed is not None:
-            cv_bgr = self._bridge.compressed_imgmsg_to_cv2(
-                self._latest_compressed, desired_encoding="bgr8"
-            )
-            stamp = self._latest_compressed.header.stamp
-        else:
-            return self._abort(
-                goal_handle,
-                "No image provided and no camera frame received yet.",
-            )
+        compressed, stamp = self._resolve_frame(goal.stamp)
+        if compressed is None:
+            return self._abort(goal_handle, "No camera frame received yet.")
 
-        pil_img = PILImage.fromarray(cv2.cvtColor(cv_bgr, cv2.COLOR_BGR2RGB))
+        try:
+            cv_bgr = self._bridge.compressed_imgmsg_to_cv2(
+                compressed, desired_encoding="bgr8"
+            )
+            pil_img = PILImage.fromarray(cv2.cvtColor(cv_bgr, cv2.COLOR_BGR2RGB))
+        except Exception as e:
+            return self._abort(goal_handle, f"Image conversion failed: {e}")
 
         if goal_handle.is_cancel_requested:
             return self._cancel(goal_handle)
@@ -178,6 +176,22 @@ class VLMGroundingNode(Node):
 
     # ------------------------------------------------------------------
     # Helpers
+
+    def _resolve_frame(self, stamp):
+        if not self._frame_buffer:
+            return None, None
+        target_key = (stamp.sec, stamp.nanosec)
+        if target_key == (0, 0):
+            _, msg = self._frame_buffer[-1]
+            return msg, msg.header.stamp
+        for buf_key, msg in self._frame_buffer:
+            if buf_key == target_key:
+                return msg, msg.header.stamp
+        self.get_logger().warn(
+            f"Frame with stamp {target_key} not in buffer — using latest."
+        )
+        _, msg = self._frame_buffer[-1]
+        return msg, msg.header.stamp
 
     def _parse_boxes(self, raw):
         text = raw.strip()

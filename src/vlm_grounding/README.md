@@ -1,6 +1,6 @@
 # vlm_grounding
 
-VLM-based visual grounding node for HINT. Converts a text description into a bounding box (ROI) on a provided image using the Gemini Robotics-ER model, then hands the ROI off to the IBVS pipeline.
+VLM-based visual grounding node for HINT. Converts a text description into a bounding box (ROI) on a subscribed camera frame using the Gemini Robotics-ER model (default), then hands the ROI off to the IBVS pipeline.
 
 ## Action
 
@@ -8,19 +8,20 @@ VLM-based visual grounding node for HINT. Converts a text description into a bou
 
 | Field | Type | Description |
 |---|---|---|
-| **Goal** `image` | `sensor_msgs/Image` | Image to ground the description on |
+| **Goal** `stamp` | `builtin_interfaces/Time` | Stamp of the frame to ground on; `{sec: 0, nanosec: 0}` uses the latest received frame |
 | **Goal** `description` | `string` | Natural-language description of the target region |
 | **Result** `success` | `bool` | Whether a matching region was found |
 | **Result** `message` | `string` | Label returned by the model, or error reason |
 | **Result** `roi` | `sensor_msgs/RegionOfInterest` | Bounding box of the matched region |
-| **Result** `stamp` | `builtin_interfaces/Time` | Stamp from the input image header |
+| **Result** `stamp` | `builtin_interfaces/Time` | Stamp of the frame that was grounded |
 | **Feedback** `state` | `string` | `"RUNNING"` while the API call is in flight |
 
 ## Topics
 
 | Topic | Type | Direction |
 |---|---|---|
-| `~/debug` | `sensor_msgs/Image` | Pub — latest grounded bbox drawn on the input image |
+| `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Sub — buffered ring buffer of the last 30 frames |
+| `~/debug` | `sensor_msgs/Image` | Pub — latest grounded bbox drawn on the input frame |
 
 ## Parameters
 
@@ -28,7 +29,8 @@ VLM-based visual grounding node for HINT. Converts a text description into a bou
 |---|---|---|
 | `api_key_path` | `""` | Path to a file containing the Gemini API key; falls back to `GEMINI_API_KEY` env var if empty |
 | `model_id` | `gemini-robotics-er-1.6-preview` | Gemini model to use |
-| `temperature` | `1.0` | Sampling temperature for the model |
+| `temperature` | `0.0` | Sampling temperature (0.0 for deterministic output) |
+| `api_timeout` | `10.0` | Seconds before the API call is abandoned and the action is aborted |
 
 ## API key setup
 
@@ -53,8 +55,8 @@ source install/setup.bash
 ## Test
 
 ```bash
-# Capture a frame and ground a description from the CLI
+# Ground on the latest camera frame
 ros2 action send_goal /vlm_grounding_node/ground_description \
   hint_interfaces/action/GroundDescription \
-  "{image: {}, description: 'the red door on the left'}"
+  "{stamp: {sec: 0, nanosec: 0}, description: 'the red door on the left'}"
 ```

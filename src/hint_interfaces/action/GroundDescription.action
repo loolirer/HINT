@@ -1,5 +1,5 @@
 # Goal
-sensor_msgs/Image image
+builtin_interfaces/Time stamp
 string description
 ---
 # Result
