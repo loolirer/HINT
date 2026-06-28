@@ -8,7 +8,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 
 from geometry_msgs.msg import TwistStamped
-from sensor_msgs.msg import RegionOfInterest
+from sensor_msgs.msg import CameraInfo, RegionOfInterest
 from std_msgs.msg import String
 
 from hint_interfaces.action import ApproachTarget
@@ -26,8 +26,6 @@ class VisualServoingNode(Node):
         super().__init__("visual_servoing_node")
 
         # --- Parameters ---
-        self.declare_parameter("image_width", 640)
-        self.declare_parameter("image_height", 480)
         self.declare_parameter("k_yaw", 0.20)
         self.declare_parameter("k_lin", 0.25)
         self.declare_parameter("max_linear_vel", 0.26)
@@ -47,6 +45,7 @@ class VisualServoingNode(Node):
         )
 
         # --- Subscriptions ---
+        self.create_subscription(CameraInfo, "/camera/camera_info", self._camera_info_cb, 1)
         self.create_subscription(RegionOfInterest, "/tracking/bbox", self._bbox_cb, 10)
         self.create_subscription(
             String, "/tracking/state", self._state_cb, _LATCHED_QOS
@@ -58,6 +57,8 @@ class VisualServoingNode(Node):
         # --- Shared state (written by subscriber threads, read by action loop) ---
         self._bbox = None
         self._tracker_state = STATUS_UNTRACKED
+        self._img_w: int | None = None
+        self._img_h: int | None = None
 
         # Lock to serialise goal acceptance so only one goal runs at a time.
         self._goal_lock = threading.Lock()
@@ -163,12 +164,12 @@ class VisualServoingNode(Node):
             deadline = self.get_clock().now()  # reset so brief UNTRACKED fails fast
 
             bbox = self._bbox
-            if bbox is None:
+            if bbox is None or self._img_w is None:
                 rate.sleep()
                 continue
 
-            img_w = float(self._p("image_width"))
-            img_h = float(self._p("image_height"))
+            img_w = float(self._img_w)
+            img_h = float(self._img_h)
             stop_ratio = float(self._p("stop_area_ratio"))
             area_ratio = (float(bbox.width) * float(bbox.height)) / (img_w * img_h)
 
@@ -221,6 +222,10 @@ class VisualServoingNode(Node):
 
     # ------------------------------------------------------------------
     # Subscriber callbacks
+
+    def _camera_info_cb(self, msg):
+        self._img_w = msg.width
+        self._img_h = msg.height
 
     def _bbox_cb(self, msg):
         self._bbox = msg
