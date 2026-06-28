@@ -4,3 +4,6 @@
 [submodule "src/depth_anything/tools/Depth-Anything-3"]
 	path = src/depth_anything/tools/Depth-Anything-3
 	url = https://github.com/ByteDance-Seed/Depth-Anything-3.git
+[submodule "src/BehaviorTree.ROS2"]
+	path = src/BehaviorTree.ROS2
+	url = https://github.com/BehaviorTree/BehaviorTree.ROS2.git
