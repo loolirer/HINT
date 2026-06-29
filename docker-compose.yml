@@ -30,5 +30,6 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - /tmp/.docker.xauth:/tmp/.docker.xauth:rw
       - ./src:/root/turtlebot3_ws/src
+      - ./secrets:/root/secrets:ro
     privileged: true
     command: bash -c "source /opt/ros/jazzy/setup.bash && bash"
