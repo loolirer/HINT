@@ -164,7 +164,7 @@ class VisualServoingNode(Node):
             deadline = self.get_clock().now()  # reset so brief UNTRACKED fails fast
 
             bbox = self._bbox
-            if bbox is None or self._img_w is None:
+            if bbox is None or not self._img_w or not self._img_h:
                 rate.sleep()
                 continue
 
