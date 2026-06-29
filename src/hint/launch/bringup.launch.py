@@ -62,6 +62,13 @@ def generate_launch_description():
         output="screen",
     )
 
+    description_detector = Node(
+        package="gemini_robotics_er",
+        executable="description_detector",
+        output="screen",
+        parameters=[{"api_key_path": "/root/secrets/gemini_api_key.txt"}],
+    )
+
     rviz2 = Node(
         package="rviz2",
         executable="rviz2",
@@ -83,6 +90,7 @@ def generate_launch_description():
             occupancy_grid,
             lk_tracker,
             visual_servo,
+            description_detector,
             rviz2,
         ]
     )
