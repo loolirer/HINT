@@ -1,6 +1,6 @@
 [submodule "src/turtlebot3"]
 	path = src/turtlebot3
-	url = https://github.com/ROBOTIS-GIT/turtlebot3
+	url = git@github.com:loolirer/turtlebot3.git
 [submodule "src/depth_anything/tools/Depth-Anything-3"]
 	path = src/depth_anything/tools/Depth-Anything-3
 	url = https://github.com/ByteDance-Seed/Depth-Anything-3.git
