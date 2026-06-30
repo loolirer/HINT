@@ -34,6 +34,7 @@ class VisualServoingNode(Node):
         self.declare_parameter("min_linear_vel", 0.05)  # m/s — robot dead zone floor
         self.declare_parameter("min_angular_vel", 0.05)  # rad/s — robot dead zone floor
         self.declare_parameter("init_timeout", 5.0)
+        self.declare_parameter("occlusion_timeout", 5.0)
         self.declare_parameter("control_rate", 20.0)
 
         # --- Tracker service clients ---
@@ -119,8 +120,10 @@ class VisualServoingNode(Node):
 
         rate = self.create_rate(float(self._p("control_rate")))
         init_timeout = float(self._p("init_timeout"))
+        occlusion_timeout = float(self._p("occlusion_timeout"))
         deadline = self.get_clock().now()
         ever_tracking = False
+        occlusion_start = None
 
         while rclpy.ok():
             # --- Cancellation ---
@@ -155,12 +158,23 @@ class VisualServoingNode(Node):
             # --- OCCLUDED: stop robot and wait for recovery ---
             if state == STATUS_OCCLUDED:
                 self._stop_robot()
+                if occlusion_start is None:
+                    occlusion_start = self.get_clock().now()
+                elapsed = (self.get_clock().now() - occlusion_start).nanoseconds * 1e-9
+                if elapsed > occlusion_timeout:
+                    self._call_stop_tracking()
+                    result = ApproachTarget.Result()
+                    result.success = False
+                    result.message = "Occlusion timeout"
+                    goal_handle.abort()
+                    return result
                 self._publish_feedback(goal_handle, "WAITING")
                 rate.sleep()
                 continue
 
             # --- TRACKING ---
             ever_tracking = True
+            occlusion_start = None  # reset occlusion timer on recovery
             deadline = self.get_clock().now()  # reset so brief UNTRACKED fails fast
 
             bbox = self._bbox
