@@ -2,8 +2,12 @@
 <root BTCPP_format="4">
     <BehaviorTree ID="SequentialBins">
       <Sequence>
-        <SubTree ID="ApproachDescribedTarget" description="the blue trash bin"/>
-        <SubTree ID="ApproachDescribedTarget" description="the yellow trash bin"/>
+        <RetryUntilSuccessful num_attempts="2">
+          <SubTree ID="ApproachDescribedTarget" description="the blue trash bin"/>
+        </RetryUntilSuccessful>
+        <RetryUntilSuccessful num_attempts="2">
+          <SubTree ID="ApproachDescribedTarget" description="the yellow trash bin"/>
+        </RetryUntilSuccessful>
       </Sequence>
     </BehaviorTree>
 </root>
