@@ -15,9 +15,11 @@ Send a goal (requires `visual_tracker` to be running):
 ```bash
 ros2 action send_goal /visual_servoing_node/approach_target \
   hint_interfaces/action/ApproachTarget \
-  "{roi: {x_offset: 220, y_offset: 140, width: 200, height: 200, do_rectify: false}, stamp: {sec: 0, nanosec: 0}}" \
+  "{roi: {x_offset: 220, y_offset: 140, width: 200, height: 200, do_rectify: false}, stamp: {sec: 0, nanosec: 0}, setpoint_offset: 0.0}" \
   --feedback
 ```
+
+`setpoint_offset` (`[-1, 1]`, default `0.0`) biases where the target is kept in-frame instead of dead-center — see "Control law" below.
 
 Cancel an active goal:
 
@@ -31,7 +33,7 @@ On goal receipt, the node calls `visual_tracker`'s `set_target` service and star
 
 **Control law**
 
-- **Angular**: proportional on the normalised horizontal centre error `e ∈ [−1, +1]` → `cmd_vel.angular.z`. Keeps the target centred in the frame.
+- **Angular**: proportional on the normalised horizontal error `e ∈ [−1, +1]` between the target and a setpoint → `cmd_vel.angular.z`. The setpoint is frame-center by default, offset by the goal's `setpoint_offset ∈ [-1, 1]` — positive biases the setpoint (and thus the target) toward the right of frame, which curves the approach in from the left, and vice versa. The effective offset is scaled by `max_setpoint_offset` (default `0.75`) so a full `±1` request still leaves a margin at the frame edge instead of pinning the bbox center there — at the edge, half the bbox would already be off-screen.
 - **Linear**: proportional on `(stop_area_ratio − bbox_area/image_area)`, clamped to zero. Velocity ramps naturally to zero as the target fills the frame.
 
 **Action feedback states**
@@ -73,6 +75,7 @@ All parameters are live-adjustable via `ros2 param set`.
 | `max_linear_vel` | 0.26 | m/s cap — Waffle Pi rated maximum |
 | `max_angular_vel` | 1.82 | rad/s cap |
 | `stop_area_ratio` | 0.75 | Fraction of image area at which the robot stops |
+| `max_setpoint_offset` | 0.75 | Scales the goal's `setpoint_offset` — caps how close to the frame edge the setpoint can be pushed |
 | `init_timeout` | 5.0 | Seconds to wait for tracker to reach `TRACKING` before failing |
 | `control_rate` | 20.0 | Control loop rate in Hz |
 | `image_width` | 640 | Camera resolution — used to compute normalised error |

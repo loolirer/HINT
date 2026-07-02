@@ -14,6 +14,8 @@ ROS2 package of nodes powered by the Gemini Robotics-ER model for HINT.
 
 Converts a text description into a bounding box (ROI) using the Gemini Robotics-ER model, then hands the ROI off to the IBVS pipeline. Subscribes to `/camera/image_raw/compressed` and keeps a ring buffer of the last 30 frames; the action goal carries only a stamp to select the frame.
 
+If `description` explicitly asks to approach the target from a side (e.g. `"the blue trash bin, from the left"`) — note "from the left", not "on the left", which instead describes *which* object to ground — the model also classifies that intent and the node maps it to `result.setpoint_offset` via a fixed `{"left": 0.4, "right": -0.4, "center": 0.0}` table (`description_detector.py`'s `_APPROACH_SIDE_OFFSETS`). This is deliberately not the model inventing a numeric bias itself — it only classifies a qualitative side from text it's already reading, and Python does the sign-convention mapping deterministically. Unrecognised/omitted values fall back to `0.0` (centered), so callers that don't ask for a side see unchanged behaviour.
+
 ### Action
 
 `~/ground_description` (`hint_interfaces/action/GroundDescription`)
@@ -26,6 +28,7 @@ Converts a text description into a bounding box (ROI) using the Gemini Robotics-
 | **Result** `message` | `string` | Label returned by the model, or error reason |
 | **Result** `roi` | `sensor_msgs/RegionOfInterest` | Bounding box of the matched region |
 | **Result** `stamp` | `builtin_interfaces/Time` | Stamp of the frame that was grounded |
+| **Result** `setpoint_offset` | `float32` | Approach bias in `[-1, 1]` parsed from `description`; `0.0` (default) is centered — forwarded to `ApproachTarget`'s `setpoint_offset` |
 | **Feedback** `state` | `string` | `"RUNNING"` while the API call is in flight |
 
 ### Topics
@@ -72,4 +75,12 @@ source install/setup.bash
 ros2 action send_goal /description_detector_node/ground_description \
   hint_interfaces/action/GroundDescription \
   "{stamp: {sec: 0, nanosec: 0}, description: 'the door on the left'}"
+```
+
+Requesting an approach side (check `setpoint_offset` in the result — should come back `0.4`, not `0.0`):
+
+```bash
+ros2 action send_goal /description_detector_node/ground_description \
+  hint_interfaces/action/GroundDescription \
+  "{stamp: {sec: 0, nanosec: 0}, description: 'the blue trash bin, approach from the left'}"
 ```

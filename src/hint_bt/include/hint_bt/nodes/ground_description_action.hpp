@@ -23,6 +23,7 @@ public:
       BT::InputPort<std::string>("description"),
       BT::OutputPort<sensor_msgs::msg::RegionOfInterest>("roi"),
       BT::OutputPort<builtin_interfaces::msg::Time>("stamp"),
+      BT::OutputPort<double>("setpoint_offset"),
     });
   }
 
@@ -42,6 +43,7 @@ public:
     }
     setOutput("roi",   wr.result->roi);
     setOutput("stamp", wr.result->stamp);
+    setOutput<double>("setpoint_offset", static_cast<double>(wr.result->setpoint_offset));
     return BT::NodeStatus::SUCCESS;
   }
 

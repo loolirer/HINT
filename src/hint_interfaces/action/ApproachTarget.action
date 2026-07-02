@@ -1,6 +1,12 @@
 # Goal
 sensor_msgs/RegionOfInterest roi
 builtin_interfaces/Time stamp
+# Normalized horizontal setpoint offset in [-1, 1] for where the target is
+# kept in the camera frame instead of dead-center: 0.0 (also the unset
+# default) centers it: unchanged, straight-on approach. Positive values bias
+# the target toward the right of frame, which curves the approach in from
+# the left; negative values do the opposite.
+float32 setpoint_offset
 ---
 # Result
 bool success

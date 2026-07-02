@@ -7,6 +7,10 @@ bool success
 string message
 sensor_msgs/RegionOfInterest roi
 builtin_interfaces/Time stamp
+# Normalized approach bias in [-1, 1], parsed from `description` if it names a
+# side (e.g. "from the left"); 0.0 (also the unset default) means centered —
+# see ApproachTarget.action's setpoint_offset for the sign convention.
+float32 setpoint_offset
 ---
 # Feedback
 string state

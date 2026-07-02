@@ -47,6 +47,7 @@ Drives the robot toward a visual target until the stopping condition is met.
 |---|---|---|
 | `roi` | `sensor_msgs/RegionOfInterest` | Initial tracking region, forwarded to `SetTarget` |
 | `stamp` | `builtin_interfaces/Time` | Source frame timestamp; `{sec: 0, nanosec: 0}` uses the next arriving frame |
+| `setpoint_offset` | `float32` | Normalized horizontal setpoint bias in `[-1, 1]`; `0.0` (also the unset default) keeps the target dead-center — positive biases it right (approach curves in from the left), negative biases it left |
 
 **Result**
 

@@ -19,6 +19,8 @@ Every HINT-specific BT leaf type is registered once, in one place: `hint_bt::reg
 
 Adding a new leaf: drop a new `RosActionNode<...>` subclass header under `include/hint_bt/nodes/`, register it inside `registerHintNodes()`. No executable needs to change — `bt_executor_node` picks up any tree that references it.
 
+`GroundDescriptionAction` and `ApproachTargetAction` both carry a `setpoint_offset` port (`double`, `[-1, 1]`) — `GroundDescriptionAction` outputs it (parsed from `description` by `description_detector`, see `gemini_robotics_er/README.md`) and `ApproachTargetAction` takes it as an input (default `0.0`, i.e. centered) to bias where the target is kept in-frame during the approach. See `hint_interfaces/action/ApproachTarget.action` for the sign convention.
+
 ---
 
 ## bt_executor_node
@@ -55,7 +57,7 @@ Every `.xml` file under `behaviors/` is installed to `share/hint_bt/behaviors` a
 
 | File | Tree ID | Description |
 |---|---|---|
-| `approach_described_target.xml` | `ApproachDescribedTarget` | Grounds a text description to a bbox (`GroundDescriptionAction`), then drives to it (`ApproachTargetAction`). Its `description` port is left as an unbound blackboard reference (`{description}`) — it's meant to be driven as a `SubTree`, which binds `description` from the caller. |
+| `approach_described_target.xml` | `ApproachDescribedTarget` | Grounds a text description to a bbox (`GroundDescriptionAction`), then drives to it (`ApproachTargetAction`), forwarding `GroundDescriptionAction`'s `setpoint_offset` output straight into `ApproachTargetAction`'s input via `{setpoint_offset}`. Its `description` port is left as an unbound blackboard reference (`{description}`) — it's meant to be driven as a `SubTree`, which binds `description` from the caller. |
 | `sequential_bins.xml` | `SequentialBins` | Visits the blue trash bin, then the yellow trash bin — two `SubTree` calls into `ApproachDescribedTarget`, each binding its own `description`. |
 
 Preloading happens once, in the node constructor, before it starts spinning — editing a file under `behaviors/` needs a **node restart** to take effect (no rebuild, since `--symlink-install` mirrors `install(DIRECTORY behaviors/ ...)` straight to the source file).
@@ -113,3 +115,19 @@ ros2 action send_goal /bt_executor_node/execute_behavior_tree btcpp_ros2_interfa
 ```
 
 `jq -n --arg tree ... --arg xml ... '{target_tree: $tree, payload: $xml}'` builds the JSON goal object with `jq` handling all quote escaping — no manual `\"` needed even for an inline XML string. `--rawfile xml <path>` (instead of `--arg xml '...'`) works the same way for sending a whole file's content verbatim; just don't point it at a tree ID that's already preloaded from `behaviors/` — `registerBehaviorTreeFromText` registers into the same factory as the preload step, and re-registering the same `<BehaviorTree ID="...">` a second time throws.
+
+### Approach a target from a specific side
+
+`description`s that name an approach side (`"from the left"` / `"from the right"`, not `"on the left"` — see `gemini_robotics_er/README.md`) get parsed by the grounding model into `GroundDescriptionAction`'s `setpoint_offset` output, which `approach_described_target.xml` already forwards straight into `ApproachTargetAction`:
+
+Same as the "compose a one-off tree" example above — `ApproachDescribedTarget` needs `description` bound, which only happens via `SubTree`:
+
+```bash
+ros2 action send_goal /bt_executor_node/execute_behavior_tree btcpp_ros2_interfaces/action/ExecuteTree "$(jq -n --arg tree AdHocApproach --arg xml '<?xml version="1.0"?><root BTCPP_format="4"><BehaviorTree ID="AdHocApproach"><SubTree ID="ApproachDescribedTarget" description="the red trash bin, approach from the left"/></BehaviorTree></root>' '{target_tree: $tree, payload: $xml}')" --feedback
+```
+
+If you'd rather bypass grounding and set the bias explicitly, `ApproachTargetAction` also takes `setpoint_offset` as a plain XML literal (it doesn't have to come from the blackboard):
+
+```xml
+<ApproachTargetAction roi="{roi}" stamp="{stamp}" setpoint_offset="-0.4"/>
+```

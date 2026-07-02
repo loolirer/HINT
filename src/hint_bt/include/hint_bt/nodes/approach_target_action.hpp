@@ -22,13 +22,17 @@ public:
     return providedBasicPorts({
       BT::InputPort<sensor_msgs::msg::RegionOfInterest>("roi"),
       BT::InputPort<builtin_interfaces::msg::Time>("stamp"),
+      BT::InputPort<double>(
+        "setpoint_offset", 0.0,
+        "Normalized horizontal setpoint bias in [-1, 1]; 0.0 keeps the target centered"),
     });
   }
 
   bool setGoal(Goal & goal) override
   {
-    goal.roi   = getInput<sensor_msgs::msg::RegionOfInterest>("roi").value();
-    goal.stamp = getInput<builtin_interfaces::msg::Time>("stamp").value();
+    goal.roi             = getInput<sensor_msgs::msg::RegionOfInterest>("roi").value();
+    goal.stamp           = getInput<builtin_interfaces::msg::Time>("stamp").value();
+    goal.setpoint_offset = static_cast<float>(getInput<double>("setpoint_offset").value());
     return true;
   }
 

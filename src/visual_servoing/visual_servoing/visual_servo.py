@@ -31,8 +31,9 @@ class VisualServoingNode(Node):
         self.declare_parameter("max_linear_vel", 0.26)
         self.declare_parameter("max_angular_vel", 1.82)
         self.declare_parameter("stop_area_ratio", 0.50)
-        self.declare_parameter("min_linear_vel", 0.01)  # m/s — robot dead zone floor
-        self.declare_parameter("min_angular_vel", 0.01)  # rad/s — robot dead zone floor
+        self.declare_parameter("max_setpoint_offset", 0.50)  # caps how close to the frame edge the setpoint can be pushed
+        self.declare_parameter("min_linear_vel", 0.05)  # m/s — robot dead zone floor
+        self.declare_parameter("min_angular_vel", 0.05)  # rad/s — robot dead zone floor
         self.declare_parameter("init_timeout", 5.0)
         self.declare_parameter("occlusion_timeout", 5.0)
         self.declare_parameter("control_rate", 20.0)
@@ -107,6 +108,7 @@ class VisualServoingNode(Node):
     def _run(self, goal_handle):
         goal = goal_handle.request
         self._bbox = None  # discard any bbox from a previous run
+        setpoint_offset = max(0.0, min(1.0, float(goal.setpoint_offset)))
 
         # Delegate initialisation to the tracker.
         resp = self._call_set_target(goal.roi, goal.stamp)
@@ -197,8 +199,17 @@ class VisualServoingNode(Node):
                 goal_handle.succeed()
                 return result
 
-            # --- Control law (unchanged from original) ---
-            cx_error = (img_w / 2.0 - (bbox.x_offset + bbox.width / 2.0)) / (
+            # --- Control law ---
+            # setpoint_offset biases where the target is kept in-frame instead of
+            # dead-center (0.0): positive shifts it right, curving the approach in
+            # from the left, and vice versa. See ApproachTarget.action.
+            # max_setpoint_offset caps that bias so the setpoint (and thus the
+            # bbox center) never reaches the frame edge, where half the bbox
+            # would already be off-screen — full ±1 requests still leave a
+            # margin at the edges instead of pinning the setpoint there.
+            max_offset = max(0.0, min(1.0, float(self._p("max_setpoint_offset"))))
+            setpoint = img_w / 2.0 + setpoint_offset * max_offset * (img_w / 2.0)
+            cx_error = (setpoint - (bbox.x_offset + bbox.width / 2.0)) / (
                 img_w / 2.0
             )
             w = self._p("k_yaw") * cx_error

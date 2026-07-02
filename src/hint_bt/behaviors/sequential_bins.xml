@@ -3,10 +3,10 @@
     <BehaviorTree ID="SequentialBins">
       <Sequence>
         <RetryUntilSuccessful num_attempts="2">
-          <SubTree ID="ApproachDescribedTarget" description="the blue trash bin"/>
+          <SubTree ID="ApproachDescribedTarget" description="the blue trash bin from the left"/>
         </RetryUntilSuccessful>
         <RetryUntilSuccessful num_attempts="2">
-          <SubTree ID="ApproachDescribedTarget" description="the yellow trash bin"/>
+          <SubTree ID="ApproachDescribedTarget" description="the yellow trash bin from the left"/>
         </RetryUntilSuccessful>
       </Sequence>
     </BehaviorTree>
