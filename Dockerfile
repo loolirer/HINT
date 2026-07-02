@@ -51,6 +51,9 @@ RUN apt-get update && \
     python3-ply \
     libglib2.0-dev \
     libgstreamer-plugins-base1.0-dev \
+    fzf \
+    tree \
+    jq \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR ${COLCON_WS}

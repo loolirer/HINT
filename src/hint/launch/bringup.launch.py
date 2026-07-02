@@ -69,6 +69,18 @@ def generate_launch_description():
         parameters=[{"api_key_path": "/root/secrets/gemini_api_key.txt"}],
     )
 
+    bt_executor = Node(
+        package="hint_bt",
+        executable="bt_executor_node",
+        output="screen",
+        parameters=[
+            {
+                "action_name": "/bt_executor_node/execute_behavior_tree",
+                "behavior_trees": ["hint_bt/behaviors"],
+            }
+        ],
+    )
+
     rviz2 = Node(
         package="rviz2",
         executable="rviz2",
@@ -91,6 +103,7 @@ def generate_launch_description():
             lk_tracker,
             visual_servo,
             description_detector,
+            bt_executor,
             rviz2,
         ]
     )
