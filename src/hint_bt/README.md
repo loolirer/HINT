@@ -68,17 +68,6 @@ ros2 action send_goal /bt_executor_node/execute_behavior_tree btcpp_ros2_interfa
   --feedback
 ```
 
----
-
-## Build
-
-```bash
-colcon build --symlink-install --packages-select hint_interfaces behaviortree_ros2 hint_bt
-source install/setup.bash
-```
-
-`behaviortree_ros2` must be built from source (clone `BehaviorTree.ROS2` into `src/`); `hint_interfaces` must be built before `hint_bt`.
-
 ## Run
 
 ```bash
@@ -97,36 +86,30 @@ ros2 run hint_bt bt_executor_node --ros-args \
 
 Drop `-p behavior_trees:=...` if you only want to send fully self-contained, ad-hoc trees per goal (see the first example below) and don't need the preloaded ones.
 
-### Example: ground a description and approach it
+### Ground a description and approach it
 
 Two-leaf `Sequence` — `GroundDescriptionAction` locates "the left trash bin" and hands its ROI to `ApproachTargetAction`, which drives the robot there. Paste as-is into a terminal once bringup is running:
 
 ```bash
-ros2 action send_goal /bt_executor_node/execute_behavior_tree btcpp_ros2_interfaces/action/ExecuteTree \
-  '{target_tree: "ApproachDescribedTarget", payload: "<?xml version=\"1.0\"?><root BTCPP_format=\"4\"><BehaviorTree ID=\"ApproachDescribedTarget\"><Sequence><GroundDescriptionAction description=\"the left trash bin\" roi=\"{roi}\" stamp=\"{stamp}\"/><ApproachTargetAction roi=\"{roi}\" stamp=\"{stamp}\"/></Sequence></BehaviorTree></root>"}' \
-  --feedback
+ros2 action send_goal /bt_executor_node/execute_behavior_tree btcpp_ros2_interfaces/action/ExecuteTree '{target_tree: "ApproachDescribedTarget", payload: "<?xml version=\"1.0\"?><root BTCPP_format=\"4\"><BehaviorTree ID=\"ApproachDescribedTarget\"><Sequence><GroundDescriptionAction description=\"the left trash bin\" roi=\"{roi}\" stamp=\"{stamp}\"/><ApproachTargetAction roi=\"{roi}\" stamp=\"{stamp}\"/></Sequence></BehaviorTree></root>"}' --feedback
 ```
 
 Swap `the left trash bin` for any other description — it's a literal string embedded directly in the XML, no blackboard indirection needed for a one-shot goal like this. `{roi}` / `{stamp}` remain blackboard placeholders so `GroundDescriptionAction`'s output feeds `ApproachTargetAction`'s input. `target_tree` must equal the `<BehaviorTree ID="...">` value inside `payload`.
 
-### Example: run the preloaded sequential-bins mission
+### Run the preloaded sequential-bins mission
 
 `SequentialBins` (`behaviors/sequential_bins.xml`) is preloaded by `bringup.launch.py`, so it needs no `payload` at all — see [`behaviors/` — preloaded trees](#behaviors--preloaded-trees) above:
 
 ```bash
-ros2 action send_goal /bt_executor_node/execute_behavior_tree btcpp_ros2_interfaces/action/ExecuteTree \
-  "{target_tree: 'SequentialBins', payload: ''}" \
-  --feedback
+ros2 action send_goal /bt_executor_node/execute_behavior_tree btcpp_ros2_interfaces/action/ExecuteTree "{target_tree: 'SequentialBins', payload: ''}" --feedback
 ```
 
-### Example: compose a one-off tree that reuses a preloaded `SubTree`
+### Compose a one-off tree that reuses a preloaded `SubTree`
 
 Because `ApproachDescribedTarget` is already registered in the factory (preloaded from `behaviors/`), a fresh ad-hoc tree sent as `payload` can `SubTree` into it without inlining its definition — this is the key benefit of splitting trees across files instead of writing one big document per goal:
 
 ```bash
-ros2 action send_goal /bt_executor_node/execute_behavior_tree btcpp_ros2_interfaces/action/ExecuteTree \
-  "$(jq -n --arg tree AdHocApproach --arg xml '<?xml version="1.0"?><root BTCPP_format="4"><BehaviorTree ID="AdHocApproach"><SubTree ID="ApproachDescribedTarget" description="the red trash bin"/></BehaviorTree></root>' '{target_tree: $tree, payload: $xml}')" \
-  --feedback
+ros2 action send_goal /bt_executor_node/execute_behavior_tree btcpp_ros2_interfaces/action/ExecuteTree "$(jq -n --arg tree AdHocApproach --arg xml '<?xml version="1.0"?><root BTCPP_format="4"><BehaviorTree ID="AdHocApproach"><SubTree ID="ApproachDescribedTarget" description="the red trash bin"/></BehaviorTree></root>' '{target_tree: $tree, payload: $xml}')" --feedback
 ```
 
 `jq -n --arg tree ... --arg xml ... '{target_tree: $tree, payload: $xml}'` builds the JSON goal object with `jq` handling all quote escaping — no manual `\"` needed even for an inline XML string. `--rawfile xml <path>` (instead of `--arg xml '...'`) works the same way for sending a whole file's content verbatim; just don't point it at a tree ID that's already preloaded from `behaviors/` — `registerBehaviorTreeFromText` registers into the same factory as the preload step, and re-registering the same `<BehaviorTree ID="...">` a second time throws.
