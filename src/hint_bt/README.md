@@ -49,6 +49,27 @@ Other `bt_server.*` parameters (`tick_frequency`, `groot2_port`, `plugins`, `beh
 
 ---
 
+## `behaviors/` — preloaded trees
+
+Every `.xml` file under `behaviors/` is installed to `share/hint_bt/behaviors` and loaded into the node's BT factory once at startup, via the `bt_server.behavior_trees` param (set to `["hint_bt/behaviors"]` in `bringup.launch.py`) — `RegisterBehaviorTrees` → `LoadBehaviorTrees` (`behaviortree_ros2/src/bt_utils.cpp`) iterates the directory and calls `factory.registerBehaviorTreeFromFile()` on each file. Since every file lands in the **same** factory, a `<BehaviorTree ID="...">` defined in one file can be referenced from another via `<SubTree ID="..."/>` without inlining it.
+
+| File | Tree ID | Description |
+|---|---|---|
+| `approach_described_target.xml` | `ApproachDescribedTarget` | Grounds a text description to a bbox (`GroundDescriptionAction`), then drives to it (`ApproachTargetAction`). Its `description` port is left as an unbound blackboard reference (`{description}`) — it's meant to be driven as a `SubTree`, which binds `description` from the caller. |
+| `sequential_bins.xml` | `SequentialBins` | Visits the blue trash bin, then the yellow trash bin — two `SubTree` calls into `ApproachDescribedTarget`, each binding its own `description`. |
+
+Preloading happens once, in the node constructor, before it starts spinning — editing a file under `behaviors/` needs a **node restart** to take effect (no rebuild, since `--symlink-install` mirrors `install(DIRECTORY behaviors/ ...)` straight to the source file).
+
+Because it's preloaded, a tree in `behaviors/` can be run directly with an **empty `payload`** — no XML needs to cross the wire at all:
+
+```bash
+ros2 action send_goal /bt_executor_node/execute_behavior_tree btcpp_ros2_interfaces/action/ExecuteTree \
+  "{target_tree: 'SequentialBins', payload: ''}" \
+  --feedback
+```
+
+---
+
 ## Build
 
 ```bash
@@ -64,13 +85,17 @@ source install/setup.bash
 ros2 launch hint bringup.launch.py
 ```
 
-`bringup.launch.py` starts `bt_executor_node` with `action_name` set to the fully-qualified `/bt_executor_node/execute_behavior_tree` (not `~/execute_behavior_tree` — unquoted tildes get expanded by the shell, not ROS2, when passed on a command line, which silently renames the server; see `hint/launch/bringup.launch.py`).
+`bringup.launch.py` starts `bt_executor_node` with `action_name` set to the fully-qualified `/bt_executor_node/execute_behavior_tree` (not `~/execute_behavior_tree` — unquoted tildes get expanded by the shell, not ROS2, when passed on a command line, which silently renames the server; see `hint/launch/bringup.launch.py`) and `behavior_trees` set to `["hint_bt/behaviors"]` so everything under `behaviors/` is preloaded.
 
 To run it standalone instead (e.g. while iterating on `hint_bt` without the rest of the stack):
 
 ```bash
-ros2 run hint_bt bt_executor_node --ros-args -p action_name:=/bt_executor_node/execute_behavior_tree
+ros2 run hint_bt bt_executor_node --ros-args \
+  -p action_name:=/bt_executor_node/execute_behavior_tree \
+  -p behavior_trees:="[hint_bt/behaviors]"
 ```
+
+Drop `-p behavior_trees:=...` if you only want to send fully self-contained, ad-hoc trees per goal (see the first example below) and don't need the preloaded ones.
 
 ### Example: ground a description and approach it
 
@@ -83,3 +108,25 @@ ros2 action send_goal /bt_executor_node/execute_behavior_tree btcpp_ros2_interfa
 ```
 
 Swap `the left trash bin` for any other description — it's a literal string embedded directly in the XML, no blackboard indirection needed for a one-shot goal like this. `{roi}` / `{stamp}` remain blackboard placeholders so `GroundDescriptionAction`'s output feeds `ApproachTargetAction`'s input. `target_tree` must equal the `<BehaviorTree ID="...">` value inside `payload`.
+
+### Example: run the preloaded sequential-bins mission
+
+`SequentialBins` (`behaviors/sequential_bins.xml`) is preloaded by `bringup.launch.py`, so it needs no `payload` at all — see [`behaviors/` — preloaded trees](#behaviors--preloaded-trees) above:
+
+```bash
+ros2 action send_goal /bt_executor_node/execute_behavior_tree btcpp_ros2_interfaces/action/ExecuteTree \
+  "{target_tree: 'SequentialBins', payload: ''}" \
+  --feedback
+```
+
+### Example: compose a one-off tree that reuses a preloaded `SubTree`
+
+Because `ApproachDescribedTarget` is already registered in the factory (preloaded from `behaviors/`), a fresh ad-hoc tree sent as `payload` can `SubTree` into it without inlining its definition — this is the key benefit of splitting trees across files instead of writing one big document per goal:
+
+```bash
+ros2 action send_goal /bt_executor_node/execute_behavior_tree btcpp_ros2_interfaces/action/ExecuteTree \
+  "$(jq -n --arg tree AdHocApproach --arg xml '<?xml version="1.0"?><root BTCPP_format="4"><BehaviorTree ID="AdHocApproach"><SubTree ID="ApproachDescribedTarget" description="the red trash bin"/></BehaviorTree></root>' '{target_tree: $tree, payload: $xml}')" \
+  --feedback
+```
+
+`jq -n --arg tree ... --arg xml ... '{target_tree: $tree, payload: $xml}'` builds the JSON goal object with `jq` handling all quote escaping — no manual `\"` needed even for an inline XML string. `--rawfile xml <path>` (instead of `--arg xml '...'`) works the same way for sending a whole file's content verbatim; just don't point it at a tree ID that's already preloaded from `behaviors/` — `registerBehaviorTreeFromText` registers into the same factory as the preload step, and re-registering the same `<BehaviorTree ID="...">` a second time throws.

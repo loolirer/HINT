@@ -51,4 +51,8 @@ install(DIRECTORY include/
   DESTINATION include
 )
 
+install(DIRECTORY behaviors/
+  DESTINATION share/${PROJECT_NAME}/behaviors
+)
+
 ament_package()

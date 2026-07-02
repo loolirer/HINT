@@ -73,7 +73,12 @@ def generate_launch_description():
         package="hint_bt",
         executable="bt_executor_node",
         output="screen",
-        parameters=[{"action_name": "/bt_executor_node/execute_behavior_tree"}],
+        parameters=[
+            {
+                "action_name": "/bt_executor_node/execute_behavior_tree",
+                "behavior_trees": ["hint_bt/behaviors"],
+            }
+        ],
     )
 
     rviz2 = Node(
