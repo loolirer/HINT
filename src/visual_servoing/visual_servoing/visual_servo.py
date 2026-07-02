@@ -30,9 +30,9 @@ class VisualServoingNode(Node):
         self.declare_parameter("k_lin", 0.25)
         self.declare_parameter("max_linear_vel", 0.26)
         self.declare_parameter("max_angular_vel", 1.82)
-        self.declare_parameter("stop_area_ratio", 0.75)
-        self.declare_parameter("min_linear_vel", 0.05)  # m/s — robot dead zone floor
-        self.declare_parameter("min_angular_vel", 0.05)  # rad/s — robot dead zone floor
+        self.declare_parameter("stop_area_ratio", 0.50)
+        self.declare_parameter("min_linear_vel", 0.01)  # m/s — robot dead zone floor
+        self.declare_parameter("min_angular_vel", 0.01)  # rad/s — robot dead zone floor
         self.declare_parameter("init_timeout", 5.0)
         self.declare_parameter("occlusion_timeout", 5.0)
         self.declare_parameter("control_rate", 20.0)
