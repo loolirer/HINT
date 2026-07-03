@@ -75,9 +75,9 @@ class LKTrackerNode(Node):
     # Services
 
     def _srv_set_target(self, request, response):
+        self._reset(STATUS_UNTRACKED)
         self._pending_roi = request.roi
         self._pending_stamp = request.stamp
-        self.initialized = False
         response.accepted = True
         response.message = "Target accepted — initialising on next matching frame."
         self.get_logger().info("New target received via set_target.")
