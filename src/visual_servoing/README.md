@@ -46,8 +46,8 @@ On goal receipt, the node calls `visual_tracker`'s `set_target` service and star
 
 | Outcome | Condition |
 |---|---|
-| `success = true` | `bbox_area / image_area` reached `stop_area_ratio` |
-| `success = false` | Tracker stayed `UNTRACKED` beyond `init_timeout`, or target lost after tracking, or goal cancelled |
+| `success = true` | `bbox_area / image_area` reached `stop_area_ratio`, **or** both linear and angular outputs fell below their dead-zone floors (`min_linear_vel`, `min_angular_vel`) |
+| `success = false` | Tracker stayed `UNTRACKED` beyond `init_timeout`, target lost beyond `occlusion_timeout`, or goal cancelled |
 
 Only one goal is accepted at a time; new goals are rejected while one is active.
 
@@ -56,6 +56,7 @@ Only one goal is accepted at a time; new goals are rejected while one is active.
 | Interface | Type | Direction |
 |---|---|---|
 | `~/approach_target` | `hint_interfaces/ApproachTarget` | Action server |
+| `/camera/camera_info` | `sensor_msgs/CameraInfo` | Sub — image width/height for normalisation |
 | `/tracking/state` | `std_msgs/String` (latched) | Sub — from `visual_tracker` |
 | `/tracking/bbox` | `sensor_msgs/RegionOfInterest` | Sub — from `visual_tracker` |
 | `/cmd_vel` | `geometry_msgs/TwistStamped` | Pub |
@@ -68,14 +69,15 @@ All parameters are live-adjustable via `ros2 param set`.
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `k_yaw` | 0.05 | Angular gain (rad/s per unit normalised error) |
-| `k_lin` | 0.10 | Linear gain (m/s per unit area-ratio error) |
+| `k_yaw` | 0.20 | Angular gain (rad/s per unit normalised error) |
+| `k_lin` | 0.25 | Linear gain (m/s per unit area-ratio error) |
 | `max_linear_vel` | 0.26 | m/s cap — Waffle Pi rated maximum |
 | `max_angular_vel` | 1.82 | rad/s cap |
+| `min_linear_vel` | 0.05 | Dead-zone floor for linear velocity; arrival declared if both `v` and `w` fall below floors |
+| `min_angular_vel` | 0.05 | Dead-zone floor for angular velocity |
 | `stop_area_ratio` | 0.75 | Fraction of image area at which the robot stops |
 | `init_timeout` | 5.0 | Seconds to wait for tracker to reach `TRACKING` before failing |
+| `occlusion_timeout` | 5.0 | Seconds in `OCCLUDED` state before aborting with failure |
 | `control_rate` | 20.0 | Control loop rate in Hz |
-| `image_width` | 640 | Camera resolution — used to compute normalised error |
-| `image_height` | 480 | Camera resolution — used to compute area ratio |
 
 ---

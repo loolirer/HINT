@@ -1,8 +1,10 @@
-# Depth-Anything
+# depth_anything
 
-Tools and utilities for working with the Depth-Anything models, including exporting models to ONNX for inference.
+Depth-Anything V3 monocular depth inference via OpenVINO, targeting the iGPU (`device=AUTO`), together with the tooling to export the model to ONNX. **Output convention**: `mono8`, **black = close, white = far** (raw disparity is percentile-normalized per frame, then inverted with `cv2.bitwise_not`).
 
 ## Usage
+
+Export the ONNX model first, then build and run the node:
 
 1. From the `tools/Depth-Anything-3` repository root, install the package in editable mode:
     ```bash
@@ -17,10 +19,28 @@ Tools and utilities for working with the Depth-Anything models, including export
     ```
     Height and width must be a multiple of 14 and must follow as closely as possible the image height and width proportions.
 
-4. Run the node!
-
+4. Build and run the node:
     ```bash
+    colcon build --symlink-install --packages-select depth_anything
+    source install/setup.bash
     ros2 run depth_anything depth_anything
     ```
+
+## Interfaces
+
+| Topic | Type | Direction |
+|---|---|---|
+| `/camera/image_raw` | `sensor_msgs/Image` | Sub — raw (not compressed) |
+| `/camera/depth/image_raw` | `sensor_msgs/Image` (`mono8`) | Pub — black=close, white=far |
+
+## Parameters
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `model_path` | package share `models/da3-base.onnx` | Path to the exported ONNX model |
+| `device` | `AUTO` | OpenVINO device (`AUTO`/`GPU`/`CPU`) |
+| `percentile_low` | 2.0 | Lower percentile for per-frame normalization |
+| `percentile_high` | 98.0 | Upper percentile for per-frame normalization |
+| `ema_alpha` | 1.0 | Temporal smoothing (1.0 = no smoothing) |
 
 ---

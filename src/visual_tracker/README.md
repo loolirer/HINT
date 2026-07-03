@@ -82,7 +82,7 @@ All parameters are live-adjustable via `ros2 param set`.
 | `fb_thresh` | 2.0 | Forward-backward round-trip tolerance in pixels |
 | `ema_alpha` | 0.20 | Corner smoothing weight (lower = smoother, more lag) |
 | `max_features` | 300 | Max corners detected in the ROI at init |
-| `min_features` | 30 | Minimum surviving points before declaring occlusion |
+| `min_features` | 10 | Minimum surviving points before declaring occlusion |
 
 ## Tuning
 
