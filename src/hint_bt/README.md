@@ -71,7 +71,7 @@ ros2 action send_goal /bt_executor_node/execute_behavior_tree btcpp_ros2_interfa
   --feedback
 ```
 
-## Run
+## Usage
 
 ```bash
 ros2 launch hint bringup.launch.py
@@ -116,3 +116,5 @@ ros2 action send_goal /bt_executor_node/execute_behavior_tree btcpp_ros2_interfa
 ```
 
 `jq -n --arg tree ... --arg xml ... '{target_tree: $tree, payload: $xml}'` builds the JSON goal object with `jq` handling all quote escaping — no manual `\"` needed even for an inline XML string. `--rawfile xml <path>` (instead of `--arg xml '...'`) works the same way for sending a whole file's content verbatim; just don't point it at a tree ID that's already preloaded from `behaviors/` — `registerBehaviorTreeFromText` registers into the same factory as the preload step, and re-registering the same `<BehaviorTree ID="...">` a second time throws.
+
+---

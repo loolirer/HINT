@@ -2,6 +2,8 @@
 
 Custom ROS2 interface definitions for HINT. This is an `ament_cmake` package that must be built before any Python package that uses these interfaces.
 
+## Usage
+
 ```bash
 colcon build --symlink-install --packages-select hint_interfaces
 source install/setup.bash

@@ -2,14 +2,6 @@
 
 Finds the largest free-space gap in a depth image and publishes its normalised horizontal coordinate, intended to guide a wheeled robot toward the safest direction of travel.
 
-## Algorithm
-
-1. Samples a horizontal band near the bottom of the frame (`sample_row_ratio`, default 0.85) where ground-level obstacles are visible.
-2. Averages pixel intensity across the band into a 1-D column profile.
-3. Applies a Gaussian blur to the profile to suppress per-pixel noise.
-4. Selects the column with the minimum intensity — darkest = farthest = safest gap.
-5. Publishes the result as a normalised u coordinate (−1 = left edge, 0 = centre, +1 = right edge).
-
 ## Usage
 
 ```bash
@@ -18,7 +10,15 @@ source install/setup.bash
 ros2 run gap_detector gap_detector
 ```
 
-## Topics
+## Algorithm
+
+1. Samples a horizontal band near the bottom of the frame (`sample_row_ratio`, default 0.85) where ground-level obstacles are visible.
+2. Averages pixel intensity across the band into a 1-D column profile.
+3. Applies a Gaussian blur to the profile to suppress per-pixel noise.
+4. Selects the column with the minimum intensity — darkest = farthest = safest gap.
+5. Publishes the result as a normalised u coordinate (−1 = left edge, 0 = centre, +1 = right edge).
+
+## Interfaces
 
 | Topic | Type | Direction |
 |---|---|---|
