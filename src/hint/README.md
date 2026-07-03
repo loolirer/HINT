@@ -6,7 +6,7 @@ Bringup package for HINT — groups the launch file, RViz2 configuration, and te
 
 | Path | Purpose |
 |---|---|
-| `launch/bringup.launch.py` | Main bringup: teleop, Cartographer SLAM, visual tracker, visual servo, RViz2 |
+| `launch/bringup.launch.py` | Main bringup: teleop, Cartographer SLAM, visual tracker, visual servo, description detector, visual question, BT executor, RViz2 |
 | `config/teleop.yaml` | `teleop_twist_joy` parameters (axes, scales, enable button) |
 | `viz/hint.rviz` | RViz2 layout pre-loaded with the tracking debug view |
 

@@ -24,6 +24,7 @@ setup(
     entry_points={
         "console_scripts": [
             "description_detector = gemini_robotics_er.description_detector:main",
+            "visual_question = gemini_robotics_er.visual_question:main",
         ],
     },
 )

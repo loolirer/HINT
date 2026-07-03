@@ -11,6 +11,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/StopTracking.srv"
   "action/ApproachTarget.action"
   "action/GroundDescription.action"
+  "action/VisualQuestion.action"
   DEPENDENCIES builtin_interfaces sensor_msgs
 )
 

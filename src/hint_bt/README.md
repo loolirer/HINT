@@ -16,6 +16,7 @@ Every HINT-specific BT leaf type is registered once, in one place: `hint_bt::reg
 |---|---|---|
 | `GroundDescriptionAction` | `include/hint_bt/nodes/ground_description_action.hpp` | `/description_detector_node/ground_description` |
 | `ApproachTargetAction` | `include/hint_bt/nodes/approach_target_action.hpp` | `/visual_servoing_node/approach_target` |
+| `VisualQuestionAction` | `include/hint_bt/nodes/visual_question_action.hpp` | `/visual_question_node/ask` |
 
 Adding a new leaf: drop a new `RosActionNode<...>` subclass header under `include/hint_bt/nodes/`, register it inside `registerHintNodes()`. No executable needs to change — `bt_executor_node` picks up any tree that references it.
 
@@ -57,6 +58,8 @@ Every `.xml` file under `behaviors/` is installed to `share/hint_bt/behaviors` a
 |---|---|---|
 | `approach_described_target.xml` | `ApproachDescribedTarget` | Grounds a text description to a bbox (`GroundDescriptionAction`), then drives to it (`ApproachTargetAction`). Its `description` port is left as an unbound blackboard reference (`{description}`) — it's meant to be driven as a `SubTree`, which binds `description` from the caller. |
 | `sequential_bins.xml` | `SequentialBins` | Visits the blue trash bin, then the yellow trash bin — two `SubTree` calls into `ApproachDescribedTarget`, each binding its own `description`. |
+| `approach_described_target_checked.xml` | `ApproachDescribedTargetChecked` | `ApproachDescribedTarget` (as a `SubTree`) followed by a `VisualQuestionAction` sanity check retried until it confirms arrival (`RetryUntilSuccessful num_attempts="-1"`). Keeps the same `{description}`-only interface, so it's a drop-in replacement. `on_unknown` defaults to `SUCCESS`, so an unreachable VLM abstains (stops the loop) instead of spinning forever. |
+| `sequential_bins_checked.xml` | `SequentialBinsChecked` | `SequentialBins` with each leg swapped from `ApproachDescribedTarget` to `ApproachDescribedTargetChecked` — arrival is VLM-confirmed before advancing to the next bin. |
 
 Preloading happens once, in the node constructor, before it starts spinning — editing a file under `behaviors/` needs a **node restart** to take effect (no rebuild, since `--symlink-install` mirrors `install(DIRECTORY behaviors/ ...)` straight to the source file).
 

@@ -69,6 +69,13 @@ def generate_launch_description():
         parameters=[{"api_key_path": "/root/secrets/gemini_api_key.txt"}],
     )
 
+    visual_question = Node(
+        package="gemini_robotics_er",
+        executable="visual_question",
+        output="screen",
+        parameters=[{"api_key_path": "/root/secrets/gemini_api_key.txt"}],
+    )
+
     bt_executor = Node(
         package="hint_bt",
         executable="bt_executor_node",
@@ -103,6 +110,7 @@ def generate_launch_description():
             lk_tracker,
             visual_servo,
             description_detector,
+            visual_question,
             bt_executor,
             rviz2,
         ]
