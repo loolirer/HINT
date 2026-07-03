@@ -20,18 +20,17 @@ from sensor_msgs.msg import CompressedImage, Image, RegionOfInterest
 MODEL_ID = "gemini-robotics-er-1.6-preview"
 
 _BBOX_PROMPT = (
-    'Return a single bounding box for: "{description}". '
-    "Return [] if the described region is not visible. "
-    'Also check whether the description explicitly asks to approach the '
-    'target from a side (e.g. "from the left", "from the right") and set '
-    '"approach_side" to "left" or "right" accordingly, or "center" if no '
-    "side is requested. "
-    "JSON only — no markdown fencing: "
-    '[{{"box_2d": [ymin, xmin, ymax, xmax], "label": "<label>", '
-    '"approach_side": "left"|"right"|"center"}}] '
-    "normalized to 0-1000, integer values only."
-)
-
+      'Return a single bounding box for: "{description}". '
+      "Return [] if the described region is not visible. "
+      'Also if {description} names a side (e.g. "from the left"),'
+      'set "approach_side" accordingly. If it asks for a side by criterion (e.g. fewer '
+      'obstacles, easier route), judge from the visible ground path on each side. '
+      'Otherwise, or if neither side is clearly better, use "center".'
+      "JSON only — no markdown fencing: "
+      '[{{"box_2d": [ymin, xmin, ymax, xmax], "label": "<label>", '
+      '"approach_side": "left"|"right"|"center"}}] '
+      "normalized to 0-1000, integer values only."
+  )
 # Maps the model's qualitative approach_side to ApproachTarget's
 # setpoint_offset convention: positive biases the target toward the right of
 # frame, which curves the approach in from the left (and vice versa).
