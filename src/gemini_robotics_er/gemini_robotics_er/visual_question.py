@@ -120,35 +120,69 @@ class VisualQuestionNode(GeminiActionNode):
                        rationale):
         try:
             frame = cv_bgr.copy()
+            h, w = frame.shape[:2]
+
+            # Aesthetic answer colors (BGR): emerald / alizarin / sunflower.
             if not answered:
-                color, verdict = (0, 165, 255), "UNKNOWN"
+                color = (15, 196, 241)
             elif is_yes:
-                color, verdict = (0, 200, 0), "YES"
+                color = (113, 204, 46)
             else:
-                color, verdict = (0, 0, 255), "NO"
-            cv2.putText(
-                frame,
-                f"{verdict}: {question}",
-                (10, 24),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                color,
-                2,
-            )
-            cv2.putText(
-                frame,
-                rationale[:80],
-                (10, 48),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                color,
-                1,
-            )
+                color = (60, 76, 231)
+            text_color = (56, 44, 33)  # dark charcoal, reads on all three
+
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            scale, th = 0.6, 1
+            pad = max(6, round(h / 40))
+            (_, cap_h), base = cv2.getTextSize("Ay", font, scale, th)
+            line_h = cap_h + base + max(2, round(h / 120))
+
+            # Colored frame border.
+            border = max(1, round(h / 25))
+            cv2.rectangle(frame, (0, 0), (w - 1, h - 1), color, thickness=border)
+
+            # Text boxes over the frame: question on top, rationale on bottom,
+            # both wrapped and drawn on solid answer-colored rectangles.
+            q_lines = self._wrap_text(question, font, scale, th, w - 2 * pad)
+            r_lines = self._wrap_text(rationale, font, scale, th, w - 2 * pad)
+            self._draw_box(frame, q_lines, 0, color, text_color, pad, line_h,
+                           cap_h, font, scale, th)
+            r_box_h = len(r_lines) * line_h + 2 * pad
+            self._draw_box(frame, r_lines, h - r_box_h, color, text_color, pad,
+                           line_h, cap_h, font, scale, th)
+
             out = self._bridge.cv2_to_imgmsg(frame, encoding="bgr8")
             out.header.stamp = stamp
             self._debug_pub.publish(out)
         except Exception as e:
             self.get_logger().warn(f"Debug publish failed: {e}")
+
+    @staticmethod
+    def _draw_box(img, lines, y0, color, text_color, pad, line_h, cap_h,
+                  font, scale, th):
+        w = img.shape[1]
+        box_h = len(lines) * line_h + 2 * pad
+        cv2.rectangle(img, (0, y0), (w, y0 + box_h), color, thickness=-1)
+        y = y0 + pad + cap_h
+        for line in lines:
+            cv2.putText(img, line, (pad, y), font, scale, text_color, th,
+                        cv2.LINE_AA)
+            y += line_h
+
+    @staticmethod
+    def _wrap_text(text, font, scale, thickness, max_width):
+        lines, current = [], ""
+        for word in text.split():
+            candidate = f"{current} {word}".strip()
+            width = cv2.getTextSize(candidate, font, scale, thickness)[0][0]
+            if width <= max_width or not current:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+        return lines or [""]
 
     def _publish_feedback(self, goal_handle, state):
         fb = VisualQuestion.Feedback()
