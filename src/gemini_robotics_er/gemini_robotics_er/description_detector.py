@@ -1,23 +1,13 @@
-import json
-import os
-import threading
-from collections import deque
-
 import cv2
 import rclpy
-from cv_bridge import CvBridge
-from google import genai
-from google.genai import types
-from PIL import Image as PILImage
-from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.action import ActionServer
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
-from rclpy.node import Node
 
 from hint_interfaces.action import GroundDescription
-from sensor_msgs.msg import CompressedImage, Image, RegionOfInterest
+from sensor_msgs.msg import Image, RegionOfInterest
 
-MODEL_ID = "gemini-robotics-er-1.6-preview"
+from gemini_robotics_er.gemini_base import GeminiActionNode
 
 _BBOX_PROMPT = (
     'Return a single bounding box for: "{description}". '
@@ -28,28 +18,11 @@ _BBOX_PROMPT = (
 )
 
 
-class DescriptionDetectorNode(Node):
+class DescriptionDetectorNode(GeminiActionNode):
     def __init__(self):
         super().__init__("description_detector_node")
 
-        self.declare_parameter("api_key_path", "")
-        self.declare_parameter("model_id", MODEL_ID)
-        self.declare_parameter("temperature", 0.0)
-        self.declare_parameter("api_timeout", 10.0)
-
-        self._client = genai.Client(api_key=self._load_api_key())
-        self._bridge = CvBridge()
-        self._goal_lock = threading.Lock()
-        # Ring buffer: last 30 frames keyed by (sec, nanosec) for stamp-based lookup.
-        self._frame_buffer: deque = deque(maxlen=30)
-
         self._debug_pub = self.create_publisher(Image, "~/debug", 10)
-        self.create_subscription(
-            CompressedImage,
-            "/camera/image_raw/compressed",
-            self._camera_cb,
-            1,
-        )
 
         self._action_server = ActionServer(
             self,
@@ -66,31 +39,6 @@ class DescriptionDetectorNode(Node):
         )
 
     # ------------------------------------------------------------------
-    # Action callbacks
-
-    def _goal_cb(self, goal_request):
-        if not self._goal_lock.acquire(blocking=False):
-            self.get_logger().warn("Rejecting goal — a grounding call is already running.")
-            return GoalResponse.REJECT
-        return GoalResponse.ACCEPT
-
-    def _cancel_cb(self, goal_handle):
-        return CancelResponse.ACCEPT
-
-    def _execute_cb(self, goal_handle):
-        try:
-            return self._run(goal_handle)
-        finally:
-            self._goal_lock.release()
-
-    # ------------------------------------------------------------------
-    # Camera subscriber
-
-    def _camera_cb(self, msg):
-        key = (msg.header.stamp.sec, msg.header.stamp.nanosec)
-        self._frame_buffer.append((key, msg))
-
-    # ------------------------------------------------------------------
     # Main execution
 
     def _run(self, goal_handle):
@@ -103,10 +51,7 @@ class DescriptionDetectorNode(Node):
             return self._abort(goal_handle, "No camera frame received yet.")
 
         try:
-            cv_bgr = self._bridge.compressed_imgmsg_to_cv2(
-                compressed, desired_encoding="bgr8"
-            )
-            pil_img = PILImage.fromarray(cv2.cvtColor(cv_bgr, cv2.COLOR_BGR2RGB))
+            cv_bgr, pil_img = self._frame_to_pil(compressed)
         except Exception as e:
             return self._abort(goal_handle, f"Image conversion failed: {e}")
 
@@ -115,7 +60,7 @@ class DescriptionDetectorNode(Node):
 
         prompt = _BBOX_PROMPT.format(description=goal.description)
         try:
-            raw = self._call_api(pil_img, prompt)
+            raw = self._call_api([pil_img, prompt])
         except TimeoutError as e:
             return self._abort(goal_handle, str(e))
         except Exception as e:
@@ -124,7 +69,8 @@ class DescriptionDetectorNode(Node):
         if goal_handle.is_cancel_requested:
             return self._cancel(goal_handle)
 
-        boxes = self._parse_boxes(raw)
+        data = self._parse_json(raw)
+        boxes = data if isinstance(data, list) else []
         if not boxes:
             return self._abort(
                 goal_handle, f'No match found for: "{goal.description}"'
@@ -146,71 +92,7 @@ class DescriptionDetectorNode(Node):
         return result
 
     # ------------------------------------------------------------------
-    # API
-
-    def _call_api(self, pil_img, prompt):
-        timeout = float(self._p("api_timeout"))
-        result = [None]
-        error = [None]
-
-        def _call():
-            try:
-                result[0] = self._client.models.generate_content(
-                    model=self._p("model_id"),
-                    contents=[pil_img, prompt],
-                    config=types.GenerateContentConfig(
-                        temperature=float(self._p("temperature")),
-                        thinking_config=types.ThinkingConfig(thinking_budget=0),
-                    ),
-                )
-            except Exception as e:
-                error[0] = e
-
-        t = threading.Thread(target=_call, daemon=True)
-        t.start()
-        t.join(timeout=timeout)
-
-        if t.is_alive():
-            raise TimeoutError(f"Gemini API did not respond within {timeout}s")
-        if error[0]:
-            raise error[0]
-        return result[0].text
-
-    # ------------------------------------------------------------------
     # Helpers
-
-    def _resolve_frame(self, stamp):
-        if not self._frame_buffer:
-            return None, None
-        target_key = (stamp.sec, stamp.nanosec)
-        if target_key == (0, 0):
-            _, msg = self._frame_buffer[-1]
-            return msg, msg.header.stamp
-        for buf_key, msg in self._frame_buffer:
-            if buf_key == target_key:
-                return msg, msg.header.stamp
-        self.get_logger().warn(
-            f"Frame with stamp {target_key} not in buffer — using latest."
-        )
-        _, msg = self._frame_buffer[-1]
-        return msg, msg.header.stamp
-
-    def _parse_boxes(self, raw):
-        text = raw.strip()
-        # Strip markdown fencing if the model ignores the prompt instruction.
-        lines = text.splitlines()
-        for i, line in enumerate(lines):
-            if line.strip() == "```json":
-                text = "\n".join(lines[i + 1:])
-                text = text.split("```")[0]
-                break
-        try:
-            data = json.loads(text)
-            if isinstance(data, list):
-                return data
-        except json.JSONDecodeError:
-            self.get_logger().warn(f"Could not parse JSON response: {raw!r}")
-        return []
 
     def _box_to_roi(self, box_2d, img_w, img_h):
         ymin, xmin, ymax, xmax = box_2d
@@ -264,22 +146,6 @@ class DescriptionDetectorNode(Node):
         result.success = False
         result.message = "Cancelled"
         return result
-
-    def _load_api_key(self):
-        path = self._p("api_key_path")
-        if path:
-            with open(path, "r") as f:
-                return f.read().strip()
-        key = os.environ.get("GEMINI_API_KEY", "")
-        if not key:
-            raise RuntimeError(
-                "No Gemini API key found. "
-                "Set the api_key_path parameter or the GEMINI_API_KEY env var."
-            )
-        return key
-
-    def _p(self, name):
-        return self.get_parameter(name).value
 
 
 def main(args=None):
