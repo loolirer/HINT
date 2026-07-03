@@ -8,8 +8,9 @@ ROS2 package of nodes powered by the Gemini Robotics-ER model for HINT.
 |---|---|
 | `description_detector` | Grounds a natural-language description to a bounding box (ROI) on a camera frame |
 | `visual_question` | Answers a yes/no question about a camera frame (VLM sanity-check fallback) |
+| `trajectory_planner` | Plans a ground-restricted trajectory (ordered waypoints) from a text instruction |
 
-Shared plumbing (API-key loading + client, stamped camera ring buffer, timeout-guarded API call, single-goal action lifecycle) lives in `gemini_robotics_er/gemini_base.py` as `GeminiActionNode`; both executables subclass it.
+Shared plumbing (API-key loading + client, stamped camera ring buffer, timeout-guarded API call, single-goal action lifecycle) lives in `gemini_robotics_er/gemini_base.py` as `GeminiActionNode`; each executable subclasses it.
 
 ---
 
@@ -81,6 +82,44 @@ Parameters are the same as `description_detector` (`api_key_path`, `model_id`, `
 ros2 action send_goal /visual_question_node/ask \
   hint_interfaces/action/VisualQuestion \
   "{stamp: {sec: 0, nanosec: 0}, question: 'is a trash bin visible in the frame?'}"
+```
+
+---
+
+## trajectory_planner
+
+Plans a **ground-restricted trajectory** from a natural-language instruction using Gemini Robotics-ER's point-defining capability. Given a description (e.g. *"walk to the door keeping to the right of the wall"* or *"reach the table without going over the mattress"*), it returns an ordered set of floor waypoints that a downstream IBVSc controller can chase — opening room for semantic navigation preferences and constraint-aware waypoint generation.
+
+Built as a sibling of `description_detector`: same inputs (a camera `stamp` + a text field) and the same stamp-based ring buffer / API plumbing (both subclass `GeminiActionNode`). Instead of one bounding box it grounds an **ordered marker array in normalized image space** (`geometry_msgs/Point[]`, `x`/`y ∈ [0, 1]`, `z` unused, `markers[0]` nearest → `markers[-1]` farthest) plus the frame `stamp`. The model is prompted to keep points on the traversable ground plane, ordered nearest→farthest, and to honor any semantic preference in the instruction.
+
+### Action
+
+`~/plan_trajectory` (`hint_interfaces/action/PlanTrajectory`)
+
+| Field | Type | Description |
+|---|---|---|
+| **Goal** `stamp` | `builtin_interfaces/Time` | Stamp of the frame to plan on; `{sec: 0, nanosec: 0}` uses the latest received frame |
+| **Goal** `description` | `string` | Natural-language navigation instruction |
+| **Result** `success` | `bool` | Whether a valid ground trajectory was found |
+| **Result** `message` | `string` | The VLM's brief explanation of the chosen path, or the reason no trajectory was found |
+| **Result** `markers` | `geometry_msgs/Point[]` | Ordered waypoints in normalized image space (`x`/`y ∈ [0, 1]`, `z` unused) |
+| **Result** `stamp` | `builtin_interfaces/Time` | Stamp of the frame that was planned on |
+| **Feedback** `state` | `string` | `"RUNNING"` while the API call is in flight |
+
+### Topics
+
+| Topic | Type | Direction |
+|---|---|---|
+| `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Sub — ring buffer of last 30 frames |
+| `~/debug` | `sensor_msgs/Image` | Pub — waypoints drawn as a heatmap-colored polyline (`COLORMAP_JET`: first/nearest hottest, last/farthest coldest) |
+
+Parameters are the same as `description_detector` (`api_key_path`, `model_id`, `temperature`, `api_timeout`).
+
+```bash
+ros2 action send_goal /trajectory_planner_node/plan_trajectory \
+  hint_interfaces/action/PlanTrajectory \
+  "{stamp: {sec: 0, nanosec: 0}, description: 'walk toward the door keeping to the right side of the hallway'}" \
+  --feedback
 ```
 
 ---
