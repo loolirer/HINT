@@ -25,6 +25,7 @@ setup(
         "console_scripts": [
             "description_detector = gemini_robotics_er.description_detector:main",
             "visual_question = gemini_robotics_er.visual_question:main",
+            "trajectory_planner = gemini_robotics_er.trajectory_planner:main",
         ],
     },
 )

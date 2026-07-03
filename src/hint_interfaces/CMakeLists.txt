@@ -4,6 +4,7 @@ project(hint_interfaces)
 find_package(ament_cmake REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -12,7 +13,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/ApproachTarget.action"
   "action/GroundDescription.action"
   "action/VisualQuestion.action"
-  DEPENDENCIES builtin_interfaces sensor_msgs
+  "action/PlanTrajectory.action"
+  DEPENDENCIES builtin_interfaces sensor_msgs geometry_msgs
 )
 
 ament_package()
