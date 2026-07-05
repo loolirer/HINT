@@ -6,8 +6,8 @@ string description
 bool success
 string message
 # Ordered ground trajectory in normalized image space: point.x, point.y in
-# [0, 1] (left/top = 0, right/bottom = 1); z unused. markers[0] is the first
-# (nearest) waypoint, markers[-1] the last (farthest).
+# [-1, 1] (center = 0; left/top = -1, right/bottom = +1); z unused. markers[0]
+# is the first (nearest) waypoint, markers[-1] the last (farthest).
 geometry_msgs/Point[] markers
 builtin_interfaces/Time stamp
 ---
