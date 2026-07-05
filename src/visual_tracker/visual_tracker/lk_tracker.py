@@ -2,7 +2,6 @@ import rclpy
 import rclpy.parameter
 from collections import deque
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, DurabilityPolicy
 from sensor_msgs.msg import Image, RegionOfInterest, CompressedImage
 from std_msgs.msg import String
 from hint_interfaces.srv import SetTarget, StopTracking
@@ -10,22 +9,20 @@ from cv_bridge import CvBridge
 import cv2
 import numpy as np
 
-STATUS_UNTRACKED = "UNTRACKED"
-STATUS_TRACKING = "TRACKING"
-STATUS_OCCLUDED = "OCCLUDED"
-
-LK_PARAMS = dict(
-    winSize=(21, 21),
-    maxLevel=3,
-    criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+from visual_tracker.tracking_common import (
+    STATUS_UNTRACKED,
+    STATUS_TRACKING,
+    STATUS_OCCLUDED,
+    LATCHED_QOS,
+    detect_features,
+    lk_fb,
+    ncc,
+    bbox_corners,
+    corners_to_roi,
 )
-SUBPIX_CRITERIA = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_MAX_ITER, 20, 0.03)
 
 _ORB = cv2.ORB_create(nfeatures=500)
 _MATCHER = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-
-# Latched QoS so late-joining subscribers receive the current state immediately.
-_LATCHED_QOS = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 
 class LKTrackerNode(Node):
@@ -44,7 +41,7 @@ class LKTrackerNode(Node):
         # --- Publishers ---
         self.pub_bbox = self.create_publisher(RegionOfInterest, "/tracking/bbox", 10)
         self.pub_debug = self.create_publisher(Image, "/camera/tracking", 10)
-        self.pub_state = self.create_publisher(String, "/tracking/state", _LATCHED_QOS)
+        self.pub_state = self.create_publisher(String, "/tracking/state", LATCHED_QOS)
 
         # --- Services ---
         self.create_service(SetTarget, "~/set_target", self._srv_set_target)
@@ -401,70 +398,19 @@ class LKTrackerNode(Node):
         return True
 
     def _detect_features(self, gray, bbox):
-        x, y, w, h = [int(v) for v in bbox]
-        mask = np.zeros_like(gray)
-        mask[y : y + h, x : x + w] = 255
-        pts = cv2.goodFeaturesToTrack(
-            gray,
-            mask=mask,
-            maxCorners=self._p("max_features"),
-            qualityLevel=0.01,
-            minDistance=7,
-            blockSize=7,
-        )
-        if pts is not None:
-            pts = cv2.cornerSubPix(gray, pts, (5, 5), (-1, -1), SUBPIX_CRITERIA)
-        return pts
+        return detect_features(gray, bbox, self._p("max_features"))
 
     def _bbox_corners(self, bbox):
-        x, y, w, h = bbox
-        return np.array(
-            [
-                [[float(x), float(y)]],
-                [[float(x + w), float(y)]],
-                [[float(x + w), float(y + h)]],
-                [[float(x), float(y + h)]],
-            ],
-            dtype=np.float32,
-        )
+        return bbox_corners(bbox)
 
     def _corners_to_roi(self, corners):
-        xs = corners[:, 0, 0]
-        ys = corners[:, 0, 1]
-        x0 = max(0, int(np.floor(xs.min())))
-        y0 = max(0, int(np.floor(ys.min())))
-        roi = RegionOfInterest()
-        roi.x_offset = x0
-        roi.y_offset = y0
-        roi.width = max(0, int(np.ceil(xs.max())) - x0)
-        roi.height = max(0, int(np.ceil(ys.max())) - y0)
-        return roi
+        return corners_to_roi(corners)
 
     def _lk_fb(self, prev_gray, gray, pts):
-        if pts is None or len(pts) == 0:
-            empty = np.empty((0, 1, 2), dtype=np.float32)
-            return empty, np.zeros(0, dtype=bool)
-        pts_fwd, st_fwd, _ = cv2.calcOpticalFlowPyrLK(
-            prev_gray, gray, pts, None, **LK_PARAMS
-        )
-        pts_bwd, st_bwd, _ = cv2.calcOpticalFlowPyrLK(
-            gray, prev_gray, pts_fwd, None, **LK_PARAMS
-        )
-        fb_error = np.abs(pts - pts_bwd).max(axis=2).ravel()
-        good = (
-            (st_fwd.ravel() == 1)
-            & (st_bwd.ravel() == 1)
-            & (fb_error < self._p("fb_thresh"))
-        )
-        return pts_fwd, good
+        return lk_fb(prev_gray, gray, pts, self._p("fb_thresh"))
 
     def _ncc(self, a, b):
-        if a.shape != b.shape:
-            b = cv2.resize(b, (a.shape[1], a.shape[0]))
-        a = a.astype(np.float32) - a.mean()
-        b = b.astype(np.float32) - b.mean()
-        denom = np.sqrt((a**2).sum() * (b**2).sum())
-        return float((a * b).sum() / denom) if denom > 1e-6 else 0.0
+        return ncc(a, b)
 
     def _appearance_score(self, gray, M):
         h, w = gray.shape
