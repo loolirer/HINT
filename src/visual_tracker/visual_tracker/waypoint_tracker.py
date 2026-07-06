@@ -5,14 +5,22 @@ ground describes how all of them move. Rather than advecting each waypoint by it
 own (noisy, texture-dependent) flow, the node tracks the *plane* and warps the
 whole waypoint set through it. Per frame, anchored to a **keyframe**:
 
-1. Dense optical flow (DIS, preset via ``dis_preset``) carries a **grid** of
-   points — masked to a band around the waypoint path (convex hull + tube), which
-   keeps flanking walls and off-path movers out of the correspondences — from the
-   keyframe to the current frame (both directions), giving plane correspondences
+1. **Pre-warped dense flow.** The keyframe is first warped by the running estimate
+   ``H_kf->prev`` so DIS only measures the small *residual* (the large FOE
+   expansion of forward motion is absorbed by the prediction, keeping the flow in
+   DIS's range and near-uniform — a raw keyframe->current flow tracked forward
+   motion poorly). DIS (preset via ``dis_preset``) carries a **grid** of points —
+   masked to a band around the waypoint path (convex hull + tube), keeping flanking
+   walls and off-path movers out — both directions, giving plane correspondences
    even on blank floor.
 2. Correspondences are forward-backward filtered (``fb_thresh``); a **RANSAC
-   homography** (``findHomography``) is fitted when enough inliers support a
-   stable perspective estimate, else a 4-DOF **affine** fallback.
+   homography** (``findHomography``) is fitted — the motion model for a multi-point
+   trajectory (a plane under any camera motion is a homography). A frame that can't
+   support one holds rather than tracking through a weaker model that can't see
+   perspective looming. **Single-point mode** — entered when the planner sends
+   exactly one waypoint, or when a multi-point trajectory retires down to its last
+   one — instead fits a well-conditioned local **translation**, since a homography
+   can't be conditioned from the compact grid around one point.
 3. The keyframe waypoints are warped through the transform
    (``perspectiveTransform``). Pooling over the grid + the plane constraint
    corrects the per-point flow noise that made pure advection drift; a covered or
@@ -26,7 +34,12 @@ whole waypoint set through it. Per frame, anchored to a **keyframe**:
    forward progress that scrolls the near waypoints off-screen doesn't read as
    loss), so a far occlusion only flips its own flag instead of forcing the whole
    set ``OCCLUDED``. Waypoints are published only while ``TRACKING``.
-5. The keyframe **re-keys** (advances to the current frame) only when the
+5. Waypoints that pass **under the robot** (any waypoint whose warped position
+   crosses below the frame bottom) are **retired** — the set shrinks as the robot
+   advances, so a consumed point can't be resurrected or flung off-screen by a later
+   re-fit. All waypoints retired -> ``UNTRACKED`` (trajectory complete). Waypoints
+   are sorted nearest-first at init so retirement/priority hold for any input order.
+6. The keyframe **re-keys** (advances to the current frame) only when the
    keyframe->current baseline grows past ``rekey_flow_px`` or the flow breaks, so
    residual drift accrues at these infrequent events, not every frame.
 
@@ -68,12 +81,12 @@ class WaypointTrackerNode(Node):
 
         # --- Tuning parameters ---
         self.declare_parameter("dis_preset", "fast")  # ultrafast|fast|medium
-        self.declare_parameter("fb_thresh", 1.0)  # px; forward-backward reject
+        self.declare_parameter("fb_thresh", 2.0)  # px; forward-backward reject
         self.declare_parameter("rekey_flow_px", 30.0)  # re-key when kf baseline grows
         self.declare_parameter("grid_step", 5)  # px spacing of the ground flow grid
         self.declare_parameter("roi_margin", 0.10)  # padding around waypoint bbox
         self.declare_parameter("min_features", 10)  # min inlier grid points
-        self.declare_parameter("min_homography_features", 20)  # homography vs affine
+        self.declare_parameter("min_homography_features", 15)  # min pts to fit homography
         self.declare_parameter("rekey_inlier_ratio", 0.90)  # min fit quality to re-key
         # Per-waypoint occlusion: the nearest ``priority_count`` waypoints govern the
         # node state; a waypoint counts as *measured* when at least ``min_support``
@@ -163,13 +176,14 @@ class WaypointTrackerNode(Node):
         self.kf_gray = None  # keyframe image (anchor)
         self.kf_grid = None  # (M,2) ground flow grid, in keyframe
         self.kf_pts = None  # (N,2) waypoint positions in the keyframe
+        self._H_kf2prev = np.eye(3)  # running kf->prev estimate, prewarps the flow
         self.img_shape = None  # (h, w)
+        self._single = False  # single-point mode (translation) vs homography
         self._ever_tracked = False  # a trusted fit has landed since init
         # Debug/telemetry
         self._n_rejected = 0
         self._rekeys = 0
         self._kf_disp = 0.0
-        self._model = "none"
         self._inlier_ratio = 0.0
         self._grid_vis = None  # (K,2) current inlier grid positions, for overlay
         self._tracked_mask = None  # (N,) bool: per-waypoint measured vs coasting
@@ -238,6 +252,16 @@ class WaypointTrackerNode(Node):
         for i, (xn, yn) in enumerate(wps_norm):
             self.pts[i, 0] = (xn + 1.0) * 0.5 * (w - 1)
             self.pts[i, 1] = (yn + 1.0) * 0.5 * (h - 1)
+        # Enforce nearest-first (largest image-y = lowest in frame = nearest) so the
+        # retirement/priority front-logic and the published order hold regardless of
+        # the order the waypoints arrived in. Assumes a forward ground path (depth
+        # monotonic in image-y), which is the interface's nearest-first contract.
+        self.pts = self.pts[np.argsort(-self.pts[:, 1], kind="stable")]
+
+        # A lone waypoint is a single-point tracking task (e.g. one ground goal):
+        # a homography can't be conditioned from the compact grid around one point,
+        # so it tracks by local translation instead of the ground homography.
+        self._single = len(self.pts) == 1
 
         if not self._set_keyframe(init_gray):
             self.get_logger().warn("Ground ROI too small to seed a grid — call again.")
@@ -246,9 +270,10 @@ class WaypointTrackerNode(Node):
 
         self.initialized = True
         self._set_status(STATUS_TRACKING)
+        model = "translation" if self._single else "homography"
         self.get_logger().info(
-            f"Tracking {len(self.pts)} waypoints "
-            f"({len(self.kf_grid)} grid pts, homography)."
+            f"Tracking {len(self.pts)} waypoint(s) "
+            f"({len(self.kf_grid)} grid pts, {model})."
         )
         return True
 
@@ -293,17 +318,35 @@ class WaypointTrackerNode(Node):
     def _track(self, gray, frame, msg):
         min_f = self._p("min_features")
 
-        # Flow keyframe -> current at the grid, forward-backward filtered.
-        flow_fwd = self._dis.calc(self.kf_gray, gray, None)
-        g_fwd = self._sample_flow(flow_fwd, self.kf_grid)
-        grid_cur = self.kf_grid + g_fwd
-        flow_bwd = self._dis.calc(gray, self.kf_gray, None)
+        h, w = self.img_shape
+
+        # Pre-warped (compositional) flow. Warp the keyframe by the running estimate
+        # H_kf->prev so DIS only measures the small *residual*. Under forward motion
+        # the big FOE expansion (near-fast / far-slow) is absorbed by the prediction,
+        # keeping the flow inside DIS's range and near-uniform — the raw
+        # keyframe->current flow was what made forward motion track poorly.
+        H_pred = self._H_kf2prev
+        kf_pred = cv2.warpPerspective(self.kf_gray, H_pred, (w, h))
+        grid_pred = cv2.perspectiveTransform(
+            self.kf_grid.reshape(-1, 1, 2), H_pred
+        ).reshape(-1, 2)
+
+        flow_fwd = self._dis.calc(kf_pred, gray, None)
+        g_fwd = self._sample_flow(flow_fwd, grid_pred)  # residual: prediction->current
+        grid_cur = grid_pred + g_fwd
+        flow_bwd = self._dis.calc(gray, kf_pred, None)
         g_bwd = self._sample_flow(flow_bwd, grid_cur)
         fb_err = np.linalg.norm(g_fwd + g_bwd, axis=1)
-        good = fb_err < self._p("fb_thresh")
+        # Keyframe grid points the prediction carries off-frame have no valid
+        # correspondence in the warped keyframe — drop them with the FB failures.
+        in_bounds = (
+            (grid_pred[:, 0] >= 0) & (grid_pred[:, 0] < w)
+            & (grid_pred[:, 1] >= 0) & (grid_pred[:, 1] < h)
+        )
+        good = (fb_err < self._p("fb_thresh")) & in_bounds
         self._n_rejected = int((~good).sum())
-        src = self.kf_grid[good]
-        dst = grid_cur[good]
+        src = self.kf_grid[good]  # keyframe coords
+        dst = grid_cur[good].astype(np.float32)  # current coords
         self._grid_vis = dst
 
         # Flow to the keyframe has broken (large baseline / occlusion) — re-anchor
@@ -315,10 +358,15 @@ class WaypointTrackerNode(Node):
             self._handle_occlusion(frame, msg)  # flow broke — waypoints frozen
             return
 
-        H, inliers, model = self._estimate_transform(src, dst)
-        self._model = model
+        # Single-point mode uses a well-conditioned local **translation**; multi-point
+        # trajectories use the ground **homography** (a homography can't be
+        # conditioned from the compact grid around a single point).
+        if self._single:
+            H, inliers = self._estimate_translation(src, dst)
+        else:
+            H, inliers = self._estimate_transform(src, dst)
         if H is None:
-            self._handle_occlusion(frame, msg)  # no transform — hold
+            self._handle_occlusion(frame, msg)  # no usable fit — hold
             return
 
         inlier_mask = inliers.ravel() == 1
@@ -327,12 +375,12 @@ class WaypointTrackerNode(Node):
         inlier_dst = dst[inlier_mask]  # measured plane support this frame
         self._grid_vis = inlier_dst
 
-        # Piece 1 — bias the plane to the near band. RANSAC already rejects gross
-        # far occlusion as outliers, so H is robust; this re-anchors the plane on
-        # the near support (inlier grid within support_radius of the nearest
-        # waypoints) so residual far-plane noise doesn't tilt what the near points
-        # ride on. Falls back to H if the near support is thin / refit degenerate.
-        H = self._refine_near(H, src_in, inlier_dst)
+        # Piece 1 — bias the plane to the near band (homography only; a translation
+        # is already local so there is nothing to re-anchor). RANSAC already rejects
+        # gross far occlusion as outliers, so H is robust; this re-anchors the plane
+        # on the near support so residual far-plane noise doesn't tilt the near points.
+        if not self._single:
+            H = self._refine_near(H, src_in, inlier_dst)
 
         warped = self._warp(H)
         if warped is None:
@@ -352,7 +400,6 @@ class WaypointTrackerNode(Node):
         # waypoints instead means a far occlusion only flips its own flag and forward
         # progress doesn't read as loss. No in-frame waypoint at all -> nothing
         # measurable -> OCCLUDED.
-        h, w = self.img_shape
         in_frame = (
             (warped[:, 0] >= 0) & (warped[:, 0] < w)
             & (warped[:, 1] >= 0) & (warped[:, 1] < h)
@@ -365,13 +412,50 @@ class WaypointTrackerNode(Node):
 
         self.pts = warped
         self._mark_tracking()  # trusted measurement this frame
+        self._H_kf2prev = H  # predictor that pre-warps the next frame's flow
 
-        # Re-key when the baseline grows enough that DIS accuracy degrades — but
-        # only from a high-confidence frame. A re-key freezes the current warped
-        # estimate in as the new anchor, so any error committed here becomes
-        # permanent drift; a mediocre-fit frame is deferred until a clean one
-        # (or, failing that, the broken-flow recovery re-anchor above).
-        self._kf_disp = float(np.median(np.linalg.norm(g_fwd[good], axis=1)))
+        # Retire consumed waypoints: *any* waypoint whose warped position has crossed
+        # below the frame bottom has passed under the robot. Order-agnostic (a
+        # mis-ordered waypoint set still retires the right points, unlike a
+        # front-only scan), and a hard drop — a consumed point is gone from
+        # ``kf_pts``, so no later re-fit can resurrect it or fling it off-screen.
+        keep = self.pts[:, 1] < h
+        if not keep.all():
+            self.pts = self.pts[keep].copy()
+            self.kf_pts = self.kf_pts[keep].copy()
+            self._tracked_mask = self._tracked_mask[keep]
+            self._support = self._support[keep]
+            if len(self.pts) == 0:
+                self.get_logger().info("Trajectory consumed — all waypoints passed.")
+                self._pending_waypoints = None
+                self._pending_stamp = None
+                self._reset(STATUS_UNTRACKED)
+                self._draw_idle(frame)
+                self._publish_debug(frame, msg)
+                return
+
+        # Transition to single-point mode once a multi-point trajectory has consumed
+        # down to its last waypoint — a homography can't be conditioned from one
+        # point. Re-key so the grid re-lays as a single-point neighborhood (avoiding
+        # a depth-averaged translation from the old wide grid), then publish + return.
+        if len(self.pts) == 1 and not self._single:
+            self._single = True
+            self.get_logger().info("Last waypoint reached — single-point mode.")
+            if self._set_keyframe(gray):
+                self._rekeys += 1
+            self._draw_and_publish(frame, msg)
+            return
+
+        # Re-key when the baseline grows enough that the pre-warp resampling / view
+        # overlap degrades — but only from a high-confidence frame (a re-key freezes
+        # the current warped estimate in as the new anchor, so error committed here
+        # becomes permanent drift). ``kf_disp`` is the *total* keyframe->current
+        # baseline (not the small residual DIS now sees), preserving the "re-key when
+        # the anchor gets far" semantics; the pre-warp lets that baseline grow larger
+        # before DIS breaks, so ``rekey_flow_px`` can be raised for less drift.
+        self._kf_disp = float(
+            np.median(np.linalg.norm((grid_cur - self.kf_grid)[good], axis=1))
+        )
         if (
             self._kf_disp > self._p("rekey_flow_px")
             and self._inlier_ratio >= self._p("rekey_inlier_ratio")
@@ -389,22 +473,42 @@ class WaypointTrackerNode(Node):
         self.kf_gray = gray
         self.kf_grid = grid
         self.kf_pts = self.pts.copy()
+        # New keyframe == current frame, so the prediction resets to identity
+        # (residual DIS on the next frame is just one frame of motion).
+        self._H_kf2prev = np.eye(3)
         return True
 
     def _estimate_transform(self, src, dst):
-        """Fit keyframe->current ground transform; homography when well-supported."""
-        if len(src) >= self._p("min_homography_features"):
-            H, inliers = cv2.findHomography(src, dst, cv2.RANSAC, 3.0)
-            if H is not None and inliers is not None and self._is_sane_homography(H):
-                return H.astype(np.float64), inliers, "homography"
+        """Fit the keyframe->current ground **homography** (RANSAC), or ``None``.
 
-        M, inliers = cv2.estimateAffinePartial2D(
-            src, dst, method=cv2.RANSAC, ransacReprojThreshold=3.0
-        )
-        if M is None or inliers is None:
-            return None, None, "none"
-        H = np.vstack([M, [0.0, 0.0, 1.0]]).astype(np.float64)
-        return H, inliers, "affine"
+        A homography is the correct model for a plane under any camera motion, so it
+        is the only one. A frame that can't support one (too few points, or a
+        degenerate/insane fit) is **held** rather than tracked through a weaker model
+        that can't represent the perspective looming of forward motion.
+        """
+        if len(src) < self._p("min_homography_features"):
+            return None, None
+        H, inliers = cv2.findHomography(src, dst, cv2.RANSAC, 3.0)
+        if H is None or inliers is None or not self._is_sane_homography(H):
+            return None, None
+        return H.astype(np.float64), inliers
+
+    def _estimate_translation(self, src, dst):
+        """Robust pure **translation** (2 DOF) as an identity+shift homography.
+
+        Well-conditioned from any support — even the compact disc of grid points
+        around a single remaining waypoint, where a homography cannot be. The median
+        shift is outlier-robust; inliers are the correspondences agreeing with it.
+        """
+        if len(src) < self._p("min_features"):
+            return None, None
+        d = dst - src
+        t = np.median(d, axis=0)
+        inliers = np.linalg.norm(d - t, axis=1) < 3.0
+        if int(inliers.sum()) < self._p("min_features"):
+            return None, None
+        H = np.array([[1.0, 0.0, t[0]], [0.0, 1.0, t[1]], [0.0, 0.0, 1.0]])
+        return H, inliers.reshape(-1, 1).astype(np.uint8)
 
     def _is_sane_homography(self, H):
         """Reject degenerate / reflected / wildly-skewed homographies.
@@ -428,6 +532,24 @@ class WaypointTrackerNode(Node):
         if smin < 0.25 or smax > 4.0:
             return False
         if smax / max(smin, 1e-6) > 4.0:
+            return False
+        # Reject ill-conditioned *perspective*. The 2x2 checks above miss unconstrained
+        # ``H[2,:]`` terms — which is what a fit from a small/compact support region
+        # (few waypoints left) produces: fine near the cluster, flinging everything
+        # far away off-screen. Map the frame corners and require they stay within a
+        # frame-size margin of the frame.
+        h, w = self.img_shape
+        corners = np.array(
+            [[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32
+        ).reshape(-1, 1, 2)
+        mapped = cv2.perspectiveTransform(corners, H.astype(np.float64)).reshape(-1, 2)
+        if not np.all(np.isfinite(mapped)):
+            return False
+        m = float(max(h, w))
+        if (
+            mapped[:, 0].min() < -m or mapped[:, 0].max() > w + m
+            or mapped[:, 1].min() < -m or mapped[:, 1].max() > h + m
+        ):
             return False
         return True
 
@@ -506,6 +628,10 @@ class WaypointTrackerNode(Node):
         ys = pts[:, 1]
         span = float(max(xs.max() - xs.min(), ys.max() - ys.min()))
         pad = int(self._p("roi_margin") * span + 10)
+        # A lone waypoint (single-point mode) has no path band; give it a real
+        # neighborhood so the translation has enough flow support.
+        if len(pts) == 1:
+            pad = max(pad, int(self._p("support_radius")))
 
         # Path band mask: filled hull + thick tube along the ordered waypoints +
         # a disc at each (robust for 1-2 / collinear waypoints).
@@ -600,9 +726,10 @@ class WaypointTrackerNode(Node):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
             )
         n_meas = int(tracked.sum()) if measuring else 0
+        mode = "trans" if self._single else "homog"
         cv2.putText(
             frame,
-            f"{self.tracking_status} ({self._model})  {len(self.pts)} pts  "
+            f"{self.tracking_status} [{mode}]  {len(self.pts)} pts  "
             f"meas={n_meas}/{len(self.pts)}  inliers={self._inlier_ratio:.2f}  "
             f"reject={self._n_rejected}  rekeys={self._rekeys}  "
             f"kf_disp={self._kf_disp:.1f}",
