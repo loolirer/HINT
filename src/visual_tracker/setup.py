@@ -24,6 +24,7 @@ setup(
     entry_points={
         "console_scripts": [
             "lk_tracker = visual_tracker.lk_tracker:main",
+            "waypoint_tracker = visual_tracker.waypoint_tracker:main",
         ],
     },
 )

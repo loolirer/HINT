@@ -56,6 +56,12 @@ def generate_launch_description():
         output="screen",
     )
 
+    waypoint_tracker = Node(
+        package="visual_tracker",
+        executable="waypoint_tracker",
+        output="screen",
+    )
+
     visual_servo = Node(
         package="visual_servoing",
         executable="visual_servo",
@@ -115,6 +121,7 @@ def generate_launch_description():
             cartographer,
             occupancy_grid,
             lk_tracker,
+            waypoint_tracker,
             visual_servo,
             description_detector,
             visual_question,

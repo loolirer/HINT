@@ -129,8 +129,8 @@ class TrajectoryPlannerNode(GeminiActionNode):
     def _points_to_markers(self, points):
         """Convert Gemini ``[{"point": [y, x], ...}]`` to normalized markers.
 
-        Each returned ``Point`` has ``x``/``y`` in ``[0, 1]`` (image space),
-        ``z`` unused. Malformed entries are skipped.
+        Each returned ``Point`` has ``x``/``y`` in ``[-1, 1]`` (image space,
+        center = 0), ``z`` unused. Malformed entries are skipped.
         """
         markers = []
         for p in points:
@@ -139,8 +139,8 @@ class TrajectoryPlannerNode(GeminiActionNode):
                 continue
             y, x = pt
             marker = Point()
-            marker.x = float(min(max(x / 1000.0, 0.0), 1.0))
-            marker.y = float(min(max(y / 1000.0, 0.0), 1.0))
+            marker.x = float(min(max(2.0 * x / 1000.0 - 1.0, -1.0), 1.0))
+            marker.y = float(min(max(2.0 * y / 1000.0 - 1.0, -1.0), 1.0))
             marker.z = 0.0
             markers.append(marker)
         return markers
@@ -157,7 +157,8 @@ class TrajectoryPlannerNode(GeminiActionNode):
             h, w = frame.shape[:2]
             n = len(markers)
             px = [
-                (int(m.x * w), int(m.y * h)) for m in markers
+                (int((m.x + 1.0) / 2.0 * w), int((m.y + 1.0) / 2.0 * h))
+                for m in markers
             ]
 
             for i, (cx, cy) in enumerate(px):

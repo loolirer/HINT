@@ -118,7 +118,7 @@ ros2 action send_goal /visual_question_node/ask \
 
 Plans a **ground-restricted trajectory** from a natural-language instruction using Gemini Robotics-ER's point-defining capability. Given a description (e.g. *"walk to the door keeping to the right of the wall"* or *"reach the table without going over the mattress"*), it returns an ordered set of floor waypoints that a downstream IBVSc controller can chase — opening room for semantic navigation preferences and constraint-aware waypoint generation.
 
-Built as a sibling of `description_detector`: same inputs (a camera `stamp` + a text field) and the same stamp-based ring buffer / API plumbing (both subclass `GeminiActionNode`). Instead of one bounding box it grounds an **ordered marker array in normalized image space** (`geometry_msgs/Point[]`, `x`/`y ∈ [0, 1]`, `z` unused, `markers[0]` nearest → `markers[-1]` farthest) plus the frame `stamp`. The model is prompted to keep points on the traversable ground plane, ordered nearest→farthest, and to honor any semantic preference in the instruction.
+Built as a sibling of `description_detector`: same inputs (a camera `stamp` + a text field) and the same stamp-based ring buffer / API plumbing (both subclass `GeminiActionNode`). Instead of one bounding box it grounds an **ordered marker array in normalized image space** (`geometry_msgs/Point[]`, `x`/`y ∈ [-1, 1]` (center 0), `z` unused, `markers[0]` nearest → `markers[-1]` farthest) plus the frame `stamp`. The model is prompted to keep points on the traversable ground plane, ordered nearest→farthest, and to honor any semantic preference in the instruction.
 
 ### Interfaces
 
@@ -136,7 +136,7 @@ Built as a sibling of `description_detector`: same inputs (a camera `stamp` + a 
 | **Goal** `description` | `string` | Natural-language navigation instruction |
 | **Result** `success` | `bool` | Whether a valid ground trajectory was found |
 | **Result** `message` | `string` | The VLM's brief explanation of the chosen path, or the reason no trajectory was found |
-| **Result** `markers` | `geometry_msgs/Point[]` | Ordered waypoints in normalized image space (`x`/`y ∈ [0, 1]`, `z` unused) |
+| **Result** `markers` | `geometry_msgs/Point[]` | Ordered waypoints in normalized image space (`x`/`y ∈ [-1, 1]` (center 0), `z` unused) |
 | **Result** `stamp` | `builtin_interfaces/Time` | Stamp of the frame that was planned on |
 | **Feedback** `state` | `string` | `"RUNNING"` while the API call is in flight |
 
