@@ -1,12 +1,29 @@
 # visual_servoing
 
-Image-based visual servo controller. Exposes an `ApproachTarget` action that drives the TurtleBot3 toward a visually tracked target until the target fills a configurable fraction of the frame.
+Servo controllers that turn a tracker's output into `/cmd_vel`. Two executables
+share one action-driven lifecycle (single goal at a time; `IDLE`/`RUNNING`/
+`WAITING` feedback; `init_timeout`/`occlusion_timeout` failures; `stop_tracking`
+on result):
 
-## Usage
+| Executable | Drives off | Action | Control |
+|---|---|---|---|
+| `visual_servo` | `lk_tracker` (bounding box) | `ApproachTarget` | IBVS — approach until the target fills the frame |
+| `pursuit_servo` | `waypoint_tracker` (ground trajectory) | `FollowTrajectory` | Pure pursuit — follow the waypoints until consumed |
 
 ```bash
 colcon build --symlink-install --packages-select hint_interfaces visual_servoing
 source install/setup.bash
+```
+
+---
+
+## visual_servo
+
+Image-based visual servo controller. Exposes an `ApproachTarget` action that drives the TurtleBot3 toward a visually tracked target until the target fills a configurable fraction of the frame.
+
+### Usage
+
+```bash
 ros2 run visual_servoing visual_servo
 ```
 
@@ -25,7 +42,7 @@ Cancel an active goal:
 ros2 action cancel /visual_servoing_node/approach_target
 ```
 
-## Behaviour
+### Behaviour
 
 On goal receipt, the node calls `visual_tracker`'s `set_target` service and starts a 20 Hz control loop. On result (success or failure) it calls `stop_tracking` to clean up the tracker.
 
@@ -51,7 +68,7 @@ On goal receipt, the node calls `visual_tracker`'s `set_target` service and star
 
 Only one goal is accepted at a time; new goals are rejected while one is active.
 
-## Interfaces
+### Interfaces
 
 | Interface | Type | Direction |
 |---|---|---|
@@ -63,7 +80,7 @@ Only one goal is accepted at a time; new goals are rejected while one is active.
 | `/lk_tracker_node/set_target` | `hint_interfaces/SetTarget` | Service client |
 | `/lk_tracker_node/stop_tracking` | `hint_interfaces/StopTracking` | Service client |
 
-## Parameters
+### Parameters
 
 All parameters are live-adjustable via `ros2 param set`.
 
@@ -78,6 +95,107 @@ All parameters are live-adjustable via `ros2 param set`.
 | `stop_area_ratio` | 0.75 | Fraction of image area at which the robot stops |
 | `init_timeout` | 5.0 | Seconds to wait for tracker to reach `TRACKING` before failing |
 | `occlusion_timeout` | 5.0 | Seconds in `OCCLUDED` state before aborting with failure |
+| `control_rate` | 20.0 | Control loop rate in Hz |
+
+---
+
+## pursuit_servo
+
+Pure-pursuit waypoint follower — the trajectory-following sibling of `visual_servo`.
+Exposes a `FollowTrajectory` action that hands an ordered ground trajectory to
+`waypoint_tracker` and steers the robot along it until every waypoint has passed
+under the robot (the trajectory is consumed). It's the low-level controller for a
+VLM-planned path: `trajectory_planner`'s `markers` feed straight into the goal.
+
+### Usage
+
+```bash
+ros2 run visual_servoing pursuit_servo
+```
+
+Send a goal (requires `waypoint_tracker` running; waypoints are normalized image
+space, `x`/`y ∈ [-1, 1]`, center 0, **nearest first**):
+
+```bash
+ros2 action send_goal /pursuit_servo_node/follow_trajectory \
+  hint_interfaces/action/FollowTrajectory \
+  "{waypoints: [{x: 0.0, y: 0.8, z: 0.0}, {x: 0.05, y: 0.4, z: 0.0}, {x: 0.1, y: 0.2, z: 0.0}], stamp: {sec: 0, nanosec: 0}}" \
+  --feedback
+```
+
+Cancel an active goal:
+
+```bash
+ros2 action cancel /pursuit_servo_node/follow_trajectory
+```
+
+### Behaviour
+
+On goal receipt, the node calls `waypoint_tracker`'s `set_waypoints` service and
+starts a control loop at `control_rate`. On result (success or failure) it calls
+`stop_tracking` to clean up the tracker. Same single-goal lifecycle as
+`visual_servo`.
+
+**Control law (pure pursuit)** — each tick it picks a **lookahead** waypoint from
+the `/waypoint_tracking/points` stream (the nearest **measured** waypoint at least
+`lookahead` from the robot reference at the frame bottom-centre; the farthest
+measured one if none reach it — only `tracked=true` points steer, never a coasting
+extrapolation):
+
+- **Angular**: proportional on the lookahead's horizontal offset → `cmd_vel.angular.z`. Steers to curve toward the carrot.
+- **Linear**: `cruise_speed` scaled down by the heading error `|−x|` → slows on sharp turns (turns in place when the carrot is far off-axis), clamped to `max_linear_vel`.
+
+**Action feedback states** (identical to `visual_servo`):
+
+| State | Tracker state | Robot |
+|---|---|---|
+| `IDLE` | `UNTRACKED` (pre-init) | Stopped — waiting for the tracker to initialise |
+| `RUNNING` | `TRACKING` | Following the trajectory |
+| `WAITING` | `OCCLUDED` | Stopped — waiting for the tracker to recover |
+
+**Action result**
+
+| Outcome | Condition |
+|---|---|
+| `success = true` | Trajectory **consumed** — the tracker retired all waypoints as they passed under the robot and went `UNTRACKED` after having tracked |
+| `success = false` | Tracker stayed `UNTRACKED` beyond `init_timeout`, `OCCLUDED` beyond `occlusion_timeout`, waypoints rejected, or goal cancelled |
+
+Only one goal is accepted at a time; new goals are rejected while one is active.
+
+### Interfaces
+
+| Interface | Type | Direction |
+|---|---|---|
+| `~/follow_trajectory` | `hint_interfaces/FollowTrajectory` | Action server |
+| `/waypoint_tracking/points` | `hint_interfaces/VisualWaypoints` | Sub — from `waypoint_tracker` |
+| `/waypoint_tracking/state` | `std_msgs/String` (latched) | Sub — from `waypoint_tracker` |
+| `/cmd_vel` | `geometry_msgs/TwistStamped` | Pub |
+| `/waypoint_tracker_node/set_waypoints` | `hint_interfaces/SetWaypoints` | Service client |
+| `/waypoint_tracker_node/stop_tracking` | `hint_interfaces/StopTracking` | Service client |
+
+**`follow_trajectory` action fields**
+
+| Field | Type | Notes |
+|---|---|---|
+| **Goal** `waypoints` | `geometry_msgs/Point[]` | Ordered ground waypoints, normalized `x`/`y ∈ [-1, 1]`, nearest first — the `PlanTrajectory.markers` layout |
+| **Goal** `stamp` | `builtin_interfaces/Time` | Frame to initialise tracking on; `{sec: 0, nanosec: 0}` uses the next frame |
+| **Result** `success` | `bool` | Trajectory consumed vs failed/cancelled |
+| **Result** `message` | `string` | Outcome reason |
+| **Feedback** `state` | `string` | `IDLE` / `RUNNING` / `WAITING` |
+
+### Parameters
+
+All parameters are live-adjustable via `ros2 param set`.
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `k_yaw` | 0.8 | Angular gain (rad/s per unit normalised lookahead offset) |
+| `cruise_speed` | 0.15 | m/s forward speed when aligned; scaled down by heading error |
+| `lookahead` | 0.6 | Normalized distance from the robot reference at which to pick the carrot waypoint. Larger = smoother/less reactive; smaller = tighter path following |
+| `max_linear_vel` | 0.26 | m/s cap — Waffle Pi rated maximum |
+| `max_angular_vel` | 1.82 | rad/s cap |
+| `init_timeout` | 5.0 | Seconds to wait for the tracker to reach `TRACKING` before failing |
+| `occlusion_timeout` | 5.0 | Seconds in `OCCLUDED` before aborting with failure |
 | `control_rate` | 20.0 | Control loop rate in Hz |
 
 ---

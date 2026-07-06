@@ -3,7 +3,7 @@
 <package format="3">
   <name>visual_servoing</name>
   <version>0.0.0</version>
-  <description>Image-based visual servoing — drives the robot toward a tracked bounding box.</description>
+  <description>Servo controllers: IBVS approach (visual_servo) and pure-pursuit waypoint following (pursuit_servo).</description>
   <maintainer email="lorenzo.oliveira@ee.ufcg.edu.br">loolirer</maintainer>
   <license>Apache-2.0</license>
 

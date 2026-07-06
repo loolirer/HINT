@@ -68,6 +68,12 @@ def generate_launch_description():
         output="screen",
     )
 
+    pursuit_servo = Node(
+        package="visual_servoing",
+        executable="pursuit_servo",
+        output="screen",
+    )
+
     description_detector = Node(
         package="gemini_robotics_er",
         executable="description_detector",
@@ -123,6 +129,7 @@ def generate_launch_description():
             lk_tracker,
             waypoint_tracker,
             visual_servo,
+            pursuit_servo,
             description_detector,
             visual_question,
             trajectory_planner,

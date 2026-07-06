@@ -14,6 +14,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SetWaypoints.srv"
   "srv/StopTracking.srv"
   "action/ApproachTarget.action"
+  "action/FollowTrajectory.action"
   "action/GroundDescription.action"
   "action/VisualQuestion.action"
   "action/PlanTrajectory.action"

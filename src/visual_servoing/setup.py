@@ -14,7 +14,7 @@ setup(
     zip_safe=True,
     maintainer="loolirer",
     maintainer_email="lorenzo.oliveira@ee.ufcg.edu.br",
-    description="Image-based visual servoing — drives the robot toward a tracked bounding box.",
+    description="Servo controllers: IBVS approach (visual_servo) and pure-pursuit waypoint following (pursuit_servo).",
     license="Apache-2.0",
     extras_require={
         "test": ["pytest"],
@@ -22,6 +22,7 @@ setup(
     entry_points={
         "console_scripts": [
             "visual_servo = visual_servoing.visual_servo:main",
+            "pursuit_servo = visual_servoing.pursuit_servo:main",
         ],
     },
 )
