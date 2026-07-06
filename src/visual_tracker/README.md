@@ -144,41 +144,60 @@ pure advection drift. Anchored to a **keyframe**, each frame:
    `min_homography_features` inliers support it, else a 4-DOF **affine** fallback.
    A candidate homography is additionally **sanity-checked** (orientation-preserving,
    bounded scale and anisotropy) and rejected to the affine fallback if degenerate,
-   reflected or wildly sheared. The inlier fraction is a global occlusion signal.
-4. **Warp the waypoints** through the transform (`perspectiveTransform`). A
-   covered or blank-floor waypoint is still placed correctly from texture
-   elsewhere on the plane. If the fit is unreliable (`inlier_ratio_thresh`) or
-   degenerate, the waypoints **hold** their last position instead of following it.
-5. **Re-key** (advance the keyframe) only when the keyframe→current baseline grows
+   reflected or wildly sheared. RANSAC already rejects gross (e.g. far-occluded)
+   correspondences as outliers, so the fit is robust to them.
+4. **Re-anchor the plane on the near support.** The RANSAC inliers within
+   `support_radius` of the nearest `priority_count` waypoints re-fit the plane
+   (least-squares, no RANSAC) so residual **far**-plane noise doesn't tilt what the
+   near waypoints ride on — the near end governs, the far end is extrapolated.
+5. **Warp the waypoints** through the transform (`perspectiveTransform`). A
+   covered or blank-floor waypoint is still placed correctly from texture elsewhere
+   on the plane.
+6. **Per-waypoint occlusion.** Each waypoint is *measured* when at least
+   `min_support` inlier grid points fall within `support_radius` of its warped
+   position, else *coasting* — still placed by the plane but flagged
+   `tracked=false`. This is what stops a single far occlusion from poisoning the
+   whole set: it only flips that waypoint's flag. The node's `TRACKING`/`OCCLUDED`
+   state keys on the nearest `priority_count` **in-frame** waypoints, re-selected
+   each frame — so waypoints scrolling off the frame bottom as the robot advances
+   don't read as loss.
+7. **Re-key** (advance the keyframe) only when the keyframe→current baseline grows
    past `rekey_flow_px` (median grid flow) **and** the current fit is high-confidence
    (inlier fraction ≥ `rekey_inlier_ratio`), or when the flow breaks. A re-key
    freezes the current estimate in as the new anchor, so gating it on fit quality
    keeps the error committed at each — hence residual drift — low. These are
    infrequent events, so drift ticks there, not every frame.
 
-The debug overlay shows the inlier grid (dots), the waypoint polyline, and
-`model= inliers= reject= rekeys= kf_disp=`.
+The debug overlay shows the inlier grid (dots), the waypoint polyline (measured
+waypoints **filled**, coasting ones **hollow**), and
+`meas= inliers= reject= rekeys= kf_disp=`.
 
-Waypoints are seeded (in pixels) from `set_waypoints` on the selected frame; one
-carried off-image is still published, flagged `tracked=false`.
+Waypoints are seeded (in pixels) from `set_waypoints` on the selected frame; a
+coasting or off-image waypoint is still published (while `TRACKING`), flagged
+`tracked=false`.
 
-**State:** mirrors `lk_tracker`'s dynamics. `UNTRACKED` before any waypoints (also
-if the ground ROI is too small to seed a grid at init); `TRACKING` after
-`set_waypoints`; `OCCLUDED` the moment a frame fails to produce a trusted fit — the
-failure paths above (flow broken, no transform, unreliable fit) all *hold* the
-waypoints, and any one of them flips `TRACKING → OCCLUDED` immediately (single
-frame, no timeout — the timeout, if any, belongs to the consumer, exactly as
-`visual_servo` applies `occlusion_timeout` to `lk_tracker`'s `OCCLUDED`). The
-waypoints keep being published while `OCCLUDED` (frozen at their last position), so
-`OCCLUDED` on the state topic is the "stale, don't trust them" signal. A trusted
-fit flips `OCCLUDED → TRACKING` immediately. If a frame fails *before any* trusted
-fit was produced after init, the track never established and it drops back to
-`UNTRACKED`. `stop_tracking` (or a new `set_waypoints`) also returns to `UNTRACKED`.
+**State:** mirrors `lk_tracker`'s dynamics, but the occlusion trigger is the
+**nearest in-frame prefix**, not the global fit. `UNTRACKED` before any waypoints
+(also if the ground ROI is too small to seed a grid at init); `TRACKING` after
+`set_waypoints`; `OCCLUDED` the moment the **nearest `priority_count` in-frame
+waypoints** all lose local support (or flow breaks / the warp is degenerate / no
+waypoint is in-frame) — that flips `TRACKING → OCCLUDED` immediately (single frame,
+no timeout — the give-up timeout on a prolonged occlusion belongs to the IBVS
+consumer, exactly as `visual_servo` applies `occlusion_timeout` to `lk_tracker`'s
+`OCCLUDED`). A far waypoint losing support does **not** trip the state; it just
+publishes `tracked=false` while the near end keeps `TRACKING`. Following
+`lk_tracker` (which stops publishing `/tracking/bbox` while occluded), **no points
+are published while `OCCLUDED`** — the frozen positions go stale as the robot
+moves, so `OCCLUDED` on the state topic is the "stop, don't coast" signal, not a
+held target to chase. Regaining near support flips `OCCLUDED → TRACKING`
+immediately. If the near end fails *before any* trusted fit was produced after
+init, the track never established and it drops back to `UNTRACKED`. `stop_tracking`
+(or a new `set_waypoints`) also returns to `UNTRACKED`.
 
 ```
-UNTRACKED ──► (set_waypoints) ──► TRACKING ──► (fit fails) ──► OCCLUDED
-                                     ▲                             │
-                                     └────────── (trusted fit) ────┘
+UNTRACKED ──► (set_waypoints) ──► TRACKING ──► (near prefix lost) ──► OCCLUDED
+                                     ▲                                    │
+                                     └────────── (near support back) ─────┘
 ```
 
 ### Usage
@@ -216,9 +235,16 @@ ros2 topic echo /waypoint_tracking/points
 | `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Sub |
 | `~/set_waypoints` | `hint_interfaces/SetWaypoints` | Service server |
 | `~/stop_tracking` | `hint_interfaces/StopTracking` | Service server |
-| `/waypoint_tracking/state` | `std_msgs/String` (latched) | Pub — `UNTRACKED` / `TRACKING` / `OCCLUDED` |
-| `/waypoint_tracking/points` | `hint_interfaces/VisualWaypoints` | Pub — normalized waypoint stream |
+| `/waypoint_tracking/state` | `std_msgs/String` (latched) | Pub — `UNTRACKED` / `TRACKING` / `OCCLUDED` (the feedback topic; gate on it) |
+| `/waypoint_tracking/points` | `hint_interfaces/VisualWaypoints` | Pub — normalized waypoint stream, **only while `TRACKING`** |
 | `/camera/waypoint_tracking` | `sensor_msgs/Image` | Pub — debug overlay |
+
+> **Consumer contract.** Points are published **only while `TRACKING`**; the stream
+> goes silent on `OCCLUDED`/`UNTRACKED` (lk_tracker parity). A follower must gate on
+> `/waypoint_tracking/state` **and** point-message freshness — treat "not `TRACKING`"
+> or stale points as *stop*, never coast on the last message. Steer only by
+> `tracked=true` waypoints; a `tracked=false` point is a plane extrapolation (and is
+> clamped to the frame edge), not a measurement.
 
 **`VisualWaypoints` layout** — same `geometry_msgs/Point[]` element type as the
 `set_waypoints` input, order preserved (index 0 nearest → last farthest):
@@ -226,8 +252,8 @@ ros2 topic echo /waypoint_tracking/points
 | Field | Type | Value |
 |---|---|---|
 | `header` | `std_msgs/Header` | inherits the source frame's stamp/frame_id |
-| `points` | `geometry_msgs/Point[]` | normalized image coords, `x`/`y ∈ [-1, 1]` (center 0), `z` unused |
-| `tracked` | `bool[]` | parallel to `points`: `true` while the waypoint is in-frame, `false` once flow carries it off-image |
+| `points` | `geometry_msgs/Point[]` | normalized image coords, `x`/`y ∈ [-1, 1]` (center 0), `z` unused; **clamped** to `[-1, 1]` (a coasting point can extrapolate off-frame — the value is clamped to the frame edge) |
+| `tracked` | `bool[]` | parallel to `points`: `true` when the waypoint is **measured** (≥ `min_support` inlier grid points within `support_radius`), `false` when it is **coasting** — placed by the plane fit but occluded / off-image / unsupported |
 
 #### `set_waypoints` service
 
@@ -250,8 +276,10 @@ stamp-based initialisation.
 | `roi_margin` | 0.10 | Half-width of the path band (fraction of waypoint span) the grid is masked to. Narrower = fewer off-path/wall/mover vectors (harder to kidnap) but fewer features; wider = more support but more intrusion |
 | `min_features` | 10 | Minimum surviving inlier grid points before the flow is treated as broken (re-anchor) |
 | `min_homography_features` | 20 | Inlier count below which the estimator drops from homography to affine |
-| `inlier_ratio_thresh` | 0.80 | RANSAC inlier fraction below which the fit is untrusted and waypoints hold |
-| `rekey_inlier_ratio` | 0.90 | Minimum inlier fraction required to commit a re-key. A re-key freezes the current estimate in as the new anchor, so a mediocre-fit frame is deferred (keyframe held) until a cleaner one — keeps per-re-key error, hence drift, low. Keep ≥ `inlier_ratio_thresh` |
+| `rekey_inlier_ratio` | 0.90 | Minimum (global) inlier fraction required to commit a re-key. A re-key freezes the current estimate in as the new anchor, so a mediocre-fit frame is deferred (keyframe held) until a cleaner one — keeps per-re-key error, hence drift, low |
+| `priority_count` | 2 | Nearest N waypoints whose support governs the node state. The node stays `TRACKING` while ≥1 of these is measured; `OCCLUDED` only when the near end loses support. Higher = more near waypoints must all drop before `OCCLUDED` (more tolerant); 1 = the single nearest decides |
+| `support_radius` | 60.0 | Radius (px) around a waypoint within which inlier grid points count as its local support — used both for per-waypoint measured/coasting and for the near-band plane re-fit. Larger = more forgiving (a waypoint stays "measured" with sparser nearby texture); smaller = stricter/more local |
+| `min_support` | 3 | Inlier grid points required within `support_radius` for a waypoint to be **measured** (`tracked=true`); below it the waypoint coasts on the plane fit |
 
 > Remaining layer (odometry fusion — a scene-independent prior that gates
 > occluders and coasts through blank stretches) is the planned follow-up. This

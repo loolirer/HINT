@@ -16,15 +16,23 @@ whole waypoint set through it. Per frame, anchored to a **keyframe**:
 3. The keyframe waypoints are warped through the transform
    (``perspectiveTransform``). Pooling over the grid + the plane constraint
    corrects the per-point flow noise that made pure advection drift; a covered or
-   blank-floor waypoint is still placed correctly from texture elsewhere.
-4. The keyframe **re-keys** (advances to the current frame) only when the
+   blank-floor waypoint is still placed correctly from texture elsewhere. The fit
+   is re-anchored on the *near* support (``_refine_near``) so far-plane noise does
+   not tilt what the near waypoints ride on.
+4. Occlusion is judged **per waypoint**: each is *measured* when enough inlier grid
+   points fall within ``support_radius`` of it, else *coasting* (still placed by the
+   plane, flagged ``tracked=false``). The node stays ``TRACKING`` while the nearest
+   ``priority_count`` *in-frame* waypoints keep support (recomputed each frame, so
+   forward progress that scrolls the near waypoints off-screen doesn't read as
+   loss), so a far occlusion only flips its own flag instead of forcing the whole
+   set ``OCCLUDED``. Waypoints are published only while ``TRACKING``.
+5. The keyframe **re-keys** (advances to the current frame) only when the
    keyframe->current baseline grows past ``rekey_flow_px`` or the flow breaks, so
    residual drift accrues at these infrequent events, not every frame.
 
-When the RANSAC fit is unreliable (``inlier_ratio_thresh``) the waypoints hold
-their last position rather than following a bad transform. Waypoints come in via
-``set_waypoints`` (normalized [-1, 1] image space) and their positions are
-re-published continuously on ``/waypoint_tracking/points``.
+Waypoints come in via ``set_waypoints`` (normalized [-1, 1] image space, nearest
+first) and their positions are re-published continuously on
+``/waypoint_tracking/points``.
 """
 
 from collections import deque
@@ -62,12 +70,17 @@ class WaypointTrackerNode(Node):
         self.declare_parameter("dis_preset", "fast")  # ultrafast|fast|medium
         self.declare_parameter("fb_thresh", 1.0)  # px; forward-backward reject
         self.declare_parameter("rekey_flow_px", 30.0)  # re-key when kf baseline grows
-        self.declare_parameter("grid_step", 10)  # px spacing of the ground flow grid
+        self.declare_parameter("grid_step", 5)  # px spacing of the ground flow grid
         self.declare_parameter("roi_margin", 0.10)  # padding around waypoint bbox
         self.declare_parameter("min_features", 10)  # min inlier grid points
         self.declare_parameter("min_homography_features", 20)  # homography vs affine
-        self.declare_parameter("inlier_ratio_thresh", 0.80)  # hold below this
         self.declare_parameter("rekey_inlier_ratio", 0.90)  # min fit quality to re-key
+        # Per-waypoint occlusion: the nearest ``priority_count`` waypoints govern the
+        # node state; a waypoint counts as *measured* when at least ``min_support``
+        # inlier grid points sit within ``support_radius`` px of it (else coasting).
+        self.declare_parameter("priority_count", 2)  # nearest N drive node state
+        self.declare_parameter("support_radius", 60.0)  # px; local support window
+        self.declare_parameter("min_support", 3)  # inliers in window to be "measured"
 
         # --- Publishers ---
         self.pub_points = self.create_publisher(
@@ -159,6 +172,8 @@ class WaypointTrackerNode(Node):
         self._model = "none"
         self._inlier_ratio = 0.0
         self._grid_vis = None  # (K,2) current inlier grid positions, for overlay
+        self._tracked_mask = None  # (N,) bool: per-waypoint measured vs coasting
+        self._support = None  # (N,) int: local inlier count per waypoint
         self._set_status(status)
 
     def _set_status(self, status):
@@ -250,11 +265,15 @@ class WaypointTrackerNode(Node):
     def _handle_occlusion(self, frame, msg):
         """A frame failed to produce a trusted fit — hold, like lk_tracker.
 
-        ``TRACKING -> OCCLUDED`` immediately (the waypoints keep publishing, frozen
-        at their last position — ``OCCLUDED`` on the state topic is the "stale, do
-        not trust" signal for downstream consumers, exactly as ``visual_servo``
-        already treats ``lk_tracker``'s ``OCCLUDED``). If no trusted fit was ever
-        produced after init the track never established, so drop to ``UNTRACKED``.
+        ``TRACKING -> OCCLUDED`` immediately. Following ``lk_tracker`` (which stops
+        publishing ``/tracking/bbox`` while occluded), **no waypoints are published
+        while OCCLUDED**: the frozen positions go stale as the robot keeps moving, so
+        the consumer must gate on the state topic and stop, not coast on a held
+        target. ``OCCLUDED`` on ``/waypoint_tracking/state`` is that signal, exactly
+        as ``visual_servo`` treats ``lk_tracker``'s ``OCCLUDED``. If no trusted fit
+        was ever produced after init the track never established, so drop to
+        ``UNTRACKED``. Recovery to ``TRACKING`` is automatic when a trusted fit
+        returns; the give-up timeout on a prolonged occlusion belongs to the IBVS.
         """
         if not self._ever_tracked:
             self._reset(STATUS_UNTRACKED)
@@ -264,7 +283,9 @@ class WaypointTrackerNode(Node):
         if self.tracking_status != STATUS_OCCLUDED:
             self.get_logger().warn("Waypoint tracking OCCLUDED — holding last position.")
             self._set_status(STATUS_OCCLUDED)
-        self._draw_and_publish(frame, msg)  # republish the frozen waypoints
+        # No points published while OCCLUDED — only state (already set) + debug.
+        self._draw_overlay(frame)
+        self._publish_debug(frame, msg)
 
     # ------------------------------------------------------------------
     # Per-frame tracking
@@ -300,10 +321,46 @@ class WaypointTrackerNode(Node):
             self._handle_occlusion(frame, msg)  # no transform — hold
             return
 
-        self._inlier_ratio = float(inliers.sum()) / max(len(dst), 1)
+        inlier_mask = inliers.ravel() == 1
+        self._inlier_ratio = float(inlier_mask.sum()) / max(len(dst), 1)
+        src_in = src[inlier_mask]
+        inlier_dst = dst[inlier_mask]  # measured plane support this frame
+        self._grid_vis = inlier_dst
+
+        # Piece 1 — bias the plane to the near band. RANSAC already rejects gross
+        # far occlusion as outliers, so H is robust; this re-anchors the plane on
+        # the near support (inlier grid within support_radius of the nearest
+        # waypoints) so residual far-plane noise doesn't tilt what the near points
+        # ride on. Falls back to H if the near support is thin / refit degenerate.
+        H = self._refine_near(H, src_in, inlier_dst)
+
         warped = self._warp(H)
-        if warped is None or self._inlier_ratio < self._p("inlier_ratio_thresh"):
-            self._handle_occlusion(frame, msg)  # unreliable fit -> hold
+        if warped is None:
+            self._handle_occlusion(frame, msg)  # degenerate warp -> hold
+            return
+
+        # Piece 2 — per-waypoint support: a waypoint is *measured* when enough
+        # inlier grid points fall within support_radius of its warped position;
+        # otherwise it is still placed by the plane but flagged coasting.
+        self._support = self._waypoint_support(warped, inlier_dst)
+        self._tracked_mask = self._support >= int(self._p("min_support"))
+
+        # Piece 3 — node state follows the nearest *in-frame* waypoints, recomputed
+        # every frame. Keying on fixed indices 0..k would false-trip OCCLUDED on
+        # normal progress: as the robot advances, the nearest-at-init waypoints leave
+        # the frame bottom and lose support. Selecting the nearest *still-in-frame*
+        # waypoints instead means a far occlusion only flips its own flag and forward
+        # progress doesn't read as loss. No in-frame waypoint at all -> nothing
+        # measurable -> OCCLUDED.
+        h, w = self.img_shape
+        in_frame = (
+            (warped[:, 0] >= 0) & (warped[:, 0] < w)
+            & (warped[:, 1] >= 0) & (warped[:, 1] < h)
+        )
+        k = max(1, int(self._p("priority_count")))
+        priority_idx = np.nonzero(in_frame)[0][:k]  # nearest-first order preserved
+        if len(priority_idx) == 0 or not bool(self._tracked_mask[priority_idx].any()):
+            self._handle_occlusion(frame, msg)  # near end lost -> hold
             return
 
         self.pts = warped
@@ -373,6 +430,37 @@ class WaypointTrackerNode(Node):
         if smax / max(smin, 1e-6) > 4.0:
             return False
         return True
+
+    def _refine_near(self, H, src_in, dst_in):
+        """Re-fit the plane on inlier grid near the priority (nearest) waypoints.
+
+        ``src_in`` / ``dst_in`` are the RANSAC-inlier grid correspondences (keyframe
+        -> current), already clean, so a plain least-squares homography suffices. We
+        keep only inliers within ``support_radius`` of the nearest ``priority_count``
+        keyframe waypoints, so the near end governs the plane the far (extrapolated)
+        points ride on. Returns ``H`` unchanged when near support is too thin or the
+        refit is degenerate.
+        """
+        k = max(1, int(self._p("priority_count")))
+        near_kf = self.kf_pts[:k]
+        r = float(self._p("support_radius"))
+        d = np.linalg.norm(src_in[:, None, :] - near_kf[None, :, :], axis=2)
+        near = d.min(axis=1) <= r
+        if int(near.sum()) < self._p("min_homography_features"):
+            return H  # not enough near support to trust a refit
+        H2, _ = cv2.findHomography(src_in[near], dst_in[near], 0)  # LS, no RANSAC
+        if H2 is None or not self._is_sane_homography(H2.astype(np.float64)):
+            return H
+        return H2.astype(np.float64)
+
+    def _waypoint_support(self, warped, inlier_dst):
+        """Per-waypoint count of inlier grid points within ``support_radius`` px."""
+        n = len(warped)
+        if len(inlier_dst) == 0:
+            return np.zeros(n, dtype=np.int32)
+        r = float(self._p("support_radius"))
+        d = np.linalg.norm(warped[:, None, :] - inlier_dst[None, :, :], axis=2)
+        return (d <= r).sum(axis=1).astype(np.int32)
 
     def _warp(self, H):
         """Warp the keyframe waypoints by ``H``; ``None`` if the result is wild."""
@@ -457,19 +545,25 @@ class WaypointTrackerNode(Node):
     def _publish_points(self, msg):
         """Publish the warped waypoints (normalized [-1, 1], `z` unused).
 
-        `tracked` is `true` while the waypoint is inside the frame, `false` once
-        the transform carries it off-image.
+        Only reached while `TRACKING` (lk_tracker parity — no data is published while
+        `OCCLUDED`/`UNTRACKED`). `tracked` marks each waypoint *measured* vs
+        *coasting*: `true` when it has local inlier-grid support this frame, `false`
+        for a far/occluded/off-image waypoint the plane is still placing.
         """
         h, w = self.img_shape
+        tracked = self._tracked_mask
+        measuring = self.tracking_status == STATUS_TRACKING and tracked is not None
         out = VisualWaypoints()
         out.header = msg.header
-        for pt in self.pts:
+        for i, pt in enumerate(self.pts):
             p = Point()
-            p.x = float(2.0 * pt[0] / (w - 1) - 1.0)
-            p.y = float(2.0 * pt[1] / (h - 1) - 1.0)
+            # Clamp to the published [-1, 1] contract — a coasting/off-frame waypoint
+            # can extrapolate far outside the frame, and an unclamped value would map
+            # to an enormous steering command in a naive consumer.
+            p.x = float(np.clip(2.0 * pt[0] / (w - 1) - 1.0, -1.0, 1.0))
+            p.y = float(np.clip(2.0 * pt[1] / (h - 1) - 1.0, -1.0, 1.0))
             out.points.append(p)
-            in_frame = (0 <= pt[0] < w) and (0 <= pt[1] < h)
-            out.tracked.append(bool(in_frame))
+            out.tracked.append(bool(measuring and tracked[i]))
         self.pub_points.publish(out)
 
     def _draw_idle(self, frame):
@@ -490,24 +584,29 @@ class WaypointTrackerNode(Node):
             for gx, gy in self._grid_vis:
                 cv2.circle(frame, (int(gx), int(gy)), 1, (255, 200, 0), -1)
 
-        # Waypoint polyline + points.
+        # Waypoint polyline + points: measured filled, coasting hollow.
+        tracked = self._tracked_mask
+        measuring = (not occluded) and tracked is not None
         pts_int = [tuple(np.round(p).astype(int)) for p in self.pts]
         if len(pts_int) >= 2:
             cv2.polylines(
                 frame, [np.array(pts_int, dtype=np.int32)], False, color, 2
             )
         for i, (px, py) in enumerate(pts_int):
-            cv2.circle(frame, (px, py), 6, color, -1)
+            measured = bool(measuring and tracked[i])
+            cv2.circle(frame, (px, py), 6, color, -1 if measured else 1)
             cv2.putText(
                 frame, str(i), (px + 8, py - 8),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
             )
+        n_meas = int(tracked.sum()) if measuring else 0
         cv2.putText(
             frame,
             f"{self.tracking_status} ({self._model})  {len(self.pts)} pts  "
-            f"inliers={self._inlier_ratio:.2f}  reject={self._n_rejected}  "
-            f"rekeys={self._rekeys}  kf_disp={self._kf_disp:.1f}",
-            (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2,
+            f"meas={n_meas}/{len(self.pts)}  inliers={self._inlier_ratio:.2f}  "
+            f"reject={self._n_rejected}  rekeys={self._rekeys}  "
+            f"kf_disp={self._kf_disp:.1f}",
+            (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2,
         )
 
     def _publish_debug(self, frame, original_msg):
