@@ -142,14 +142,19 @@ pure advection drift. Anchored to a **keyframe**, each frame:
    (count shown as `reject=`).
 3. **RANSAC transform.** Fit a **homography** (`findHomography`) when at least
    `min_homography_features` inliers support it, else a 4-DOF **affine** fallback.
-   The inlier fraction is a global occlusion signal.
+   A candidate homography is additionally **sanity-checked** (orientation-preserving,
+   bounded scale and anisotropy) and rejected to the affine fallback if degenerate,
+   reflected or wildly sheared. The inlier fraction is a global occlusion signal.
 4. **Warp the waypoints** through the transform (`perspectiveTransform`). A
    covered or blank-floor waypoint is still placed correctly from texture
    elsewhere on the plane. If the fit is unreliable (`inlier_ratio_thresh`) or
    degenerate, the waypoints **hold** their last position instead of following it.
 5. **Re-key** (advance the keyframe) only when the keyframe→current baseline grows
-   past `rekey_flow_px` (median grid flow) or the flow breaks — so residual drift
-   ticks at these infrequent events, not every frame.
+   past `rekey_flow_px` (median grid flow) **and** the current fit is high-confidence
+   (inlier fraction ≥ `rekey_inlier_ratio`), or when the flow breaks. A re-key
+   freezes the current estimate in as the new anchor, so gating it on fit quality
+   keeps the error committed at each — hence residual drift — low. These are
+   infrequent events, so drift ticks there, not every frame.
 
 The debug overlay shows the inlier grid (dots), the waypoint polyline, and
 `model= inliers= reject= rekeys= kf_disp=`.
@@ -157,9 +162,24 @@ The debug overlay shows the inlier grid (dots), the waypoint polyline, and
 Waypoints are seeded (in pixels) from `set_waypoints` on the selected frame; one
 carried off-image is still published, flagged `tracked=false`.
 
-**State:** `UNTRACKED` before any waypoints (also if the ground ROI is too small
-to seed a grid at init), `TRACKING` after `set_waypoints`. `stop_tracking` (or a
-new `set_waypoints`) returns to `UNTRACKED`.
+**State:** mirrors `lk_tracker`'s dynamics. `UNTRACKED` before any waypoints (also
+if the ground ROI is too small to seed a grid at init); `TRACKING` after
+`set_waypoints`; `OCCLUDED` the moment a frame fails to produce a trusted fit — the
+failure paths above (flow broken, no transform, unreliable fit) all *hold* the
+waypoints, and any one of them flips `TRACKING → OCCLUDED` immediately (single
+frame, no timeout — the timeout, if any, belongs to the consumer, exactly as
+`visual_servo` applies `occlusion_timeout` to `lk_tracker`'s `OCCLUDED`). The
+waypoints keep being published while `OCCLUDED` (frozen at their last position), so
+`OCCLUDED` on the state topic is the "stale, don't trust them" signal. A trusted
+fit flips `OCCLUDED → TRACKING` immediately. If a frame fails *before any* trusted
+fit was produced after init, the track never established and it drops back to
+`UNTRACKED`. `stop_tracking` (or a new `set_waypoints`) also returns to `UNTRACKED`.
+
+```
+UNTRACKED ──► (set_waypoints) ──► TRACKING ──► (fit fails) ──► OCCLUDED
+                                     ▲                             │
+                                     └────────── (trusted fit) ────┘
+```
 
 ### Usage
 
@@ -196,7 +216,7 @@ ros2 topic echo /waypoint_tracking/points
 | `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Sub |
 | `~/set_waypoints` | `hint_interfaces/SetWaypoints` | Service server |
 | `~/stop_tracking` | `hint_interfaces/StopTracking` | Service server |
-| `/waypoint_tracking/state` | `std_msgs/String` (latched) | Pub — `UNTRACKED` / `TRACKING` |
+| `/waypoint_tracking/state` | `std_msgs/String` (latched) | Pub — `UNTRACKED` / `TRACKING` / `OCCLUDED` |
 | `/waypoint_tracking/points` | `hint_interfaces/VisualWaypoints` | Pub — normalized waypoint stream |
 | `/camera/waypoint_tracking` | `sensor_msgs/Image` | Pub — debug overlay |
 
@@ -223,14 +243,15 @@ stamp-based initialisation.
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `dis_preset` | `ultrafast` | DIS accuracy/speed: `ultrafast` / `fast` / `medium` (more accurate = less drift, slower). Applied at startup, **not** live-adjustable. |
-| `fb_thresh` | 2.0 | Forward-backward round-trip tolerance (px) for grid vectors |
-| `rekey_flow_px` | 40.0 | Re-key when the median keyframe→current grid flow exceeds this (px). Lower = fresher flow but more frequent drift ticks; higher = larger baseline strains DIS |
-| `grid_step` | 20 | Spacing (px) of the ground flow grid; lower = denser (more robust, slower) |
+| `dis_preset` | `fast` | DIS accuracy/speed: `ultrafast` / `fast` / `medium` (more accurate = less drift, slower). Applied at startup, **not** live-adjustable. |
+| `fb_thresh` | 1.0 | Forward-backward round-trip tolerance (px) for grid vectors |
+| `rekey_flow_px` | 30.0 | Re-key when the median keyframe→current grid flow exceeds this (px). Lower = fresher flow but more frequent drift ticks; higher = larger baseline strains DIS |
+| `grid_step` | 10 | Spacing (px) of the ground flow grid; lower = denser (more robust, slower) |
 | `roi_margin` | 0.10 | Half-width of the path band (fraction of waypoint span) the grid is masked to. Narrower = fewer off-path/wall/mover vectors (harder to kidnap) but fewer features; wider = more support but more intrusion |
 | `min_features` | 10 | Minimum surviving inlier grid points before the flow is treated as broken (re-anchor) |
 | `min_homography_features` | 20 | Inlier count below which the estimator drops from homography to affine |
-| `inlier_ratio_thresh` | 0.50 | RANSAC inlier fraction below which the fit is untrusted and waypoints hold |
+| `inlier_ratio_thresh` | 0.80 | RANSAC inlier fraction below which the fit is untrusted and waypoints hold |
+| `rekey_inlier_ratio` | 0.90 | Minimum inlier fraction required to commit a re-key. A re-key freezes the current estimate in as the new anchor, so a mediocre-fit frame is deferred (keyframe held) until a cleaner one — keeps per-re-key error, hence drift, low. Keep ≥ `inlier_ratio_thresh` |
 
 > Remaining layer (odometry fusion — a scene-independent prior that gates
 > occluders and coasts through blank stretches) is the planned follow-up. This

@@ -43,6 +43,7 @@ from hint_interfaces.srv import SetWaypoints, StopTracking
 from visual_tracker.tracking_common import (
     STATUS_UNTRACKED,
     STATUS_TRACKING,
+    STATUS_OCCLUDED,
     LATCHED_QOS,
 )
 
@@ -58,14 +59,15 @@ class WaypointTrackerNode(Node):
         super().__init__("waypoint_tracker_node")
 
         # --- Tuning parameters ---
-        self.declare_parameter("dis_preset", "ultrafast")  # ultrafast|fast|medium
-        self.declare_parameter("fb_thresh", 5.0)  # px; forward-backward reject
-        self.declare_parameter("rekey_flow_px", 40.0)  # re-key when kf baseline grows
+        self.declare_parameter("dis_preset", "fast")  # ultrafast|fast|medium
+        self.declare_parameter("fb_thresh", 1.0)  # px; forward-backward reject
+        self.declare_parameter("rekey_flow_px", 30.0)  # re-key when kf baseline grows
         self.declare_parameter("grid_step", 10)  # px spacing of the ground flow grid
-        self.declare_parameter("roi_margin", 0.25)  # padding around waypoint bbox
+        self.declare_parameter("roi_margin", 0.10)  # padding around waypoint bbox
         self.declare_parameter("min_features", 10)  # min inlier grid points
         self.declare_parameter("min_homography_features", 20)  # homography vs affine
-        self.declare_parameter("inlier_ratio_thresh", 0.75)  # hold below this
+        self.declare_parameter("inlier_ratio_thresh", 0.80)  # hold below this
+        self.declare_parameter("rekey_inlier_ratio", 0.90)  # min fit quality to re-key
 
         # --- Publishers ---
         self.pub_points = self.create_publisher(
@@ -149,6 +151,7 @@ class WaypointTrackerNode(Node):
         self.kf_grid = None  # (M,2) ground flow grid, in keyframe
         self.kf_pts = None  # (N,2) waypoint positions in the keyframe
         self.img_shape = None  # (h, w)
+        self._ever_tracked = False  # a trusted fit has landed since init
         # Debug/telemetry
         self._n_rejected = 0
         self._rekeys = 0
@@ -235,6 +238,35 @@ class WaypointTrackerNode(Node):
         return True
 
     # ------------------------------------------------------------------
+    # Occlusion handling (mirrors lk_tracker's TRACKING <-> OCCLUDED dynamics)
+
+    def _mark_tracking(self):
+        """A frame produced a trusted fit — (re)enter TRACKING, recovering if held."""
+        if self.tracking_status != STATUS_TRACKING:
+            self.get_logger().info("Waypoint tracking recovered.")
+            self._set_status(STATUS_TRACKING)
+        self._ever_tracked = True
+
+    def _handle_occlusion(self, frame, msg):
+        """A frame failed to produce a trusted fit — hold, like lk_tracker.
+
+        ``TRACKING -> OCCLUDED`` immediately (the waypoints keep publishing, frozen
+        at their last position — ``OCCLUDED`` on the state topic is the "stale, do
+        not trust" signal for downstream consumers, exactly as ``visual_servo``
+        already treats ``lk_tracker``'s ``OCCLUDED``). If no trusted fit was ever
+        produced after init the track never established, so drop to ``UNTRACKED``.
+        """
+        if not self._ever_tracked:
+            self._reset(STATUS_UNTRACKED)
+            self._draw_idle(frame)
+            self._publish_debug(frame, msg)
+            return
+        if self.tracking_status != STATUS_OCCLUDED:
+            self.get_logger().warn("Waypoint tracking OCCLUDED — holding last position.")
+            self._set_status(STATUS_OCCLUDED)
+        self._draw_and_publish(frame, msg)  # republish the frozen waypoints
+
+    # ------------------------------------------------------------------
     # Per-frame tracking
 
     def _track(self, gray, frame, msg):
@@ -257,28 +289,36 @@ class WaypointTrackerNode(Node):
         # to the current frame at the last-known positions to recover.
         if len(dst) < min_f:
             self._kf_disp = 0.0
-            if self._set_keyframe(gray):
+            if self._set_keyframe(gray):  # re-anchor so the next frame can recover
                 self._rekeys += 1
-            self._draw_and_publish(frame, msg)
+            self._handle_occlusion(frame, msg)  # flow broke — waypoints frozen
             return
 
         H, inliers, model = self._estimate_transform(src, dst)
         self._model = model
         if H is None:
-            self._draw_and_publish(frame, msg)  # hold
+            self._handle_occlusion(frame, msg)  # no transform — hold
             return
 
         self._inlier_ratio = float(inliers.sum()) / max(len(dst), 1)
         warped = self._warp(H)
         if warped is None or self._inlier_ratio < self._p("inlier_ratio_thresh"):
-            self._draw_and_publish(frame, msg)  # unreliable fit -> hold
+            self._handle_occlusion(frame, msg)  # unreliable fit -> hold
             return
 
         self.pts = warped
+        self._mark_tracking()  # trusted measurement this frame
 
-        # Re-key when the baseline grows enough that DIS accuracy degrades.
+        # Re-key when the baseline grows enough that DIS accuracy degrades — but
+        # only from a high-confidence frame. A re-key freezes the current warped
+        # estimate in as the new anchor, so any error committed here becomes
+        # permanent drift; a mediocre-fit frame is deferred until a clean one
+        # (or, failing that, the broken-flow recovery re-anchor above).
         self._kf_disp = float(np.median(np.linalg.norm(g_fwd[good], axis=1)))
-        if self._kf_disp > self._p("rekey_flow_px"):
+        if (
+            self._kf_disp > self._p("rekey_flow_px")
+            and self._inlier_ratio >= self._p("rekey_inlier_ratio")
+        ):
             if self._set_keyframe(gray):
                 self._rekeys += 1
 
@@ -298,11 +338,7 @@ class WaypointTrackerNode(Node):
         """Fit keyframe->current ground transform; homography when well-supported."""
         if len(src) >= self._p("min_homography_features"):
             H, inliers = cv2.findHomography(src, dst, cv2.RANSAC, 3.0)
-            if (
-                H is not None
-                and inliers is not None
-                and abs(np.linalg.det(H[:2, :2])) > 1e-6
-            ):
+            if H is not None and inliers is not None and self._is_sane_homography(H):
                 return H.astype(np.float64), inliers, "homography"
 
         M, inliers = cv2.estimateAffinePartial2D(
@@ -312,6 +348,31 @@ class WaypointTrackerNode(Node):
             return None, None, "none"
         H = np.vstack([M, [0.0, 0.0, 1.0]]).astype(np.float64)
         return H, inliers, "affine"
+
+    def _is_sane_homography(self, H):
+        """Reject degenerate / reflected / wildly-skewed homographies.
+
+        ``det(H[:2,:2]) > 1e-6`` alone still accepts near-singular, mirror-flipped
+        or heavily-sheared fits — a bad homography that happens to clear the inlier
+        gate poisons everything downstream (its warped waypoints can become the
+        next re-key anchor). We bound the linear part's orientation, absolute
+        scale and anisotropy, all generous enough not to touch honest per-frame
+        keyframe->current motion (baseline capped at ``rekey_flow_px``).
+        """
+        if not np.all(np.isfinite(H)):
+            return False
+        A = H[:2, :2]
+        # Orientation-preserving and not near-singular (rejects reflections too).
+        if np.linalg.det(A) < 1e-3:
+            return False
+        # Singular values bound absolute scale; their ratio bounds shear/anisotropy.
+        sv = np.linalg.svd(A, compute_uv=False)
+        smax, smin = float(sv[0]), float(sv[-1])
+        if smin < 0.25 or smax > 4.0:
+            return False
+        if smax / max(smin, 1e-6) > 4.0:
+            return False
+        return True
 
     def _warp(self, H):
         """Warp the keyframe waypoints by ``H``; ``None`` if the result is wild."""
@@ -419,6 +480,11 @@ class WaypointTrackerNode(Node):
         )
 
     def _draw_overlay(self, frame):
+        # Amber while OCCLUDED (waypoints held/frozen), green while tracking —
+        # same colour convention as lk_tracker's overlay.
+        occluded = self.tracking_status == STATUS_OCCLUDED
+        color = (0, 215, 255) if occluded else (0, 255, 0)
+
         # Inlier grid driving the homography.
         if self._grid_vis is not None:
             for gx, gy in self._grid_vis:
@@ -428,20 +494,20 @@ class WaypointTrackerNode(Node):
         pts_int = [tuple(np.round(p).astype(int)) for p in self.pts]
         if len(pts_int) >= 2:
             cv2.polylines(
-                frame, [np.array(pts_int, dtype=np.int32)], False, (0, 255, 0), 2
+                frame, [np.array(pts_int, dtype=np.int32)], False, color, 2
             )
         for i, (px, py) in enumerate(pts_int):
-            cv2.circle(frame, (px, py), 6, (0, 255, 0), -1)
+            cv2.circle(frame, (px, py), 6, color, -1)
             cv2.putText(
                 frame, str(i), (px + 8, py - 8),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1,
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
             )
         cv2.putText(
             frame,
-            f"TRACKING ({self._model})  {len(self.pts)} pts  "
+            f"{self.tracking_status} ({self._model})  {len(self.pts)} pts  "
             f"inliers={self._inlier_ratio:.2f}  reject={self._n_rejected}  "
             f"rekeys={self._rekeys}  kf_disp={self._kf_disp:.1f}",
-            (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2,
+            (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2,
         )
 
     def _publish_debug(self, frame, original_msg):
