@@ -16,6 +16,8 @@ Every HINT-specific BT leaf type is registered once, in one place: `hint_bt::reg
 |---|---|---|
 | `GroundDescriptionAction` | `include/hint_bt/nodes/ground_description_action.hpp` | `/description_detector_node/ground_description` |
 | `ApproachTargetAction` | `include/hint_bt/nodes/approach_target_action.hpp` | `/visual_servoing_node/approach_target` |
+| `PlanTrajectoryAction` | `include/hint_bt/nodes/plan_trajectory_action.hpp` | `/trajectory_planner_node/plan_trajectory` |
+| `FollowTrajectoryAction` | `include/hint_bt/nodes/follow_trajectory_action.hpp` | `/pursuit_servo_node/follow_trajectory` |
 | `VisualQuestionAction` | `include/hint_bt/nodes/visual_question_action.hpp` | `/visual_question_node/ask` |
 
 Adding a new leaf: drop a new `RosActionNode<...>` subclass header under `include/hint_bt/nodes/`, register it inside `registerHintNodes()`. No executable needs to change — `bt_executor_node` picks up any tree that references it.
@@ -57,9 +59,10 @@ Every `.xml` file under `behaviors/` is installed to `share/hint_bt/behaviors` a
 | File | Tree ID | Description |
 |---|---|---|
 | `approach_described_target.xml` | `ApproachDescribedTarget` | Grounds a text description to a bbox (`GroundDescriptionAction`), then drives to it (`ApproachTargetAction`). Its `description` port is left as an unbound blackboard reference (`{description}`) — it's meant to be driven as a `SubTree`, which binds `description` from the caller. |
-| `sequential_bins.xml` | `SequentialBins` | Visits the blue trash bin, then the yellow trash bin — two `SubTree` calls into `ApproachDescribedTarget`, each binding its own `description`. |
-| `approach_described_target_checked.xml` | `ApproachDescribedTargetChecked` | `ApproachDescribedTarget` (as a `SubTree`) followed by a `VisualQuestionAction` sanity check retried until it confirms arrival (`RetryUntilSuccessful num_attempts="-1"`). Keeps the same `{description}`-only interface, so it's a drop-in replacement. `on_unknown` defaults to `SUCCESS`, so an unreachable VLM abstains (stops the loop) instead of spinning forever. |
-| `sequential_bins_checked.xml` | `SequentialBinsChecked` | `SequentialBins` with each leg swapped from `ApproachDescribedTarget` to `ApproachDescribedTargetChecked` — arrival is VLM-confirmed before advancing to the next bin. |
+| `sequential_bins.xml` | `SequentialBins` | Visits the blue trash bin, then the yellow — two legs in a `Sequence`, each a `RetryUntilSuccessful num_attempts="2"` around a `SubTree` into `ApproachDescribedTarget` bound to its own `description`. |
+| `sequential_bins_checked.xml` | `SequentialBinsChecked` | The bins mission with a VLM sanity check: two legs (blue, then yellow), each `RetryUntilSuccessful num_attempts="2"` over a `Fallback` — try `ApproachDescribedTarget`, and on its failure fall through to a `VisualQuestionAction` (each leg asks its own question). |
+| `follow_planned_trajectory.xml` | `FollowPlannedTrajectory` | Plans a ground trajectory from a text description (`PlanTrajectoryAction`), then follows it (`FollowTrajectoryAction`) — the trajectory-following twin of `ApproachDescribedTarget`. `PlanTrajectoryAction`'s `markers` output feeds `FollowTrajectoryAction`'s `waypoints` input via the `{markers}` blackboard entry; `description` is left as an unbound `{description}` reference, so it's meant to be driven as a `SubTree` that binds it from the caller. |
+| `explore_ahead.xml` | `ExploreAhead` | Wander forward: `RetryUntilSuccessful num_attempts="3"` over a `SubTree` into `FollowPlannedTrajectory` — plans + follows a "head in the general direction ahead, keep to open floor, avoid obstacles, don't go too far; if blocked turn left or right (no preference)" trajectory, **re-planning and retrying** the whole leg up to 3 times if it fails (planning error / `occlusion_timeout`) and succeeding as soon as one leg completes. The exploration prompt is a literal `description` bound on the `SubTree`. |
 
 Preloading happens once, in the node constructor, before it starts spinning — editing a file under `behaviors/` needs a **node restart** to take effect (no rebuild, since `--symlink-install` mirrors `install(DIRECTORY behaviors/ ...)` straight to the source file).
 

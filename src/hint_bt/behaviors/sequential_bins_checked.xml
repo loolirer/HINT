@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <root BTCPP_format="4">
-    <BehaviorTree ID="SequentialBins">
+    <BehaviorTree ID="SequentialBinsChecked">
       <Sequence>
         <RetryUntilSuccessful num_attempts="2">
           <Fallback>
