@@ -49,9 +49,9 @@ class PursuitServoNode(Node):
         super().__init__("pursuit_servo_node")
 
         # --- Parameters ---
-        self.declare_parameter("k_yaw", 0.8)  # steering gain (rad/s per unit error)
-        self.declare_parameter("cruise_speed", 0.15)  # m/s forward when aligned
-        self.declare_parameter("lookahead", 0.6)  # normalized lookahead distance
+        self.declare_parameter("k_yaw", 0.5)  # steering gain (rad/s per unit error)
+        self.declare_parameter("cruise_speed", 0.05)  # m/s forward when aligned
+        self.declare_parameter("lookahead", 0.1)  # normalized lookahead distance
         self.declare_parameter("max_linear_vel", 0.26)  # m/s cap (Waffle Pi rated max)
         self.declare_parameter("max_angular_vel", 1.82)  # rad/s cap
         self.declare_parameter("init_timeout", 5.0)  # s to reach TRACKING before fail
