@@ -16,6 +16,8 @@ Every HINT-specific BT leaf type is registered once, in one place: `hint_bt::reg
 |---|---|---|
 | `GroundDescriptionAction` | `include/hint_bt/nodes/ground_description_action.hpp` | `/description_detector_node/ground_description` |
 | `ApproachTargetAction` | `include/hint_bt/nodes/approach_target_action.hpp` | `/visual_servoing_node/approach_target` |
+| `PlanTrajectoryAction` | `include/hint_bt/nodes/plan_trajectory_action.hpp` | `/trajectory_planner_node/plan_trajectory` |
+| `FollowTrajectoryAction` | `include/hint_bt/nodes/follow_trajectory_action.hpp` | `/pursuit_servo_node/follow_trajectory` |
 | `VisualQuestionAction` | `include/hint_bt/nodes/visual_question_action.hpp` | `/visual_question_node/ask` |
 
 Adding a new leaf: drop a new `RosActionNode<...>` subclass header under `include/hint_bt/nodes/`, register it inside `registerHintNodes()`. No executable needs to change — `bt_executor_node` picks up any tree that references it.
@@ -60,6 +62,9 @@ Every `.xml` file under `behaviors/` is installed to `share/hint_bt/behaviors` a
 | `sequential_bins.xml` | `SequentialBins` | Visits the blue trash bin, then the yellow trash bin — two `SubTree` calls into `ApproachDescribedTarget`, each binding its own `description`. |
 | `approach_described_target_checked.xml` | `ApproachDescribedTargetChecked` | `ApproachDescribedTarget` (as a `SubTree`) followed by a `VisualQuestionAction` sanity check retried until it confirms arrival (`RetryUntilSuccessful num_attempts="-1"`). Keeps the same `{description}`-only interface, so it's a drop-in replacement. `on_unknown` defaults to `SUCCESS`, so an unreachable VLM abstains (stops the loop) instead of spinning forever. |
 | `sequential_bins_checked.xml` | `SequentialBinsChecked` | `SequentialBins` with each leg swapped from `ApproachDescribedTarget` to `ApproachDescribedTargetChecked` — arrival is VLM-confirmed before advancing to the next bin. |
+| `follow_trajectory.xml` | `FollowTrajectory` | Minimal example — a single `FollowTrajectoryAction` that follows the ground trajectory on the `{waypoints}` blackboard entry (with `{stamp}`) via `pursuit_servo`. The ports are left unbound so it's driven as a `SubTree` (or with the blackboard set by the caller). |
+| `follow_planned_trajectory.xml` | `FollowPlannedTrajectory` | Plans a ground trajectory from a text description (`PlanTrajectoryAction`), then follows it (`FollowTrajectoryAction`) — the trajectory-following twin of `ApproachDescribedTarget`. `PlanTrajectoryAction`'s `markers` output feeds `FollowTrajectoryAction`'s `waypoints` input via the `{markers}` blackboard entry; `description` is left as an unbound `{description}` reference, so it's meant to be driven as a `SubTree` that binds it from the caller. |
+| `explore_ahead.xml` | `ExploreAhead` | Wander forward: `Repeat num_cycles="3"` over a `SubTree` into `FollowPlannedTrajectory`, each leg re-planning + following a "head in the general direction ahead avoiding obstacles; if blocked, turn left or right (no preference)" trajectory. The exploration prompt is a literal `description` bound on the `SubTree`. Stops early if a leg fails (planning error / `occlusion_timeout`). |
 
 Preloading happens once, in the node constructor, before it starts spinning — editing a file under `behaviors/` needs a **node restart** to take effect (no rebuild, since `--symlink-install` mirrors `install(DIRECTORY behaviors/ ...)` straight to the source file).
 

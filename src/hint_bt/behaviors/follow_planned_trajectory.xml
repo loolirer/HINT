@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<root BTCPP_format="4">
+    <BehaviorTree ID="FollowPlannedTrajectory">
+      <Sequence>
+        <PlanTrajectoryAction description="{description}" markers="{markers}" stamp="{stamp}"/>
+        <FollowTrajectoryAction waypoints="{markers}" stamp="{stamp}"/>
+      </Sequence>
+    </BehaviorTree>
+</root>
