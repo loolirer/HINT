@@ -189,9 +189,9 @@ All parameters are live-adjustable via `ros2 param set`.
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `k_yaw` | 0.8 | Angular gain (rad/s per unit normalised lookahead offset) |
-| `cruise_speed` | 0.15 | m/s forward speed when aligned; scaled down by heading error |
-| `lookahead` | 0.6 | Normalized distance from the robot reference at which to pick the carrot waypoint. Larger = smoother/less reactive; smaller = tighter path following |
+| `k_yaw` | 0.5 | Angular gain (rad/s per unit normalised lookahead offset) |
+| `cruise_speed` | 0.05 | m/s forward speed when aligned; scaled down by heading error |
+| `lookahead` | 0.1 | Normalized distance from the robot reference at which to pick the carrot waypoint. Larger = smoother/less reactive; smaller = tighter path following |
 | `max_linear_vel` | 0.26 | m/s cap — Waffle Pi rated maximum |
 | `max_angular_vel` | 1.82 | rad/s cap |
 | `init_timeout` | 5.0 | Seconds to wait for the tracker to reach `TRACKING` before failing |
