@@ -116,7 +116,7 @@ ros2 action send_goal /visual_question_node/ask \
 
 ## trajectory_planner
 
-Plans a **ground-restricted trajectory** from a natural-language instruction using Gemini Robotics-ER's point-defining capability. Given a description (e.g. *"walk to the door keeping to the right of the wall"* or *"reach the table without going over the mattress"*), it returns an ordered set of floor waypoints that a downstream IBVSc controller can chase — opening room for semantic navigation preferences and constraint-aware waypoint generation.
+Plans a **ground-restricted trajectory** from a natural-language instruction using Gemini Robotics-ER's point-defining capability. Given a description (e.g. *"walk to the door keeping to the right of the wall"* or *"reach the table without going over the mattress"*), it returns an ordered set of floor waypoints (`markers`) — `visual_tracker/waypoint_tracker` then tracks them in the image and `visual_servoing/pursuit_servo` follows them by pure pursuit (the `FollowPlannedTrajectory` behavior in `hint_bt` chains the plan → follow). This opens room for semantic navigation preferences and constraint-aware waypoint generation.
 
 Built as a sibling of `description_detector`: same inputs (a camera `stamp` + a text field) and the same stamp-based ring buffer / API plumbing (both subclass `GeminiActionNode`). Instead of one bounding box it grounds an **ordered marker array in normalized image space** (`geometry_msgs/Point[]`, `x`/`y ∈ [-1, 1]` (center 0), `z` unused, `markers[0]` nearest → `markers[-1]` farthest) plus the frame `stamp`. The model is prompted to keep points on the traversable ground plane, ordered nearest→farthest, and to honor any semantic preference in the instruction.
 
