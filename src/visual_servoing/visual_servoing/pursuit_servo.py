@@ -6,10 +6,11 @@ it drives off ``waypoint_tracker`` (the ground-trajectory tracker) instead of
 
 On a ``FollowTrajectory`` goal it hands the waypoints to ``waypoint_tracker`` via
 ``set_waypoints``, then runs a fixed-rate control loop that steers the robot toward
-a lookahead waypoint from the ``/waypoint_tracking/points`` stream. As the robot
-advances, ``waypoint_tracker`` retires waypoints that pass under it and goes
-``UNTRACKED`` once the whole trajectory is consumed — which is the arrival signal
-here (mirroring how ``visual_servo`` treats the target filling the frame).
+a lookahead waypoint from the ``/waypoint_tracking/points`` stream. The tracker only
+tracks — it publishes the full waypoint set every frame and never retires. This
+follower owns *reaching*: it advances a front over waypoints the robot drives over
+(descended to the near end, on the line) and declares arrival when the front reaches
+the end — mirroring how ``visual_servo`` treats the target filling the frame.
 
 State dynamics mirror ``visual_servo``: one goal at a time, ``IDLE`` while the
 tracker initialises, ``RUNNING`` while following, ``WAITING`` while ``OCCLUDED``;
@@ -57,6 +58,14 @@ class PursuitServoNode(Node):
         self.declare_parameter("init_timeout", 5.0)  # s to reach TRACKING before fail
         self.declare_parameter("occlusion_timeout", 5.0)  # s in OCCLUDED before abort
         self.declare_parameter("control_rate", 20.0)  # Hz
+        # A waypoint is "reached" (driven over) — and the trajectory front advances
+        # past it — when it descends to the near end (normalized y >= reach_y) AND is
+        # on the robot's line of travel (|x| <= reach_band, i.e. near the image centre
+        # where the forward axis projects). A waypoint that slides off the bottom to
+        # the *side* is never reached; pure pursuit keeps steering to bring it onto
+        # the line. Retirement lives here, in the follower — the tracker only tracks.
+        self.declare_parameter("reach_y", 0.85)  # near-end line in normalized y
+        self.declare_parameter("reach_band", 0.5)  # on-the-line half-width (norm x)
 
         # --- Tracker service clients ---
         self._set_waypoints_cli = self.create_client(
@@ -80,6 +89,12 @@ class PursuitServoNode(Node):
         # --- Shared state (written by subscriber threads, read by action loop) ---
         self._waypoints = None  # list of (x, y, tracked)
         self._tracker_state = STATUS_UNTRACKED
+        # Trajectory progress: waypoints [0, _reached_count) have been driven over.
+        # The tracker publishes the full ordered set every frame (it never retires);
+        # the follower owns retirement by advancing this front as waypoints are
+        # reached, and declares arrival when the front reaches the end.
+        self._num_waypoints = 0
+        self._reached_count = 0
 
         # Lock to serialise goal acceptance so only one goal runs at a time.
         self._goal_lock = threading.Lock()
@@ -125,6 +140,8 @@ class PursuitServoNode(Node):
     def _run(self, goal_handle):
         goal = goal_handle.request
         self._waypoints = None  # discard any stream from a previous run
+        self._num_waypoints = len(goal.waypoints)
+        self._reached_count = 0  # reset trajectory progress for this goal
 
         # Delegate initialisation to the tracker.
         resp = self._call_set_waypoints(goal.waypoints, goal.stamp)
@@ -156,17 +173,18 @@ class PursuitServoNode(Node):
 
             state = self._tracker_state
 
-            # --- UNTRACKED: init pending, or (after tracking) trajectory consumed ---
+            # --- UNTRACKED: waiting for the tracker to initialise. Arrival is now
+            # detected by the follower from waypoint progress (TRACKING branch below),
+            # not by the tracker going UNTRACKED — the tracker never retires. So an
+            # UNTRACKED *after* tracking means the tracker reset unexpectedly. ---
             if state == STATUS_UNTRACKED:
                 self._stop_robot()
                 if ever_tracking:
-                    # The tracker retires waypoints as they pass under the robot and
-                    # goes UNTRACKED once the whole trajectory is consumed — arrival.
                     self._call_stop_tracking()
                     result = FollowTrajectory.Result()
-                    result.success = True
-                    result.message = "Trajectory complete"
-                    goal_handle.succeed()
+                    result.success = False
+                    result.message = "Tracker reset unexpectedly"
+                    goal_handle.abort()
                     return result
                 elapsed = (self.get_clock().now() - deadline).nanoseconds * 1e-9
                 if elapsed > init_timeout:
@@ -202,7 +220,21 @@ class PursuitServoNode(Node):
             occlusion_start = None  # reset occlusion timer on recovery
             deadline = self.get_clock().now()  # reset so brief UNTRACKED fails fast
 
-            target = self._select_lookahead(self._waypoints)
+            # Advance the trajectory front over any waypoints the robot has now driven
+            # over — the retirement the tracker no longer does. When the front reaches
+            # the end, the whole trajectory is consumed: arrival.
+            self._update_reached(self._waypoints)
+            if self._num_waypoints > 0 and self._reached_count >= self._num_waypoints:
+                self._call_stop_tracking()
+                self._stop_robot()
+                result = FollowTrajectory.Result()
+                result.success = True
+                result.message = "Trajectory complete"
+                goal_handle.succeed()
+                return result
+
+            # Steer only by waypoints ahead of the front (still to be reached).
+            target = self._select_lookahead(self._unreached())
             if target is None:
                 # No measured waypoint to steer by this tick — hold still.
                 self._stop_robot()
@@ -238,6 +270,42 @@ class PursuitServoNode(Node):
         result.success = False
         result.message = "Node shutdown"
         return result
+
+    # ------------------------------------------------------------------
+    # Trajectory progress (retirement lives in the follower, not the tracker)
+
+    def _unreached(self):
+        """The still-to-reach tail of the waypoint stream (front already driven over).
+
+        The tracker publishes the full ordered set every frame; steering and the
+        arrival test consider only waypoints from ``_reached_count`` onward.
+        """
+        if not self._waypoints:
+            return None
+        return self._waypoints[self._reached_count:]
+
+    def _update_reached(self, waypoints):
+        """Advance ``_reached_count`` over waypoints the robot has driven over.
+
+        Nearest-first, a waypoint is *reached* when it has descended to the near end
+        (normalized ``y >= reach_y``) **and** sits on the robot's line of travel
+        (``|x| <= reach_band``) — it passed under the robot, not off to the side.
+        Consumes consecutively from the front and stops at the first not-yet-reached
+        waypoint, so reaching is sequential along the trajectory. A waypoint that
+        slides off the bottom to the side is *not* reached (the robot keeps steering
+        to bring it onto the line); pure pursuit curving over it is what retires it.
+        """
+        if not waypoints:
+            return
+        reach_y = float(self._p("reach_y"))
+        band = float(self._p("reach_band"))
+        n = len(waypoints)
+        while self._reached_count < n:
+            x, y, _tracked = waypoints[self._reached_count]
+            if y >= reach_y and abs(x) <= band:
+                self._reached_count += 1
+            else:
+                break
 
     # ------------------------------------------------------------------
     # Pure-pursuit lookahead selection
