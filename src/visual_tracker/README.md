@@ -291,19 +291,20 @@ stamp-based initialisation.
 
 ## odom_waypoint_tracker
 
-A **drop-in sibling** of `waypoint_tracker` with the *same tracking dynamics*
-(state machine, per-waypoint measured/coasting flags, nearest-prefix occlusion,
-under-robot retirement, publish-only-while-`TRACKING` contract) but a different
-*measurement backend*: instead of estimating where the waypoints moved with DIS
-optical flow, it **dead-reckons them from `/odom` and a pin-hole camera model**.
-No image content is used to place the points — the image only drives the publish
-rate, the header, and the debug overlay. It publishes on the **same topics** as
+A **2D top-down** ground-trajectory tracker. Instead of estimating where the
+waypoints moved with DIS optical flow (the `waypoint_tracker` backend), it **grounds
+the planner's waypoints once and thereafter dead-reckons them purely from `/odom`**,
+publishing their live **metric positions in `base_link`** (x forward, y left, m) —
+the world-space input a plain metric pure-pursuit follower consumes. No image content
+places the points; the camera is used only to ground them once and to decide what is
+currently *visible* for the debug overlay. It publishes on the **same topics** as
 `waypoint_tracker` (`/waypoint_tracking/points`, `/waypoint_tracking/state`,
 `/camera/waypoint_tracking`) and answers the same `~/set_waypoints` /
-`~/stop_tracking` services, so `pursuit_servo` consumes it unchanged — the two are
-**mutually exclusive** (never run both; they'd both drive `/waypoint_tracking`).
+`~/stop_tracking` services — the two are **mutually exclusive** (never run both;
+they'd both drive `/waypoint_tracking`, and they use *different* `points` layouts —
+metric here, normalized image for DIS).
 
-### Algorithm — ground-plane grounding + odometry re-projection
+### Algorithm — ground-plane grounding + odometry dead-reckoning
 
 Every waypoint is assumed to lie on the ground plane, so:
 
@@ -313,27 +314,23 @@ Every waypoint is assumed to lie on the ground plane, so:
    ground point `(X forward, Y left)` in the **reference frame** — the robot's
    odometry pose at the instant the trajectory arrived. The reference frame is
    re-anchored every time a new trajectory is received.
-2. **Dead-reckon the camera.** Each camera frame, the current odometry pose is
-   expressed relative to the reference pose (a planar rigid transform), so the fixed
-   ground points are re-expressed in the *current* robot frame.
-3. **Re-project.** The current-frame ground points are projected back through the
-   same camera model to pixels and published as the normalized waypoint stream. The
-   **full** set is re-projected and published every frame — the tracker **never
-   retires** waypoints. Deciding when a waypoint has been *reached* (driven over) and
-   advancing through the trajectory is the follower's job (`pursuit_servo`), since
-   reaching is an act of the servo, not the tracker. Waypoints are kept in the exact
-   order sent (nearest-first per the interface) — never re-sorted; the priority
-   prefix and the published stream both walk the as-sent order.
+2. **Dead-reckon.** Each frame, the current odometry pose is expressed relative to
+   the reference pose (a planar rigid transform), so the fixed ground points are
+   re-expressed in the *current* robot (`base_link`) frame — their 2D top-down world
+   positions. The **full set is kept and re-expressed every frame** (never dropped);
+   a waypoint the robot has driven past re-appears ahead again once the robot turns
+   back toward it. Order is preserved exactly as sent (never re-sorted).
+3. **Publish (metric).** All waypoints are published as metric `base_link`
+   coordinates, each flagged `in_front` (ahead of the camera) or behind — computed by
+   reprojecting to the image (a behind point has no valid projection). The follower
+   (`pursuit_servo`) steers by the in-front ones and owns *reaching* / completion,
+   since reaching is an act of the servo, not the tracker.
 
-Because placement is a geometric prediction rather than a visual measurement,
-**"occlusion" means odometry loss**: the nearest `priority_count` in-frame
-waypoints all leaving the frame / projecting behind the camera, or `/odom` going
-stale (older than `odom_timeout`). A waypoint is *measured* (`tracked=true`) only
-while it projects **in front of the camera and inside the frame**; otherwise it
-*coasts* (`tracked=false`, still placed by the prediction, clamped to the frame
-edge at publish time). Following `lk_tracker`/`waypoint_tracker`, **no points are
-published while `OCCLUDED`** — the frozen prediction goes stale as the robot moves,
-so `OCCLUDED` is the "stop, don't coast" signal.
+Because placement is a dead-reckoned prediction, **"occlusion" means odometry
+loss**: `/odom` going stale (older than `odom_timeout`). Odometry always knows where
+every waypoint is, so there is no visual occlusion — only the sensor dropping out.
+**No points are published while `OCCLUDED`** — the frozen prediction goes stale as
+the robot moves, so `OCCLUDED` is the "stop, don't coast" signal.
 
 **Camera convention:** OpenCV optical frame (x right, y down, z into scene); robot
 frame REP-103 (x forward, y left, z up). The camera sits `camera_height` above and
@@ -341,12 +338,12 @@ frame REP-103 (x forward, y left, z up). The camera sits `camera_height` above a
 **down** from horizontal; principal point assumed at the image center, square
 pixels, focal length derived from `camera_hfov_deg` and the frame width.
 
-**State** — identical to `waypoint_tracker`:
+**State:**
 
 ```
-UNTRACKED ──► (set_waypoints) ──► TRACKING ──► (near prefix off-frame / odom stale) ──► OCCLUDED
-                                     ▲                                                       │
-                                     └───────────────── (near end back in frame) ───────────┘
+UNTRACKED ──► (set_waypoints) ──► TRACKING ──► (odom stale > odom_timeout) ──► OCCLUDED
+                                     ▲                                            │
+                                     └──────────────── (odom fresh again) ────────┘
 ```
 
 ### Usage
@@ -381,13 +378,31 @@ ros2 topic echo /waypoint_tracking/points
 | `~/set_waypoints` | `hint_interfaces/SetWaypoints` | Service server |
 | `~/stop_tracking` | `hint_interfaces/StopTracking` | Service server |
 | `/waypoint_tracking/state` | `std_msgs/String` (latched) | Pub — `UNTRACKED` / `TRACKING` / `OCCLUDED` |
-| `/waypoint_tracking/points` | `hint_interfaces/VisualWaypoints` | Pub — normalized waypoint stream, **only while `TRACKING`** |
-| `/camera/waypoint_tracking` | `sensor_msgs/Image` | Pub — debug overlay |
+| `/waypoint_tracking/points` | `hint_interfaces/VisualWaypoints` | Pub — **metric `base_link`** waypoint stream + `in_front` flags, **only while `TRACKING`** |
+| `/waypoint_tracking/markers` | `visualization_msgs/MarkerArray` | Pub — waypoints as ground disks (z=0) in `marker_frame`, sized by uncertainty, **only while `TRACKING`** |
+| `/camera/waypoint_tracking` | `sensor_msgs/Image` | Pub — debug overlay (only **visible** waypoints drawn) |
 
-The `set_waypoints` service and the `VisualWaypoints` output layout are **identical
-to `waypoint_tracker`** (see above) — same normalized `[-1, 1]` nearest-first input,
-same `points`/`tracked` output, same consumer contract (steer only by `tracked=true`
-points; treat "not `TRACKING`" / stale as *stop*).
+**Output contract.** `set_waypoints` still takes normalized `[-1, 1]` image waypoints
+(the planner/VLM markers). The **published `points` are metric `base_link`** (x
+forward, y left, m; z=0), in planner order (index 0 first). Every waypoint is
+published every frame with an `in_front` flag (`true` ahead of the camera, `false`
+behind); a behind waypoint re-appears (flips `true`) once the robot turns back toward
+it. `tracked` marks image-visibility (in front AND in the frame). A follower steers
+only by `in_front` points, treats "not `TRACKING`" / stale as *stop*, and owns
+reaching/arrival (the tracker never retires).
+
+**Uncertainty markers.** `/waypoint_tracking/markers` renders the tracked waypoints
+on the ground plane (`z=0`) in `marker_frame` (`base_link`) as flat cylinder disks —
+one per in-front waypoint (green visible, amber in-front-but-off-frame; behind ones
+are removed). Each disk's diameter is
+`marker_base_size + 2·uncertainty_scale·σ`, where `σ = sqrt(σ_trans² + range²·σ_yaw²)`
+is the waypoint's positional uncertainty: the **odometry drift accrued since the
+trajectory was grounded** (`pose.covariance` growth vs the reference frame),
+translational plus the yaw component swung out to the waypoint's range — so a far
+waypoint reads larger (a small heading error swings it further). Markers clear on
+`OCCLUDED` / `stop_tracking` / a new trajectory. Note: this needs an odometry source
+that reports a **growing** `pose.covariance`; if the source publishes a constant (or
+zero) covariance, every disk stays at `marker_base_size`.
 
 ### Parameters
 
@@ -399,7 +414,9 @@ points; treat "not `TRACKING`" / stale as *stop*).
 | `camera_hfov_deg` | 62.2 | Horizontal field of view (deg); sets the focal length (Pi cam v2 default) |
 | `odom_topic` | `/odom` | Odometry topic (applied at startup, not live-adjustable) |
 | `odom_timeout` | 0.5 | Odometry age (s) beyond which the tracker declares `OCCLUDED` |
-| `priority_count` | 2 | Nearest N in-frame waypoints whose validity governs node state; `TRACKING` while ≥1 is measured, `OCCLUDED` when the near end all leaves the frame |
+| `marker_frame` | `base_link` | TF frame the metric points **and** uncertainty markers are published in (robot body; disks lie at `z=0`) |
+| `marker_base_size` | 0.03 | Minimum disk diameter (m) — the size at zero drift |
+| `uncertainty_scale` | 1.0 | Disk-diameter gain per metre of positional σ (larger = uncertainty growth is visually exaggerated) |
 
 All parameters except `odom_topic` are live-adjustable via `ros2 param set`.
 

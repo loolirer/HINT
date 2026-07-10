@@ -1,11 +1,11 @@
 """Odometry waypoint tracker — dead-reckoned ground-plane re-projection.
 
-A drop-in sibling of ``waypoint_tracker`` that keeps the **same tracking
-dynamics** (state machine, per-waypoint measured/coasting flags, nearest-prefix
-occlusion, publish-only-while-``TRACKING`` contract) but
-swaps the *measurement backend*: instead of estimating where the waypoints moved
-with DIS optical flow, it predicts their positions **purely from odometry** and a
-pin-hole camera model. No image content is used to place the points.
+A **2D top-down** ground-trajectory tracker: it grounds the planner's waypoints
+once and thereafter dead-reckons them **purely from odometry**, publishing their
+live **metric positions in the robot body frame** (``base_link``) — the world-space
+input a plain metric pure-pursuit follower (``pursuit_servo``) consumes. No image
+content is used to place the points; the camera is only used to ground them once and
+to decide what is currently *visible* for the debug overlay.
 
 The scene is assumed planar (every waypoint on the ground), so the pipeline is:
 
@@ -15,24 +15,30 @@ The scene is assumed planar (every waypoint on the ground), so the pipeline is:
    ``(X, Y)`` expressed in the **reference frame** — the robot's odometry pose at
    the instant the trajectory was received. This reference frame is re-anchored
    every time a new trajectory arrives.
-2. **Dead-reckon the camera.** Each camera frame, the robot's current odometry
-   pose is expressed relative to the reference pose (a planar rigid transform), so
-   the fixed ground points are re-expressed in the *current* robot frame.
-3. **Re-project.** The current-frame ground points are projected back through the
-   same camera model to pixels, then published as the normalized waypoint stream —
-   exactly the ``waypoint_tracker`` output contract, consumed unchanged by
-   ``pursuit_servo``.
+2. **Dead-reckon.** Each frame, the robot's current odometry pose is expressed
+   relative to the reference pose (a planar rigid transform), so the fixed ground
+   points are re-expressed in the *current* robot (``base_link``) frame — their 2D
+   top-down world positions. The **full set is kept and re-expressed every frame**
+   (never dropped), so a waypoint the robot has driven past re-appears ahead again
+   once the robot turns back toward it.
+3. **Publish (metric).** All waypoints are published as metric ``base_link``
+   coordinates (x forward, y left, z=0), each flagged ``in_front`` (ahead of the
+   camera) or behind. The follower steers by the in-front ones and owns *reaching* /
+   completion — "reaching" is an act of the servo, not the tracker.
 
-Because the placement is a geometric prediction rather than a visual measurement,
-"occlusion" here means **odometry loss**: the near waypoints all leaving the frame
-or projecting behind the camera, or ``/odom`` going stale. A waypoint is *measured*
-(``tracked=true``) only while it projects in front of the camera **and** inside the
-frame; otherwise it *coasts* (still placed by the prediction, flagged
-``tracked=false``, clamped to the frame edge). The tracker **never retires**
-waypoints — it re-projects and publishes the whole set every frame. Deciding when a
-waypoint has been *reached* (driven over) and advancing through the trajectory is
-the follower's job (``pursuit_servo``), since "reaching" is an act of the servo, not
-the tracker.
+Because the placement is a dead-reckoned prediction, "occlusion" here means
+**odometry loss**: ``/odom`` going stale (``odom_timeout``). Odometry always knows
+where every waypoint is, so there is no visual occlusion — only the sensor dropping
+out. A ``front/back`` flag (rather than a bogus reprojection) is what lets the
+follower avoid chasing a point that is actually behind the camera.
+
+Alongside the metric point stream, the tracked waypoints are also published as a
+``visualization_msgs/MarkerArray`` on the **ground plane** (z=0) in ``marker_frame``
+(the robot body / ``base_link``) — each a flat disk whose radius grows with the
+waypoint's positional **uncertainty**. Since the waypoints are dead-reckoned from the
+reference pose, that uncertainty is the odometry drift accrued since grounding: the
+translational covariance growth plus its yaw component swung out to each waypoint's
+range (so far waypoints, more sensitive to heading error, render larger).
 
 Camera convention: OpenCV optical frame (x right, y down, z into scene); robot
 frame REP-103 (x forward, y left, z up); the camera sits ``camera_height`` above
@@ -52,6 +58,7 @@ from sensor_msgs.msg import Image, CompressedImage
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String
 from geometry_msgs.msg import Point
+from visualization_msgs.msg import Marker, MarkerArray
 
 from hint_interfaces.msg import VisualWaypoints
 from hint_interfaces.srv import SetWaypoints, StopTracking
@@ -85,10 +92,17 @@ class OdomWaypointTrackerNode(Node):
         # --- Tracking parameters (mirror waypoint_tracker where meaningful) ---
         self.declare_parameter("odom_topic", "/odom")
         self.declare_parameter("odom_timeout", 0.5)  # s; older -> OCCLUDED
-        # The nearest ``priority_count`` in-frame waypoints govern node state: the
-        # node stays TRACKING while >=1 of them is measured, OCCLUDED when the near
-        # end all leaves the frame / projects behind the camera.
-        self.declare_parameter("priority_count", 2)
+
+        # --- Ground-marker (uncertainty) parameters ---
+        # The tracked waypoints are also published as a MarkerArray on the ground
+        # plane (z=0) in ``marker_frame`` (the robot body). Each marker is a flat disk
+        # whose radius grows with the waypoint's positional uncertainty — the
+        # odometry drift accumulated since the trajectory was grounded, plus that
+        # drift's yaw component scaled by the waypoint's range (a far waypoint is more
+        # uncertain because a small heading error swings it further).
+        self.declare_parameter("marker_frame", "base_link")
+        self.declare_parameter("marker_base_size", 0.03)  # m; min disk diameter
+        self.declare_parameter("uncertainty_scale", 1.0)  # disk-diameter gain per σ
 
         # --- Publishers (identical contract to waypoint_tracker) ---
         self.pub_points = self.create_publisher(
@@ -100,6 +114,9 @@ class OdomWaypointTrackerNode(Node):
         self.pub_state = self.create_publisher(
             String, "/waypoint_tracking/state", LATCHED_QOS
         )
+        self.pub_markers = self.create_publisher(
+            MarkerArray, "/waypoint_tracking/markers", 10
+        )
 
         # --- Services ---
         self.create_service(SetWaypoints, "~/set_waypoints", self._srv_set_waypoints)
@@ -108,7 +125,8 @@ class OdomWaypointTrackerNode(Node):
         # --- Internal state ---
         self._pending_waypoints = None  # Nx2 normalized, awaiting init
         self._pending_stamp = None
-        self._odom_buffer = deque(maxlen=200)  # (t_float, x, y, yaw) for stamp init
+        # (t, x, y, yaw, var_x, var_y, var_yaw) — pose + odom covariance diagonal.
+        self._odom_buffer = deque(maxlen=200)
         self.bridge = CvBridge()
 
         self._reset(STATUS_UNTRACKED)
@@ -161,15 +179,19 @@ class OdomWaypointTrackerNode(Node):
 
     def _reset(self, status):
         self.initialized = False
-        self.pts = None  # (N,2) current waypoint pixel positions
+        self.pts = None  # (N,2) current waypoint pixel positions (debug reprojection)
+        self.cur = None  # (N,2) current waypoint metric base_link coords (x fwd, y left)
         self.ground_ref = None  # (N,2) ground points in the reference frame
         self.ref_pose = None  # (x, y, yaw) odometry pose when trajectory received
+        self.ref_cov = None  # (var_x, var_y, var_yaw) odom covariance at that pose
         self.img_shape = None  # (h, w)
-        self._ever_tracked = False  # a valid projection has landed since init
+        self._ever_tracked = False  # a valid dead-reckon has landed since init
         # Debug/telemetry
-        self._tracked_mask = None  # (N,) bool: per-waypoint measured vs coasting
+        self._in_front = None  # (N,) bool: ahead of the camera vs behind it
+        self._visible = None  # (N,) bool: in front AND inside the camera frame
         self._rel = (0.0, 0.0, 0.0)  # current pose relative to the reference
         self._set_status(status)
+        self._clear_markers()  # drop any stale ground-uncertainty markers
 
     def _set_status(self, status):
         self.tracking_status = status
@@ -233,7 +255,7 @@ class OdomWaypointTrackerNode(Node):
         cam_x = -Y
         cam_y = -sin_t * dx + cos_t * cam_h
         in_front = cam_z > 1e-6
-        z = np.where(in_front, cam_z, 1.0)  # avoid div-by-zero; masked out anyway
+        z = np.where(in_front, cam_z, 1.0)  # avoid div-by-zero; masked out via in_front
         u = cx + f * cam_x / z
         v = cy + f * cam_y / z
         return np.stack([u, v], axis=1).astype(np.float32), in_front
@@ -245,18 +267,26 @@ class OdomWaypointTrackerNode(Node):
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         p = msg.pose.pose.position
         yaw = _yaw_from_quat(msg.pose.pose.orientation)
-        self._odom_buffer.append((t, p.x, p.y, yaw))
+        # pose.covariance is a row-major 6x6 (x, y, z, roll, pitch, yaw); keep the
+        # x / y / yaw variances (diagonal 0, 7, 35) for the uncertainty markers.
+        cov = msg.pose.covariance
+        self._odom_buffer.append(
+            (t, p.x, p.y, yaw, float(cov[0]), float(cov[7]), float(cov[35]))
+        )
 
-    def _pose_at(self, stamp):
-        """Odometry pose nearest ``stamp`` (``sec=nanosec=0`` -> latest), or None."""
+    def _sample_at(self, stamp):
+        """Full odom sample nearest ``stamp`` (``sec=nanosec=0`` -> latest), or None."""
         if not self._odom_buffer:
             return None
         if stamp is None or (stamp.sec == 0 and stamp.nanosec == 0):
-            _, x, y, yaw = self._odom_buffer[-1]
-            return (x, y, yaw)
+            return self._odom_buffer[-1]
         key = stamp.sec + stamp.nanosec * 1e-9
-        t, x, y, yaw = min(self._odom_buffer, key=lambda s: abs(s[0] - key))
-        return (x, y, yaw)
+        return min(self._odom_buffer, key=lambda s: abs(s[0] - key))
+
+    def _pose_at(self, stamp):
+        """Odometry pose ``(x, y, yaw)`` nearest ``stamp``, or None."""
+        s = self._sample_at(stamp)
+        return None if s is None else (s[1], s[2], s[3])
 
     def _odom_fresh(self):
         """True if the latest odometry is within ``odom_timeout`` of now."""
@@ -301,8 +331,12 @@ class OdomWaypointTrackerNode(Node):
         self.img_shape = shape
         h, w = shape
 
-        # Seed the reference frame from the odometry pose at the selected frame.
-        self.ref_pose = self._pose_at(self._pending_stamp)
+        # Seed the reference frame from the odometry sample at the selected frame:
+        # its pose anchors the ground points, its covariance is the uncertainty
+        # baseline (drift is measured *relative* to here).
+        ref = self._sample_at(self._pending_stamp)
+        self.ref_pose = (ref[1], ref[2], ref[3])
+        self.ref_cov = (ref[4], ref[5], ref[6])
         self._pending_stamp = None
 
         wps_norm = self._pending_waypoints
@@ -353,6 +387,7 @@ class OdomWaypointTrackerNode(Node):
         if self.tracking_status != STATUS_OCCLUDED:
             self.get_logger().warn("Waypoint tracking OCCLUDED — holding last position.")
             self._set_status(STATUS_OCCLUDED)
+            self._clear_markers()  # frozen prediction is stale — show nothing
         self._draw_overlay(frame)
         self._publish_debug(frame, msg)
 
@@ -367,43 +402,118 @@ class OdomWaypointTrackerNode(Node):
             self._handle_occlusion(frame, msg)
             return
 
-        # Re-express the fixed reference-frame ground points in the current robot
-        # frame, then re-project them to pixels.
+        # Dead-reckon: express the saved ground points in the current robot
+        # (base_link) frame — this is the 2D top-down world position of every
+        # waypoint, and the tracker's primary output. The full set is kept and
+        # re-expressed every frame (never dropped), so a waypoint the robot has driven
+        # past re-appears ahead again once the robot turns back toward it.
         rel_x, rel_y, rel_yaw = self._relative_pose()
         self._rel = (rel_x, rel_y, rel_yaw)
         cr, sr = np.cos(rel_yaw), np.sin(rel_yaw)
         ex = self.ground_ref[:, 0] - rel_x
         ey = self.ground_ref[:, 1] - rel_y
-        cur = np.stack([cr * ex + sr * ey, -sr * ex + cr * ey], axis=1)
+        self.cur = np.stack([cr * ex + sr * ey, -sr * ex + cr * ey], axis=1)
 
-        pix, in_front = self._ground_to_pixels(cur, w, h)
+        # Reproject to the image *only* to decide front/back and image-visibility —
+        # the published stream is metric top-down (base_link), not image space. A
+        # waypoint is *in front* when it projects ahead of the camera (cam_z>0), and
+        # *visible* when it is additionally inside the frame (drawn on the overlay).
+        pix, in_front = self._ground_to_pixels(self.cur, w, h)
         self.pts = pix
-
-        # The tracker only *tracks* — it never retires waypoints. The full set is
-        # re-projected and published every frame; deciding when a waypoint has been
-        # *reached* (driven over) and advancing past it is the follower's job
-        # (pursuit_servo owns that). A waypoint is *measured* only while it projects
-        # in front of the camera AND inside the frame; behind-camera / off-frame
-        # points coast (still published, clamped, flagged tracked=false).
-        in_frame = (
+        self._in_front = in_front
+        self._visible = (
             in_front
-            & (self.pts[:, 0] >= 0) & (self.pts[:, 0] < w)
-            & (self.pts[:, 1] >= 0) & (self.pts[:, 1] < h)
+            & (pix[:, 0] >= 0) & (pix[:, 0] < w)
+            & (pix[:, 1] >= 0) & (pix[:, 1] < h)
         )
-        self._tracked_mask = in_frame
 
-        # Node state follows the nearest ``priority_count`` in-frame waypoints,
-        # recomputed each frame so forward progress that scrolls the near waypoints
-        # off the bottom doesn't read as loss. No in-frame waypoint at all (the whole
-        # trajectory has scrolled past / behind the camera) -> OCCLUDED.
-        k = max(1, int(self._p("priority_count")))
-        priority_idx = np.nonzero(in_frame)[0][:k]
-        if len(priority_idx) == 0:
-            self._handle_occlusion(frame, msg)
-            return
-
+        # Odometry always knows where every waypoint is, so the only failure mode is a
+        # stale pose (handled above). A trusted dead-reckon this frame keeps TRACKING.
         self._mark_tracking()
+        self._publish_markers(self.cur, in_front)  # ground uncertainty markers
         self._draw_and_publish(frame, msg)
+
+    # ------------------------------------------------------------------
+    # Ground-plane uncertainty markers
+
+    def _drift_cov(self):
+        """Odom-drift variances ``(var_x, var_y, var_yaw)`` accrued since the reference.
+
+        The waypoints are dead-reckoned from ``ref_pose``, so what makes them
+        uncertain is the odometry drift *since* that pose — the growth of the reported
+        pose covariance, not its absolute value. Clamped at zero (covariance should
+        grow, but guard against noise / a source that resets it).
+        """
+        s = self._sample_at(None)
+        if s is None or self.ref_cov is None:
+            return 0.0, 0.0, 0.0
+        return (
+            max(0.0, s[4] - self.ref_cov[0]),
+            max(0.0, s[5] - self.ref_cov[1]),
+            max(0.0, s[6] - self.ref_cov[2]),
+        )
+
+    def _publish_markers(self, cur, in_front):
+        """Publish the waypoints as ground disks in ``marker_frame`` (z=0).
+
+        ``cur`` is (N,2) in the current robot frame (x forward, y left) — already the
+        ``marker_frame`` (base_link) coordinates. Only waypoints **in front of the
+        camera** are shown; ones the robot has driven past (behind the camera) emit a
+        ``DELETE`` for their id so consumed points don't leave stale disks behind (and
+        we never render a point the robot has already gone by). Each disk's diameter
+        grows with the waypoint's positional uncertainty
+        ``σ_i = sqrt(σ_trans² + range_i²·σ_yaw²)``: the translational odom drift plus
+        the yaw drift swung out to the waypoint's range (so far waypoints, more
+        sensitive to heading error, read as larger). Measured waypoints (in frame)
+        are green, coasting ones (in front but off-frame) amber.
+        """
+        frame = str(self._p("marker_frame"))
+        base = float(self._p("marker_base_size"))
+        gain = float(self._p("uncertainty_scale"))
+        dvx, dvy, dvyaw = self._drift_cov()
+        trans_var = dvx + dvy
+        stamp = self.get_clock().now().to_msg()
+        tracked = self._visible
+        arr = MarkerArray()
+        for i, (x, y) in enumerate(cur):
+            m = Marker()
+            m.header.frame_id = frame
+            m.header.stamp = stamp
+            m.ns = "waypoints"
+            m.id = i
+            if not bool(in_front[i]):
+                m.action = Marker.DELETE  # driven past — remove any prior disk
+                arr.markers.append(m)
+                continue
+            rng = float(np.hypot(x, y))
+            sigma = float(np.sqrt(max(0.0, trans_var + rng * rng * dvyaw)))
+            diam = base + 2.0 * gain * sigma
+            measured = bool(tracked is not None and i < len(tracked) and tracked[i])
+            m.type = Marker.CYLINDER  # flat disk on the ground
+            m.action = Marker.ADD
+            m.pose.position.x = float(x)
+            m.pose.position.y = float(y)
+            m.pose.position.z = 0.0
+            m.pose.orientation.w = 1.0
+            m.scale.x = diam
+            m.scale.y = diam
+            m.scale.z = 0.01  # thin — a ground footprint, not a pillar
+            m.color.r = 0.0 if measured else 1.0
+            m.color.g = 1.0 if measured else 0.65
+            m.color.b = 0.0
+            m.color.a = 0.6
+            arr.markers.append(m)
+        self.pub_markers.publish(arr)
+
+    def _clear_markers(self):
+        """Delete all published markers (on stop / new trajectory / occlusion)."""
+        m = Marker()
+        m.header.frame_id = str(self._p("marker_frame"))
+        m.ns = "waypoints"
+        m.action = Marker.DELETEALL
+        arr = MarkerArray()
+        arr.markers.append(m)
+        self.pub_markers.publish(arr)
 
     # ------------------------------------------------------------------
     # Publishing
@@ -414,23 +524,26 @@ class OdomWaypointTrackerNode(Node):
         self._publish_debug(frame, msg)
 
     def _publish_points(self, msg):
-        """Publish the projected waypoints (normalized [-1, 1], ``z`` unused).
+        """Publish all waypoints in metric top-down world space (base_link).
 
-        Only reached while ``TRACKING`` (waypoint_tracker parity). ``tracked`` marks
-        each waypoint *measured* (in front + in frame) vs *coasting* (off-frame /
-        behind, clamped to the frame edge).
+        ``points`` are the current base_link ground coordinates (x forward, y left,
+        z=0, metres), in the order the planner sent them (index 0 first). ``in_front``
+        flags each as ahead of the camera (true) or behind (false); **every** waypoint
+        is published every frame, so a behind waypoint re-appears (in_front flips true)
+        once the robot turns back toward it. ``tracked`` carries image-visibility (in
+        front AND inside the frame). Published only while ``TRACKING`` (odom fresh).
         """
-        h, w = self.img_shape
-        tracked = self._tracked_mask
-        measuring = self.tracking_status == STATUS_TRACKING and tracked is not None
         out = VisualWaypoints()
         out.header = msg.header
-        for i, pt in enumerate(self.pts):
+        out.header.frame_id = str(self._p("marker_frame"))  # base_link
+        for i, (x, y) in enumerate(self.cur):
             p = Point()
-            p.x = float(np.clip(2.0 * pt[0] / (w - 1) - 1.0, -1.0, 1.0))
-            p.y = float(np.clip(2.0 * pt[1] / (h - 1) - 1.0, -1.0, 1.0))
+            p.x = float(x)
+            p.y = float(y)
+            p.z = 0.0
             out.points.append(p)
-            out.tracked.append(bool(measuring and tracked[i]))
+            out.in_front.append(bool(self._in_front[i]))
+            out.tracked.append(bool(self._visible[i]))
         self.pub_points.publish(out)
 
     def _draw_idle(self, frame):
@@ -445,26 +558,36 @@ class OdomWaypointTrackerNode(Node):
         occluded = self.tracking_status == STATUS_OCCLUDED
         color = (0, 215, 255) if occluded else (0, 255, 0)
 
-        tracked = self._tracked_mask
-        measuring = (not occluded) and tracked is not None
-        pts_int = [tuple(np.round(p).astype(int)) for p in self.pts]
-        if len(pts_int) >= 2:
+        # Draw only waypoints that actually project into the image — in front of the
+        # camera AND within frame bounds (the visible set). A waypoint the robot has
+        # driven past is behind the camera and has no valid projection, so it is
+        # skipped instead of shown at a bogus pixel. It is still tracked and published
+        # (metric), and re-appears here if the robot turns back to face it. The
+        # polyline is likewise built from the visible points only.
+        tracked = self._visible
+        total = len(self.pts) if self.pts is not None else 0
+        vis = []
+        if tracked is not None:
+            for i, pt in enumerate(self.pts):
+                if i < len(tracked) and tracked[i]:
+                    vis.append((i, int(round(float(pt[0]))), int(round(float(pt[1])))))
+        if len(vis) >= 2:
             cv2.polylines(
-                frame, [np.array(pts_int, dtype=np.int32)], False, color, 2
+                frame,
+                [np.array([(x, y) for _, x, y in vis], dtype=np.int32)],
+                False, color, 2,
             )
-        for i, (px, py) in enumerate(pts_int):
-            measured = bool(measuring and tracked[i])
-            cv2.circle(frame, (px, py), 6, color, -1 if measured else 1)
+        for i, px, py in vis:
+            cv2.circle(frame, (px, py), 6, color, -1)
             cv2.putText(
                 frame, str(i), (px + 8, py - 8),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
             )
-        n_meas = int(tracked.sum()) if measuring else 0
         rx, ry, ryaw = self._rel
         cv2.putText(
             frame,
-            f"{self.tracking_status} [odom]  {len(self.pts)} pts  "
-            f"meas={n_meas}/{len(self.pts)}  "
+            f"{self.tracking_status} [odom]  {total} pts  "
+            f"vis={len(vis)}/{total}  "
             f"d=({rx:.2f},{ry:.2f},{ryaw:.2f})",
             (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2,
         )
