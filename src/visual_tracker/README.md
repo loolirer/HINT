@@ -317,12 +317,13 @@ Every waypoint is assumed to lie on the ground plane, so:
    expressed relative to the reference pose (a planar rigid transform), so the fixed
    ground points are re-expressed in the *current* robot frame.
 3. **Re-project.** The current-frame ground points are projected back through the
-   same camera model to pixels and published as the normalized waypoint stream.
-4. **Retire** any waypoint whose re-projection crosses below the frame bottom or
-   passes behind the camera (it went under the robot); all retired → `UNTRACKED`
-   (trajectory consumed). Waypoints are kept in the exact order sent (nearest-first
-   per the interface) — never re-sorted; retirement is order-agnostic and the
-   priority prefix walks the as-sent order.
+   same camera model to pixels and published as the normalized waypoint stream. The
+   **full** set is re-projected and published every frame — the tracker **never
+   retires** waypoints. Deciding when a waypoint has been *reached* (driven over) and
+   advancing through the trajectory is the follower's job (`pursuit_servo`), since
+   reaching is an act of the servo, not the tracker. Waypoints are kept in the exact
+   order sent (nearest-first per the interface) — never re-sorted; the priority
+   prefix and the published stream both walk the as-sent order.
 
 Because placement is a geometric prediction rather than a visual measurement,
 **"occlusion" means odometry loss**: the nearest `priority_count` in-frame

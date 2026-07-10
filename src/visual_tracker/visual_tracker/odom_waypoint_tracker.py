@@ -2,7 +2,7 @@
 
 A drop-in sibling of ``waypoint_tracker`` that keeps the **same tracking
 dynamics** (state machine, per-waypoint measured/coasting flags, nearest-prefix
-occlusion, under-robot retirement, publish-only-while-``TRACKING`` contract) but
+occlusion, publish-only-while-``TRACKING`` contract) but
 swaps the *measurement backend*: instead of estimating where the waypoints moved
 with DIS optical flow, it predicts their positions **purely from odometry** and a
 pin-hole camera model. No image content is used to place the points.
@@ -314,8 +314,8 @@ class OdomWaypointTrackerNode(Node):
         pix[:, 1] = (wps_norm[:, 1] + 1.0) * 0.5 * (h - 1)
         # Keep the waypoints in exactly the order they were sent — never re-sorted.
         # The caller owns the ordering (interface contract: nearest-first, index 0
-        # nearest); retirement is order-agnostic and the priority prefix walks this
-        # same as-sent order.
+        # nearest); the priority prefix and the published stream both walk this same
+        # as-sent order.
 
         # Ground the waypoints once, in the reference frame.
         self.ground_ref = self._pixels_to_ground(pix, w, h)
