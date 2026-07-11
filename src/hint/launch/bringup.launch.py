@@ -56,9 +56,13 @@ def generate_launch_description():
         output="screen",
     )
 
+    # Odometry-driven ground-plane re-projection tracker. Drop-in for the DIS
+    # waypoint_tracker (same /waypoint_tracking topics); remapped to the
+    # waypoint_tracker_node name so pursuit_servo's service clients still resolve.
     waypoint_tracker = Node(
         package="visual_tracker",
-        executable="waypoint_tracker",
+        executable="odom_waypoint_tracker",
+        name="waypoint_tracker_node",
         output="screen",
     )
 
@@ -126,12 +130,12 @@ def generate_launch_description():
             teleop,
             cartographer,
             occupancy_grid,
-            lk_tracker,
+            #lk_tracker,
             waypoint_tracker,
-            visual_servo,
+            #visual_servo,
             pursuit_servo,
-            description_detector,
-            visual_question,
+            #description_detector,
+            #visual_question,
             trajectory_planner,
             bt_executor,
             rviz2,
