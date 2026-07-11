@@ -8,7 +8,7 @@ on result):
 | Executable | Drives off | Action | Control |
 |---|---|---|---|
 | `visual_servo` | `lk_tracker` (bounding box) | `ApproachTarget` | IBVS — approach until the target fills the frame |
-| `pursuit_servo` | `waypoint_tracker` (ground trajectory) | `FollowTrajectory` | Pure pursuit — follow the waypoints until consumed |
+| `pursuit_servo` | `waypoint_tracker` (ground trajectory) | `FollowTrajectory` | Control-Lyapunov path following — follow the trajectory to the last waypoint |
 
 ```bash
 colcon build --symlink-install --packages-select hint_interfaces visual_servoing
@@ -101,11 +101,21 @@ All parameters are live-adjustable via `ros2 param set`.
 
 ## pursuit_servo
 
-Pure-pursuit waypoint follower — the trajectory-following sibling of `visual_servo`.
-Exposes a `FollowTrajectory` action that hands an ordered ground trajectory to
-`waypoint_tracker` and steers the robot along it until every waypoint has passed
-under the robot (the trajectory is consumed). It's the low-level controller for a
-VLM-planned path: `trajectory_planner`'s `markers` feed straight into the goal.
+Control-Lyapunov **path-following** waypoint follower — the trajectory-following
+sibling of `visual_servo`. Exposes a `FollowTrajectory` action that hands an ordered
+ground trajectory to `waypoint_tracker` and steers the robot along it until it reaches
+the last waypoint. It's the low-level controller for a VLM-planned path:
+`trajectory_planner`'s `markers` feed straight into the goal. (The node/action name
+is unchanged for historical reasons; the control law is Control-Lyapunov path
+following, not pure pursuit.)
+
+> **Control law** — implements **Proposition 1** of Ebrahimi Toulkani, Abdi,
+> Koskelainen & Ghabcheloo, *"Reactive Safe Path Following for Differential Drive
+> Mobile Robots Using Control Barrier Functions"* (ICCMA 2022) — see
+> `docs/Reactive_Safe_Path_Following_..._Control_Barrier_Functions.pdf`. Only the
+> Control-**Lyapunov** path follower is implemented here; the paper's Control-Barrier-
+> Function QP (obstacle avoidance) is deliberately left as a future layer that would
+> wrap `ω`.
 
 ### Usage
 
@@ -136,28 +146,29 @@ starts a control loop at `control_rate`. On result (success or failure) it calls
 `stop_tracking` to clean up the tracker. Same single-goal lifecycle as
 `visual_servo`.
 
-This runs in **metric top-down world space**: `waypoint_tracker` publishes every
-waypoint's live position in `base_link` (x forward, y left, metres) with a per-point
-`in_front` flag, and the follower does plain metric pure pursuit — no image space.
+This runs in **metric top-down world space**: `waypoint_tracker` publishes the full
+waypoint set's live position in `base_link` (x forward, y left, metres) every frame,
+and the follower treats the **waypoint polyline as the path Γ** — no image space.
 
-**Reaching (retirement lives here, not the tracker).** The tracker only tracks — it
-re-publishes the **full** waypoint set every frame and never retires. This follower
-owns *reaching*: it keeps a front index over the (as-sent) stream and advances it past
-each waypoint the robot drives over. A waypoint is **reached** when the robot comes
-within `reach_radius` **metres** of it. Reaching is sequential (in order) and steers
-only by waypoints ahead of the front. When the front reaches the end (every waypoint
-reached), the trajectory is **consumed** → success. A waypoint the robot passes wide
-of is **not** reached; pure pursuit keeps steering — and will **turn back** to it if
-it ends up behind — until the robot actually drives within `reach_radius`.
+**Control law (Control-Lyapunov path following, Proposition 1).** A **virtual target
+Q** rides the path at arc length `s`. With the robot at the `base_link` origin heading
++x, the path's tangent–normal frame at Q gives the errors `x_e` (along-track), `y_e`
+(cross-track), `ψ_e` (heading). Each tick:
 
-**Control law (metric pure pursuit)** — each tick it picks a **lookahead** carrot from
-the still-unreached tail of the stream: the first **in-front** waypoint at least
-`lookahead` metres from the robot (the farthest in-front one if none reach that). If
-no unreached waypoint is in front (the path continues behind), it targets the first
-unreached one so the robot rotates to face it:
+- `σ = −asin( clamp(k2·y_e / (|y_e|+ε0)) )` — the approach angle that bends the robot toward the path.
+- `ṡ = v·cos(ψ_e) + k3·x_e` — advances Q along the path (and pulls along-track error to zero); `s` is integrated at `control_rate`.
+- `ω = C_c·ṡ + σ̇ − k1·(ψ_e − σ) − v·y_e·Δ`, with `Δ = (sin ψ_e − sin σ)/(ψ_e − σ)` (→ `cos σ` at `ψ_e = σ`) and `C_c` the path curvature at Q (tangent differenced over `curvature_window`).
+- **Linear**: `v` is held **constant** at `cruise_speed` (the paper's `v_ref`) — the convergence guarantee requires non-zero `v`, so this follower does not stop or turn in place; it follows the path as a smooth arc.
 
-- **Angular**: proportional on the carrot's **bearing** `atan2(y, x)` → `cmd_vel.angular.z` (a behind carrot has bearing near ±π, so the robot spins to face it).
-- **Linear**: `cruise_speed` scaled down by `|bearing|` → slows on sharp turns, **turns in place** past 90° off-axis, clamped to `max_linear_vel`.
+This drives the Lyapunov function `V = ½(x_e² + y_e² + (ψ_e − σ)²) → 0`, i.e. the robot
+provably converges onto and follows the path. Arrival is declared when the robot is
+within `reach_radius` of the **last** waypoint (or the virtual target passes the path
+end). The `in_front` flag is not needed by this law — the whole polyline is the path.
+
+> **Note (coarse paths / sharp corners):** the law follows the path at constant speed,
+> so a VLM path with a near-cusp (e.g. a 180° reversal) may not be exactly trackable at
+> `cruise_speed`; the robot rounds it at its turning radius `cruise_speed/max_angular_vel`.
+> Curvature is estimated on the coarse polyline via `curvature_window`.
 
 **Action feedback states** (identical to `visual_servo`):
 
@@ -171,7 +182,7 @@ unreached one so the robot rotates to face it:
 
 | Outcome | Condition |
 |---|---|
-| `success = true` | Trajectory **consumed** — the follower reached every waypoint (front advanced past the last one) |
+| `success = true` | **Arrived** — the robot reached the last waypoint (within `reach_radius`, or the virtual target passed the path end) |
 | `success = false` | Tracker stayed `UNTRACKED` beyond `init_timeout`, `OCCLUDED` beyond `occlusion_timeout`, tracker reset unexpectedly after tracking, waypoints rejected, or goal cancelled |
 
 Only one goal is accepted at a time; new goals are rejected while one is active.
@@ -203,14 +214,17 @@ All parameters are live-adjustable via `ros2 param set`.
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `k_yaw` | 1.5 | Angular gain (rad/s per **radian** of carrot bearing) |
-| `cruise_speed` | 0.05 | m/s forward speed when aligned; scaled down by bearing |
-| `lookahead` | 0.3 | **Metres** from the robot at which to pick the carrot waypoint. Larger = smoother/less reactive; smaller = tighter path following |
-| `reach_radius` | 0.15 | **Metres**: a waypoint is reached (front advances) once the robot is within this distance of it. Larger = retire earlier / more forgiving; smaller = must drive nearly over it |
+| `cruise_speed` | 0.05 | m/s — **constant** path speed `v_ref` (the law needs non-zero `v`; the robot does not stop/pivot mid-path) |
+| `k1` | 2.0 | Gain on the heading/approach error `(ψ_e − σ)` — larger = snappier heading correction |
+| `k2` | 1.0 | Cross-track → approach-angle gain, `0..1`; larger = bends harder toward the path off it |
+| `k3` | 1.0 | Along-track gain — pulls the virtual target's `x_e` to zero (how fast `Q` tracks the robot's along-path position) |
+| `eps0` | 0.35 | Softening constant in the `σ` law near the path (avoids over-reaction as `y_e → 0`) |
+| `curvature_window` | 0.15 | **Metres** — arc-length span over which the tangent is differenced to estimate path curvature `C_c` on the coarse polyline. Larger = smoother/less noisy `C_c`, smaller = more local |
+| `reach_radius` | 0.15 | **Metres** — arrival radius at the last waypoint |
 | `max_linear_vel` | 0.26 | m/s cap — Waffle Pi rated maximum |
-| `max_angular_vel` | 1.82 | rad/s cap |
+| `max_angular_vel` | 1.82 | rad/s cap (also sets the minimum turning radius `cruise_speed/max_angular_vel`) |
 | `init_timeout` | 5.0 | Seconds to wait for the tracker to reach `TRACKING` before failing |
 | `occlusion_timeout` | 5.0 | Seconds in `OCCLUDED` before aborting with failure |
-| `control_rate` | 20.0 | Control loop rate in Hz |
+| `control_rate` | 20.0 | Control loop rate in Hz (also the `s`-integration step) |
 
 ---

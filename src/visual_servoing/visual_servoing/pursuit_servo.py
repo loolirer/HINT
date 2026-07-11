@@ -1,21 +1,23 @@
-"""Pure-pursuit waypoint follower.
+"""Control-Lyapunov path-following waypoint follower.
 
 Sibling of ``visual_servo`` — same action-driven lifecycle and state dynamics, but
 it drives off ``waypoint_tracker`` (the ground-trajectory tracker) instead of
-``lk_tracker``, and steers with a pure-pursuit law instead of IBVS.
+``lk_tracker``, and steers with a Control-Lyapunov path-following law.
 
 On a ``FollowTrajectory`` goal it hands the waypoints to the tracker via
-``set_waypoints``, then runs a fixed-rate control loop that steers toward a lookahead
-carrot from the ``/waypoint_tracking/points`` stream. It runs in **metric top-down
-world space**: the tracker publishes every waypoint's live position in ``base_link``
-(x forward, y left, metres) with a per-point ``in_front`` flag, and this follower
-does plain metric pure pursuit — carrot by Euclidean distance, steering by the
-carrot's bearing. The tracker only tracks (publishes the full set every frame, never
-retires); this follower owns *reaching*: it advances a front over waypoints the robot
-drives within ``reach_radius`` of, and declares arrival when the front reaches the
-end. Only ``in_front`` waypoints steer; if the path continues behind, it rotates to
-face it (turning back to a passed waypoint), which is why behind points stay on the
-stream rather than being dropped.
+``set_waypoints``, then runs a fixed-rate control loop in **metric top-down world
+space**: the tracker publishes every waypoint's live position in ``base_link``
+(x forward, y left, metres) every frame, and this follower treats the waypoint
+polyline as the path Γ and applies the Control-Lyapunov law of Ebrahimi Toulkani et
+al., "Reactive Safe Path Following for Differential Drive Mobile Robots Using Control
+Barrier Functions" (ICCMA 2022), **Proposition 1**. A virtual target Q rides the path
+at arc length ``s``; the law drives the along-track (``x_e``), cross-track (``y_e``)
+and heading (``ψ_e``) errors to zero with guaranteed convergence at a constant cruise
+speed ``v`` — the Lyapunov function ``V = ½(x_e² + y_e² + (ψ_e − σ)²)`` has
+``V̇ ≤ 0`` for non-zero ``v``. Only the angular velocity ``ω`` is fed back; ``v`` is
+held at cruise. It is structured so a Control-Barrier-Function QP can later wrap ``ω``
+for safe obstacle avoidance (the paper's second contribution) — out of scope here.
+Arrival = the robot reaching the last waypoint (within ``reach_radius``).
 
 State dynamics mirror ``visual_servo``: one goal at a time, ``IDLE`` while the
 tracker initialises, ``RUNNING`` while following, ``WAITING`` while ``OCCLUDED``;
@@ -25,6 +27,7 @@ tracker initialises, ``RUNNING`` while following, ``WAITING`` while ``OCCLUDED``
 import math
 import threading
 
+import numpy as np
 import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -45,31 +48,38 @@ STATUS_OCCLUDED = "OCCLUDED"
 
 _LATCHED_QOS = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
-# Robot reference point in metric top-down world space: the base_link origin — the
-# robot itself. Waypoints arrive as metric base_link coords (x forward, y left), so
-# lookahead / reach distances are plain Euclidean distances from here, in metres.
-_ROBOT_REF = (0.0, 0.0)
+# The robot is the base_link origin (0, 0) heading +x; waypoints arrive as metric
+# base_link coords (x forward, y left), so distances are plain Euclidean, in metres.
+
+
+def _wrap(a):
+    """Wrap an angle to (-pi, pi]."""
+    return math.atan2(math.sin(a), math.cos(a))
 
 
 class PursuitServoNode(Node):
     def __init__(self):
         super().__init__("pursuit_servo_node")
 
-        # --- Parameters ---  (all distances metric, in metres — top-down world space)
-        self.declare_parameter("k_yaw", 1.5)  # steering gain (rad/s per rad of bearing)
-        self.declare_parameter("cruise_speed", 0.05)  # m/s forward when aligned
-        self.declare_parameter("lookahead", 0.3)  # m — carrot distance from the robot
+        # --- Parameters ---  (metric, top-down world space)
+        self.declare_parameter("cruise_speed", 0.05)  # m/s — constant path speed v_ref
         self.declare_parameter("max_linear_vel", 0.26)  # m/s cap (Waffle Pi rated max)
         self.declare_parameter("max_angular_vel", 1.82)  # rad/s cap
         self.declare_parameter("init_timeout", 5.0)  # s to reach TRACKING before fail
         self.declare_parameter("occlusion_timeout", 5.0)  # s in OCCLUDED before abort
         self.declare_parameter("control_rate", 20.0)  # Hz
-        # A waypoint is "reached" (driven over) — and the trajectory front advances
-        # past it — when the robot comes within ``reach_radius`` metres of it (close to
-        # the base_link origin). A waypoint the robot passes wide of is NOT reached;
-        # pure pursuit keeps steering (and can turn back) to bring the robot onto it.
-        # Retirement lives here, in the follower — the tracker only tracks.
-        self.declare_parameter("reach_radius", 0.05)  # m — arrival radius per waypoint
+        self.declare_parameter("reach_radius", 0.15)  # m — arrival radius at last wp
+        # Control-Lyapunov path-following gains (paper Proposition 1; their tuned
+        # values k1=2, k2=1, k3=1, eps0=0.35). k1 damps the heading/approach error,
+        # k2 (0..1) sets how hard cross-track error bends the approach angle, k3 pulls
+        # the virtual target's along-track error to zero, eps0 softens the sigma law
+        # near the path. ``curvature_window`` is the arc-length span (m) over which the
+        # path tangent is differenced to estimate curvature C_c on the coarse polyline.
+        self.declare_parameter("k1", 2.0)
+        self.declare_parameter("k2", 1.0)
+        self.declare_parameter("k3", 1.0)
+        self.declare_parameter("eps0", 0.35)
+        self.declare_parameter("curvature_window", 0.15)  # m
 
         # --- Tracker service clients ---
         self._set_waypoints_cli = self.create_client(
@@ -93,12 +103,9 @@ class PursuitServoNode(Node):
         # --- Shared state (written by subscriber threads, read by action loop) ---
         self._waypoints = None  # list of (x, y, in_front) — metric base_link
         self._tracker_state = STATUS_UNTRACKED
-        # Trajectory progress: waypoints [0, _reached_count) have been driven over.
-        # The tracker publishes the full ordered set every frame (it never retires);
-        # the follower owns retirement by advancing this front as waypoints are
-        # reached, and declares arrival when the front reaches the end.
-        self._num_waypoints = 0
-        self._reached_count = 0
+        # Virtual-target arc length along the path (paper's ``s``); ``None`` until the
+        # first tracking tick seeds it at the robot's closest point on the path.
+        self._s = None
 
         # Lock to serialise goal acceptance so only one goal runs at a time.
         self._goal_lock = threading.Lock()
@@ -144,8 +151,7 @@ class PursuitServoNode(Node):
     def _run(self, goal_handle):
         goal = goal_handle.request
         self._waypoints = None  # discard any stream from a previous run
-        self._num_waypoints = len(goal.waypoints)
-        self._reached_count = 0  # reset trajectory progress for this goal
+        self._s = None  # reset the virtual-target arc length for this goal
 
         # Delegate initialisation to the tracker.
         resp = self._call_set_waypoints(goal.waypoints, goal.stamp)
@@ -224,11 +230,10 @@ class PursuitServoNode(Node):
             occlusion_start = None  # reset occlusion timer on recovery
             deadline = self.get_clock().now()  # reset so brief UNTRACKED fails fast
 
-            # Advance the trajectory front over any waypoints the robot has now driven
-            # over — the retirement the tracker no longer does. When the front reaches
-            # the end, the whole trajectory is consumed: arrival.
-            self._update_reached(self._waypoints)
-            if self._num_waypoints > 0 and self._reached_count >= self._num_waypoints:
+            # Control-Lyapunov path-following step over the waypoint polyline.
+            v, w, done = self._clf_step(self._waypoints)
+
+            if done:  # robot reached the last waypoint — trajectory complete
                 self._call_stop_tracking()
                 self._stop_robot()
                 result = FollowTrajectory.Result()
@@ -237,30 +242,11 @@ class PursuitServoNode(Node):
                 goal_handle.succeed()
                 return result
 
-            # Steer only by waypoints ahead of the front (still to be reached).
-            target = self._select_lookahead(self._unreached())
-            if target is None:
-                # No unreached waypoint to steer by this tick — hold still.
+            if v is None:  # no usable path this tick — hold still
                 self._stop_robot()
                 self._publish_feedback(goal_handle, "RUNNING")
                 rate.sleep()
                 continue
-
-            # --- Pure-pursuit control law (metric top-down) ---
-            # Steer toward the carrot's bearing (angle off the robot's forward axis);
-            # slow the forward speed as the bearing grows, turning in place when the
-            # carrot is more than 90 deg off-axis (incl. a carrot that is behind — the
-            # robot rotates to face it, which is how it turns back to a passed point).
-            tx, ty = target
-            bearing = math.atan2(ty, tx)  # +left; ±pi when behind
-            w = float(self._p("k_yaw")) * bearing
-            w = max(-float(self._p("max_angular_vel")),
-                    min(float(self._p("max_angular_vel")), w))
-
-            v = float(self._p("cruise_speed")) * max(
-                0.0, 1.0 - abs(bearing) / (math.pi / 2.0)
-            )
-            v = min(v, float(self._p("max_linear_vel")))
 
             cmd = TwistStamped()
             cmd.header.stamp = self.get_clock().now().to_msg()
@@ -280,69 +266,118 @@ class PursuitServoNode(Node):
         return result
 
     # ------------------------------------------------------------------
-    # Trajectory progress (retirement lives in the follower, not the tracker)
+    # Control-Lyapunov path following (paper Proposition 1)
 
-    def _unreached(self):
-        """The still-to-reach tail of the waypoint stream (front already driven over).
+    def _clf_step(self, waypoints):
+        """One Control-Lyapunov path-following step over the waypoint polyline.
 
-        The tracker publishes the full ordered set every frame; steering and the
-        arrival test consider only waypoints from ``_reached_count`` onward.
+        Returns ``(v, w, done)``: linear/angular command and an arrival flag, or
+        ``(None, None, False)`` when there is no usable path this tick. The polyline
+        (all waypoints, in order, metric base_link) is the path Γ; a virtual target Q
+        rides it at arc length ``self._s``. With the robot at the base_link origin
+        heading +x, the tangent-normal error coordinates are ``x_e`` (along-track),
+        ``y_e`` (cross-track) and ``ψ_e`` (heading), and the control is::
+
+            σ    = -asin( clamp(k2·y_e / (|y_e|+ε0)) )          (6a, v>0)
+            ṡ    = v·cos(ψ_e) + k3·x_e                           (6b)
+            Δ    = (sin ψ_e − sin σ)/(ψ_e − σ)   (→ cos σ at ψ_e=σ)   (6c)
+            ω    = C_c·ṡ + σ̇ − k1·(ψ_e − σ) − v·y_e·Δ
+
+        driving ``V = ½(x_e²+y_e²+(ψ_e−σ)²) → 0``. ``v`` is held at cruise.
         """
-        if not self._waypoints:
-            return None
-        return self._waypoints[self._reached_count:]
+        if not waypoints or len(waypoints) < 2:
+            return None, None, False
+        pts = np.array([(x, y) for x, y, _ in waypoints], dtype=float)
+        seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+        arc = np.concatenate([[0.0], np.cumsum(seg)])  # cumulative arc length
+        total = float(arc[-1])
+        if total < 1e-6:
+            return None, None, False
 
-    def _update_reached(self, waypoints):
-        """Advance ``_reached_count`` over waypoints the robot has driven over.
+        # Arrival: robot (origin) within reach_radius of the last waypoint.
+        if float(np.hypot(pts[-1, 0], pts[-1, 1])) <= float(self._p("reach_radius")):
+            return 0.0, 0.0, True
 
-        In-order, a waypoint is *reached* when the robot comes within
-        ``reach_radius`` metres of it (close to the base_link origin). Consumes
-        consecutively from the front and stops at the first not-yet-reached waypoint,
-        so reaching is sequential along the trajectory. A waypoint the robot passes
-        wide of is *not* reached (the robot keeps steering — and can turn back — to
-        drive over it); actually driving over it is what retires it.
-        """
-        if not waypoints:
-            return
-        reach = float(self._p("reach_radius"))
-        rx, ry = _ROBOT_REF
-        n = len(waypoints)
-        while self._reached_count < n:
-            x, y, _in_front = waypoints[self._reached_count]
-            if math.hypot(x - rx, y - ry) <= reach:
-                self._reached_count += 1
-            else:
-                break
+        if self._s is None:  # seed the virtual target at the robot's closest point
+            self._s = self._closest_s(pts, arc)
+        self._s = min(max(self._s, 0.0), total)
 
-    # ------------------------------------------------------------------
-    # Pure-pursuit lookahead selection
+        q, psi_t, kappa = self._locate(self._s, pts, arc)
 
-    def _select_lookahead(self, waypoints):
-        """Pick the pure-pursuit carrot (metric base_link) from the unreached tail.
+        # Tangent-normal error coords (robot at origin, heading ψ_B = 0 in base_link):
+        # [x_e; y_e] = R(-ψ_t)·(p_robot - q) with p_robot = 0.
+        ct, st = math.cos(psi_t), math.sin(psi_t)
+        x_e = -(q[0] * ct + q[1] * st)
+        y_e = q[0] * st - q[1] * ct
+        psi_e = _wrap(-psi_t)
 
-        Sequential along the trajectory: if the **next** unreached waypoint is behind
-        the robot, target it directly so the control law rotates to face it — the
-        robot turns back to a waypoint it passed wide of, rather than skipping ahead
-        and abandoning it (which would stall completion). Otherwise walk the in-front
-        prefix and return the first waypoint at least ``lookahead`` metres away (the
-        farthest in-front one if none reach that), stopping at any behind waypoint so
-        the path is never skipped over. ``None`` only when the tail is empty.
-        """
-        if not waypoints:
-            return None
-        fx, fy, front0 = waypoints[0]
-        if not front0:
-            return (fx, fy)  # next target is behind — turn back to it
-        lookahead = float(self._p("lookahead"))
-        rx, ry = _ROBOT_REF
-        farthest = (fx, fy)
-        for x, y, in_front in waypoints:  # trajectory order
-            if not in_front:
-                break  # don't skip past the path to a farther in-front waypoint
-            farthest = (x, y)
-            if math.hypot(x - rx, y - ry) >= lookahead:
-                return (x, y)
-        return farthest
+        v = min(float(self._p("cruise_speed")), float(self._p("max_linear_vel")))
+        k1, k2 = float(self._p("k1")), float(self._p("k2"))
+        k3, eps0 = float(self._p("k3")), float(self._p("eps0"))
+
+        # Approach angle σ and its analytic rate σ̇ (v > 0 so sign(v) = +1).
+        u = max(-0.999, min(0.999, k2 * y_e / (abs(y_e) + eps0)))
+        sigma = -math.asin(u)
+        s_dot = v * math.cos(psi_e) + k3 * x_e                     # (6b)
+        y_e_dot = x_e * kappa * s_dot + v * math.sin(psi_e)        # (4b)
+        du_dye = k2 * eps0 / (abs(y_e) + eps0) ** 2
+        dsigma_dye = -du_dye / max(math.sqrt(max(1.0 - u * u, 0.0)), 0.05)
+        sigma_dot = dsigma_dye * y_e_dot
+
+        # Δ (6c): (sin ψ_e − sin σ)/(ψ_e − σ), analytic limit cos σ at ψ_e = σ.
+        dpe = psi_e - sigma
+        delta = (math.cos(sigma) if abs(dpe) < 1e-6
+                 else (math.sin(psi_e) - math.sin(sigma)) / dpe)
+
+        w = kappa * s_dot + sigma_dot - k1 * dpe - v * y_e * delta
+
+        # Advance the virtual target; complete if it (and the robot) passed the end.
+        self._s = min(self._s + s_dot / float(self._p("control_rate")), total)
+        if self._s >= total - 1e-3 and x_e <= 0.0:
+            return 0.0, 0.0, True
+
+        max_w = float(self._p("max_angular_vel"))
+        w = max(-max_w, min(max_w, w))
+        return v, w, False
+
+    def _closest_s(self, pts, arc):
+        """Arc length of the point on the polyline closest to the robot (origin)."""
+        best_d, best_s = float("inf"), 0.0
+        for i in range(len(pts) - 1):
+            a, b = pts[i], pts[i + 1]
+            ab = b - a
+            ab2 = float(ab @ ab)
+            t = 0.0 if ab2 < 1e-12 else min(1.0, max(0.0, float((-a) @ ab) / ab2))
+            proj = a + t * ab
+            d = float(np.hypot(proj[0], proj[1]))
+            if d < best_d:
+                best_d, best_s = d, float(arc[i] + t * math.sqrt(ab2))
+        return best_s
+
+    def _seg_index(self, s, arc):
+        i = int(np.searchsorted(arc, s, side="right")) - 1
+        return min(max(i, 0), len(arc) - 2)
+
+    def _locate(self, s, pts, arc):
+        """Return ``(q, ψ_t, C_c)`` at arc length ``s`` on the polyline."""
+        i = self._seg_index(s, arc)
+        seg = arc[i + 1] - arc[i]
+        t = 0.0 if seg < 1e-9 else (s - arc[i]) / seg
+        q = pts[i] + t * (pts[i + 1] - pts[i])
+        psi_t = self._tangent_at(s, pts, arc)
+        # Curvature C_c ≈ dψ_t/ds, tangent differenced over ``curvature_window`` so the
+        # coarse polyline's per-vertex angle jumps read as a finite curvature.
+        dw = float(self._p("curvature_window"))
+        s_hi, s_lo = min(arc[-1], s + dw), max(0.0, s - dw)
+        ds = s_hi - s_lo
+        kappa = (_wrap(self._tangent_at(s_hi, pts, arc)
+                       - self._tangent_at(s_lo, pts, arc)) / ds) if ds > 1e-6 else 0.0
+        return q, psi_t, kappa
+
+    def _tangent_at(self, s, pts, arc):
+        i = self._seg_index(s, arc)
+        d = pts[i + 1] - pts[i]
+        return math.atan2(d[1], d[0])
 
     # ------------------------------------------------------------------
     # Subscriber callbacks
