@@ -126,7 +126,11 @@ class OdomWaypointTrackerNode(Node):
         self._pending_waypoints = None  # Nx2 normalized, awaiting init
         self._pending_stamp = None
         # (t, x, y, yaw, var_x, var_y, var_yaw) — pose + odom covariance diagonal.
+        # ``t`` is the odom header stamp (robot clock), used only for stamp-based
+        # lookup. Freshness uses ``_last_odom_recv`` — the local (this node's) clock
+        # at receipt — so it is immune to robot<->PC clock skew and bad header stamps.
         self._odom_buffer = deque(maxlen=200)
+        self._last_odom_recv = None  # local clock (s) when the last odom arrived
         self.bridge = CvBridge()
 
         self._reset(STATUS_UNTRACKED)
@@ -264,6 +268,9 @@ class OdomWaypointTrackerNode(Node):
     # Odometry
 
     def _odom_callback(self, msg):
+        # Freshness is measured on *this node's* clock at receipt — never the header
+        # stamp — so cross-machine clock skew can't make live odom look stale.
+        self._last_odom_recv = self.get_clock().now().nanoseconds * 1e-9
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         p = msg.pose.pose.position
         yaw = _yaw_from_quat(msg.pose.pose.orientation)
@@ -289,11 +296,11 @@ class OdomWaypointTrackerNode(Node):
         return None if s is None else (s[1], s[2], s[3])
 
     def _odom_fresh(self):
-        """True if the latest odometry is within ``odom_timeout`` of now."""
-        if not self._odom_buffer:
+        """True if an odom message arrived within ``odom_timeout`` (local clock)."""
+        if self._last_odom_recv is None:
             return False
         now = self.get_clock().now().nanoseconds * 1e-9
-        return (now - self._odom_buffer[-1][0]) <= float(self._p("odom_timeout"))
+        return (now - self._last_odom_recv) <= float(self._p("odom_timeout"))
 
     def _relative_pose(self):
         """Current pose expressed in the reference frame: ``(rel_x, rel_y, rel_yaw)``."""
@@ -380,6 +387,12 @@ class OdomWaypointTrackerNode(Node):
         projection ever landed after init the track never established -> ``UNTRACKED``.
         """
         if not self._ever_tracked:
+            self.get_logger().warn(
+                "Odometry not fresh before tracking established — dropping to "
+                "UNTRACKED. Check that /odom is publishing and that the odom source "
+                "and this node agree on time (odom_timeout=%.2fs)."
+                % float(self._p("odom_timeout"))
+            )
             self._reset(STATUS_UNTRACKED)
             self._draw_idle(frame)
             self._publish_debug(frame, msg)
@@ -558,36 +571,52 @@ class OdomWaypointTrackerNode(Node):
         occluded = self.tracking_status == STATUS_OCCLUDED
         color = (0, 215, 255) if occluded else (0, 255, 0)
 
-        # Draw only waypoints that actually project into the image — in front of the
-        # camera AND within frame bounds (the visible set). A waypoint the robot has
-        # driven past is behind the camera and has no valid projection, so it is
-        # skipped instead of shown at a bogus pixel. It is still tracked and published
-        # (metric), and re-appears here if the robot turns back to face it. The
-        # polyline is likewise built from the visible points only.
-        tracked = self._visible
+        in_front = self._in_front
+        visible = self._visible
         total = len(self.pts) if self.pts is not None else 0
-        vis = []
-        if tracked is not None:
+        n_vis = 0
+
+        if self.pts is not None and in_front is not None:
+            # Polyline over *in-front* points, split into contiguous runs. Including
+            # in-front points that fall outside the frame (not just the visible ones)
+            # means the segment to a waypoint that has scrolled off an edge is still
+            # drawn — OpenCV clips it at the border, so you can see the trajectory
+            # continues to an off-view waypoint. Behind-camera points have no valid
+            # projection, so they break the run (never joined across). Off-frame
+            # projections are clamped to a sane range so the clip stays well-behaved.
+            lim = 100000
+            run = []
             for i, pt in enumerate(self.pts):
-                if i < len(tracked) and tracked[i]:
-                    vis.append((i, int(round(float(pt[0]))), int(round(float(pt[1])))))
-        if len(vis) >= 2:
-            cv2.polylines(
-                frame,
-                [np.array([(x, y) for _, x, y in vis], dtype=np.int32)],
-                False, color, 2,
-            )
-        for i, px, py in vis:
-            cv2.circle(frame, (px, py), 6, color, -1)
-            cv2.putText(
-                frame, str(i), (px + 8, py - 8),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
-            )
+                if i < len(in_front) and in_front[i]:
+                    x = int(round(float(np.clip(pt[0], -lim, lim))))
+                    y = int(round(float(np.clip(pt[1], -lim, lim))))
+                    run.append((x, y))
+                else:
+                    if len(run) >= 2:
+                        cv2.polylines(
+                            frame, [np.array(run, dtype=np.int32)], False, color, 2
+                        )
+                    run = []
+            if len(run) >= 2:
+                cv2.polylines(frame, [np.array(run, dtype=np.int32)], False, color, 2)
+
+            # Dots + labels only on visible (in-frame) waypoints.
+            if visible is not None:
+                for i, pt in enumerate(self.pts):
+                    if i < len(visible) and visible[i]:
+                        px, py = int(round(float(pt[0]))), int(round(float(pt[1])))
+                        cv2.circle(frame, (px, py), 6, color, -1)
+                        cv2.putText(
+                            frame, str(i), (px + 8, py - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
+                        )
+                        n_vis += 1
+
         rx, ry, ryaw = self._rel
         cv2.putText(
             frame,
             f"{self.tracking_status} [odom]  {total} pts  "
-            f"vis={len(vis)}/{total}  "
+            f"vis={n_vis}/{total}  "
             f"d=({rx:.2f},{ry:.2f},{ryaw:.2f})",
             (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2,
         )
