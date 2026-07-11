@@ -38,7 +38,9 @@ whole waypoint set through it. Per frame, anchored to a **keyframe**:
    crosses below the frame bottom) are **retired** — the set shrinks as the robot
    advances, so a consumed point can't be resurrected or flung off-screen by a later
    re-fit. All waypoints retired -> ``UNTRACKED`` (trajectory complete). Waypoints
-   are sorted nearest-first at init so retirement/priority hold for any input order.
+   are kept in the exact order sent (nearest-first per the interface); the tracker
+   never re-sorts them — retirement is order-agnostic and the priority prefix walks
+   the as-sent order.
 6. The keyframe **re-keys** (advances to the current frame) only when the
    keyframe->current baseline grows past ``rekey_flow_px`` or the flow breaks, so
    residual drift accrues at these infrequent events, not every frame.
@@ -252,11 +254,10 @@ class WaypointTrackerNode(Node):
         for i, (xn, yn) in enumerate(wps_norm):
             self.pts[i, 0] = (xn + 1.0) * 0.5 * (w - 1)
             self.pts[i, 1] = (yn + 1.0) * 0.5 * (h - 1)
-        # Enforce nearest-first (largest image-y = lowest in frame = nearest) so the
-        # retirement/priority front-logic and the published order hold regardless of
-        # the order the waypoints arrived in. Assumes a forward ground path (depth
-        # monotonic in image-y), which is the interface's nearest-first contract.
-        self.pts = self.pts[np.argsort(-self.pts[:, 1], kind="stable")]
+        # Keep the waypoints in exactly the order they were sent — never re-sorted.
+        # The caller owns the ordering (interface contract: nearest-first, index 0
+        # nearest); the retirement mask is order-agnostic and the priority prefix
+        # walks this same as-sent order.
 
         # A lone waypoint is a single-point tracking task (e.g. one ground goal):
         # a homography can't be conditioned from the compact grid around one point,

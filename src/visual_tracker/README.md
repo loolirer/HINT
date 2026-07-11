@@ -7,7 +7,8 @@ forward-backward flow, feature detection, NCC, bbox geometry):
 | Executable | Tracks | Started by | Publishes |
 |---|---|---|---|
 | `lk_tracker` | one landmark region (a bounding box) | `set_target` service | bbox + state |
-| `waypoint_tracker` | an ordered set of ground-plane waypoints | `set_waypoints` service | normalized point stream + state |
+| `waypoint_tracker` | an ordered set of ground-plane waypoints (DIS optical flow) | `set_waypoints` service | normalized point stream + state |
+| `odom_waypoint_tracker` | the same ground-plane waypoints, but re-projected from `/odom` + camera geometry (no image flow) | `set_waypoints` service | normalized point stream + state |
 
 ```bash
 colcon build --symlink-install --packages-select hint_interfaces visual_tracker
@@ -285,3 +286,145 @@ stamp-based initialisation.
 > occluders and coasts through blank stretches) is the planned follow-up. This
 > layer *corrects* per-point noise via the pooled plane fit; residual drift still
 > ticks at each re-key.
+
+---
+
+## odom_waypoint_tracker
+
+A **2D top-down** ground-trajectory tracker. Instead of estimating where the
+waypoints moved with DIS optical flow (the `waypoint_tracker` backend), it **grounds
+the planner's waypoints once and thereafter dead-reckons them purely from `/odom`**,
+publishing their live **metric positions in `base_link`** (x forward, y left, m) —
+the world-space input a plain metric pure-pursuit follower consumes. No image content
+places the points; the camera is used only to ground them once and to decide what is
+currently *visible* for the debug overlay. It publishes on the **same topics** as
+`waypoint_tracker` (`/waypoint_tracking/points`, `/waypoint_tracking/state`,
+`/camera/waypoint_tracking`) and answers the same `~/set_waypoints` /
+`~/stop_tracking` services — the two are **mutually exclusive** (never run both;
+they'd both drive `/waypoint_tracking`, and they use *different* `points` layouts —
+metric here, normalized image for DIS).
+
+### Algorithm — ground-plane grounding + odometry dead-reckoning
+
+Every waypoint is assumed to lie on the ground plane, so:
+
+1. **Ground the waypoints once.** On `set_waypoints`, each normalized image point is
+   back-projected through the camera (`camera_height`, `camera_tilt`,
+   `camera_hfov_deg`, `camera_forward_offset`) onto the ground, giving a fixed 2-D
+   ground point `(X forward, Y left)` in the **reference frame** — the robot's
+   odometry pose at the instant the trajectory arrived. The reference frame is
+   re-anchored every time a new trajectory is received.
+2. **Dead-reckon.** Each frame, the current odometry pose is expressed relative to
+   the reference pose (a planar rigid transform), so the fixed ground points are
+   re-expressed in the *current* robot (`base_link`) frame — their 2D top-down world
+   positions. The **full set is kept and re-expressed every frame** (never dropped);
+   a waypoint the robot has driven past re-appears ahead again once the robot turns
+   back toward it. Order is preserved exactly as sent (never re-sorted).
+3. **Publish (metric).** All waypoints are published as metric `base_link`
+   coordinates, each flagged `in_front` (ahead of the camera) or behind — computed by
+   reprojecting to the image (a behind point has no valid projection). The follower
+   (`pursuit_servo`) steers by the in-front ones and owns *reaching* / completion,
+   since reaching is an act of the servo, not the tracker.
+
+Because placement is a dead-reckoned prediction, **"occlusion" means odometry
+loss**: `/odom` going stale (older than `odom_timeout`). Odometry always knows where
+every waypoint is, so there is no visual occlusion — only the sensor dropping out.
+**No points are published while `OCCLUDED`** — the frozen prediction goes stale as
+the robot moves, so `OCCLUDED` is the "stop, don't coast" signal.
+
+**Camera convention:** OpenCV optical frame (x right, y down, z into scene); robot
+frame REP-103 (x forward, y left, z up). The camera sits `camera_height` above and
+`camera_forward_offset` ahead of the base origin, pitched `camera_tilt` radians
+**down** from horizontal; principal point assumed at the image center, square
+pixels, focal length derived from `camera_hfov_deg` and the frame width.
+
+**State:**
+
+```
+UNTRACKED ──► (set_waypoints) ──► TRACKING ──► (odom stale > odom_timeout) ──► OCCLUDED
+                                     ▲                                            │
+                                     └──────────────── (odom fresh again) ────────┘
+```
+
+### Usage
+
+```bash
+ros2 run visual_tracker odom_waypoint_tracker \
+  --ros-args -p camera_height:=0.14 -p camera_tilt:=0.35 -p camera_hfov_deg:=62.2
+```
+
+To swap it in for the DIS tracker so `pursuit_servo`'s `/waypoint_tracker_node/...`
+service clients resolve, remap the node name:
+
+```bash
+ros2 run visual_tracker odom_waypoint_tracker --ros-args -r __node:=waypoint_tracker_node
+```
+
+Start / stop tracking and observe the stream exactly as `waypoint_tracker`:
+
+```bash
+ros2 service call /odom_waypoint_tracker_node/set_waypoints hint_interfaces/srv/SetWaypoints \
+  "{waypoints: [{x: 0.0, y: 0.8, z: 0.0}, {x: 0.05, y: 0.2, z: 0.0}, {x: 0.1, y: -0.4, z: 0.0}], stamp: {sec: 0, nanosec: 0}}"
+ros2 topic echo /waypoint_tracking/state
+ros2 topic echo /waypoint_tracking/points
+```
+
+### Interfaces
+
+| Interface | Type | Direction |
+|---|---|---|
+| `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Sub — drives the publish loop, header, overlay |
+| `/odom` (see `odom_topic`) | `nav_msgs/Odometry` | Sub — the sole pose source |
+| `~/set_waypoints` | `hint_interfaces/SetWaypoints` | Service server |
+| `~/stop_tracking` | `hint_interfaces/StopTracking` | Service server |
+| `/waypoint_tracking/state` | `std_msgs/String` (latched) | Pub — `UNTRACKED` / `TRACKING` / `OCCLUDED` |
+| `/waypoint_tracking/points` | `hint_interfaces/VisualWaypoints` | Pub — **metric `base_link`** waypoint stream + `in_front` flags, **only while `TRACKING`** |
+| `/waypoint_tracking/markers` | `visualization_msgs/MarkerArray` | Pub — waypoints as ground disks (z=0) in `marker_frame`, sized by uncertainty, **only while `TRACKING`** |
+| `/camera/waypoint_tracking` | `sensor_msgs/Image` | Pub — debug overlay (only **visible** waypoints drawn) |
+
+**Output contract.** `set_waypoints` still takes normalized `[-1, 1]` image waypoints
+(the planner/VLM markers). The **published `points` are metric `base_link`** (x
+forward, y left, m; z=0), in planner order (index 0 first). Every waypoint is
+published every frame with an `in_front` flag (`true` ahead of the camera, `false`
+behind); a behind waypoint re-appears (flips `true`) once the robot turns back toward
+it. `tracked` marks image-visibility (in front AND in the frame). A follower steers
+only by `in_front` points, treats "not `TRACKING`" / stale as *stop*, and owns
+reaching/arrival (the tracker never retires).
+
+**Uncertainty markers.** `/waypoint_tracking/markers` renders the tracked waypoints
+on the ground plane (`z=0`) in `marker_frame` (`base_link`) as flat cylinder disks —
+one per in-front waypoint (green visible, amber in-front-but-off-frame; behind ones
+are removed). Each disk's diameter is
+`marker_base_size + 2·uncertainty_scale·σ`, where `σ = sqrt(σ_trans² + range²·σ_yaw²)`
+is the waypoint's positional uncertainty: the **odometry drift accrued since the
+trajectory was grounded** (`pose.covariance` growth vs the reference frame),
+translational plus the yaw component swung out to the waypoint's range — so a far
+waypoint reads larger (a small heading error swings it further). Markers clear on
+`OCCLUDED` / `stop_tracking` / a new trajectory. Note: this needs an odometry source
+that reports a **growing** `pose.covariance`; if the source publishes a constant (or
+zero) covariance, every disk stays at `marker_base_size`.
+
+### Parameters
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `camera_height` | 0.14 | Camera height above the ground plane (m) |
+| `camera_forward_offset` | 0.0 | Camera offset ahead of the base origin (m) |
+| `camera_tilt` | 0.0 | Camera pitch **down** from horizontal (rad); larger = looks nearer/lower |
+| `camera_hfov_deg` | 62.2 | Horizontal field of view (deg); sets the focal length (Pi cam v2 default) |
+| `odom_topic` | `/odom` | Odometry topic (applied at startup, not live-adjustable) |
+| `odom_timeout` | 0.5 | Odometry age (s) beyond which the tracker declares `OCCLUDED` |
+| `marker_frame` | `base_link` | TF frame the metric points **and** uncertainty markers are published in (robot body; disks lie at `z=0`) |
+| `marker_base_size` | 0.03 | Minimum disk diameter (m) — the size at zero drift |
+| `uncertainty_scale` | 1.0 | Disk-diameter gain per metre of positional σ (larger = uncertainty growth is visually exaggerated) |
+
+All parameters except `odom_topic` are live-adjustable via `ros2 param set`.
+
+### Tuning
+
+| Symptom | Adjustment |
+|---|---|
+| Waypoints project too near / too far | Correct `camera_tilt` and `camera_height` to the real rig — grounding is only as good as the geometry |
+| Whole path skewed left/right | Check `camera_hfov_deg` (focal length) and that the principal point really is centered |
+| Path lags / leads the robot | Verify `/odom` is well-calibrated and low-latency; lower `odom_timeout` if pose drops out |
+| Points drift over a long run | Expected — pure dead-reckoning accumulates odometry drift with no visual correction |

@@ -136,14 +136,28 @@ starts a control loop at `control_rate`. On result (success or failure) it calls
 `stop_tracking` to clean up the tracker. Same single-goal lifecycle as
 `visual_servo`.
 
-**Control law (pure pursuit)** — each tick it picks a **lookahead** waypoint from
-the `/waypoint_tracking/points` stream (the nearest **measured** waypoint at least
-`lookahead` from the robot reference at the frame bottom-centre; the farthest
-measured one if none reach it — only `tracked=true` points steer, never a coasting
-extrapolation):
+This runs in **metric top-down world space**: `waypoint_tracker` publishes every
+waypoint's live position in `base_link` (x forward, y left, metres) with a per-point
+`in_front` flag, and the follower does plain metric pure pursuit — no image space.
 
-- **Angular**: proportional on the lookahead's horizontal offset → `cmd_vel.angular.z`. Steers to curve toward the carrot.
-- **Linear**: `cruise_speed` scaled down by the heading error `|−x|` → slows on sharp turns (turns in place when the carrot is far off-axis), clamped to `max_linear_vel`.
+**Reaching (retirement lives here, not the tracker).** The tracker only tracks — it
+re-publishes the **full** waypoint set every frame and never retires. This follower
+owns *reaching*: it keeps a front index over the (as-sent) stream and advances it past
+each waypoint the robot drives over. A waypoint is **reached** when the robot comes
+within `reach_radius` **metres** of it. Reaching is sequential (in order) and steers
+only by waypoints ahead of the front. When the front reaches the end (every waypoint
+reached), the trajectory is **consumed** → success. A waypoint the robot passes wide
+of is **not** reached; pure pursuit keeps steering — and will **turn back** to it if
+it ends up behind — until the robot actually drives within `reach_radius`.
+
+**Control law (metric pure pursuit)** — each tick it picks a **lookahead** carrot from
+the still-unreached tail of the stream: the first **in-front** waypoint at least
+`lookahead` metres from the robot (the farthest in-front one if none reach that). If
+no unreached waypoint is in front (the path continues behind), it targets the first
+unreached one so the robot rotates to face it:
+
+- **Angular**: proportional on the carrot's **bearing** `atan2(y, x)` → `cmd_vel.angular.z` (a behind carrot has bearing near ±π, so the robot spins to face it).
+- **Linear**: `cruise_speed` scaled down by `|bearing|` → slows on sharp turns, **turns in place** past 90° off-axis, clamped to `max_linear_vel`.
 
 **Action feedback states** (identical to `visual_servo`):
 
@@ -157,8 +171,8 @@ extrapolation):
 
 | Outcome | Condition |
 |---|---|
-| `success = true` | Trajectory **consumed** — the tracker retired all waypoints as they passed under the robot and went `UNTRACKED` after having tracked |
-| `success = false` | Tracker stayed `UNTRACKED` beyond `init_timeout`, `OCCLUDED` beyond `occlusion_timeout`, waypoints rejected, or goal cancelled |
+| `success = true` | Trajectory **consumed** — the follower reached every waypoint (front advanced past the last one) |
+| `success = false` | Tracker stayed `UNTRACKED` beyond `init_timeout`, `OCCLUDED` beyond `occlusion_timeout`, tracker reset unexpectedly after tracking, waypoints rejected, or goal cancelled |
 
 Only one goal is accepted at a time; new goals are rejected while one is active.
 
@@ -189,9 +203,10 @@ All parameters are live-adjustable via `ros2 param set`.
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `k_yaw` | 0.5 | Angular gain (rad/s per unit normalised lookahead offset) |
-| `cruise_speed` | 0.05 | m/s forward speed when aligned; scaled down by heading error |
-| `lookahead` | 0.1 | Normalized distance from the robot reference at which to pick the carrot waypoint. Larger = smoother/less reactive; smaller = tighter path following |
+| `k_yaw` | 1.5 | Angular gain (rad/s per **radian** of carrot bearing) |
+| `cruise_speed` | 0.05 | m/s forward speed when aligned; scaled down by bearing |
+| `lookahead` | 0.3 | **Metres** from the robot at which to pick the carrot waypoint. Larger = smoother/less reactive; smaller = tighter path following |
+| `reach_radius` | 0.15 | **Metres**: a waypoint is reached (front advances) once the robot is within this distance of it. Larger = retire earlier / more forgiving; smaller = must drive nearly over it |
 | `max_linear_vel` | 0.26 | m/s cap — Waffle Pi rated maximum |
 | `max_angular_vel` | 1.82 | rad/s cap |
 | `init_timeout` | 5.0 | Seconds to wait for the tracker to reach `TRACKING` before failing |

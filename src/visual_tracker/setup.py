@@ -25,6 +25,7 @@ setup(
         "console_scripts": [
             "lk_tracker = visual_tracker.lk_tracker:main",
             "waypoint_tracker = visual_tracker.waypoint_tracker:main",
+            "odom_waypoint_tracker = visual_tracker.odom_waypoint_tracker:main",
         ],
     },
 )
