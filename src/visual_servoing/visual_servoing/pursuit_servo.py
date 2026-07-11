@@ -17,7 +17,9 @@ speed ``v`` — the Lyapunov function ``V = ½(x_e² + y_e² + (ψ_e − σ)²)`
 ``V̇ ≤ 0`` for non-zero ``v``. Only the angular velocity ``ω`` is fed back; ``v`` is
 held at cruise. It is structured so a Control-Barrier-Function QP can later wrap ``ω``
 for safe obstacle avoidance (the paper's second contribution) — out of scope here.
-Arrival = the robot reaching the last waypoint (within ``reach_radius``).
+Arrival requires the virtual target to sweep the **whole** path (so every waypoint is
+followed in order) *and* the robot to reach the last one — so a loop / turn-around,
+where the last waypoint can sit near the start, does not finish prematurely.
 
 State dynamics mirror ``visual_servo``: one goal at a time, ``IDLE`` while the
 tracker initialises, ``RUNNING`` while following, ``WAITING`` while ``OCCLUDED``;
@@ -287,6 +289,7 @@ class PursuitServoNode(Node):
         """
         if not waypoints or len(waypoints) < 2:
             return None, None, False
+
         pts = np.array([(x, y) for x, y, _ in waypoints], dtype=float)
         seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
         arc = np.concatenate([[0.0], np.cumsum(seg)])  # cumulative arc length
@@ -294,12 +297,13 @@ class PursuitServoNode(Node):
         if total < 1e-6:
             return None, None, False
 
-        # Arrival: robot (origin) within reach_radius of the last waypoint.
-        if float(np.hypot(pts[-1, 0], pts[-1, 1])) <= float(self._p("reach_radius")):
-            return 0.0, 0.0, True
-
-        if self._s is None:  # seed the virtual target at the robot's closest point
-            self._s = self._closest_s(pts, arc)
+        # Seed the virtual target at the path **start** so the robot follows the whole
+        # trajectory from the beginning through every waypoint in order. Arrival is
+        # judged by ``s`` reaching the path end (below), never by mere proximity to the
+        # last waypoint — on a loop / turn-around that point can sit near the start and
+        # finish the goal prematurely.
+        if self._s is None:
+            self._s = 0.0
         self._s = min(max(self._s, 0.0), total)
 
         q, psi_t, kappa = self._locate(self._s, pts, arc)
@@ -331,28 +335,26 @@ class PursuitServoNode(Node):
 
         w = kappa * s_dot + sigma_dot - k1 * dpe - v * y_e * delta
 
-        # Advance the virtual target; complete if it (and the robot) passed the end.
+        # Advance the virtual target along the path.
         self._s = min(self._s + s_dot / float(self._p("control_rate")), total)
-        if self._s >= total - 1e-3 and x_e <= 0.0:
-            return 0.0, 0.0, True
+
+        # Arrival requires the virtual target to have swept the **entire** path — so the
+        # robot followed it through every waypoint in order — AND the robot to have
+        # reached or passed the true last waypoint. (Proximity to the last waypoint
+        # alone is not enough: on a loop / turn-around it can sit near the start.)
+        if self._s >= total - 1e-3:
+            last = pts[-1]
+            fdir = pts[-1] - pts[-2]  # final path heading
+            ftan = math.atan2(fdir[1], fdir[0])
+            # along-track of the robot (origin) past the last waypoint, +ve once passed
+            past_end = -(last[0] * math.cos(ftan) + last[1] * math.sin(ftan)) >= 0.0
+            reached = float(np.hypot(last[0], last[1])) <= float(self._p("reach_radius"))
+            if past_end or reached:
+                return 0.0, 0.0, True
 
         max_w = float(self._p("max_angular_vel"))
         w = max(-max_w, min(max_w, w))
         return v, w, False
-
-    def _closest_s(self, pts, arc):
-        """Arc length of the point on the polyline closest to the robot (origin)."""
-        best_d, best_s = float("inf"), 0.0
-        for i in range(len(pts) - 1):
-            a, b = pts[i], pts[i + 1]
-            ab = b - a
-            ab2 = float(ab @ ab)
-            t = 0.0 if ab2 < 1e-12 else min(1.0, max(0.0, float((-a) @ ab) / ab2))
-            proj = a + t * ab
-            d = float(np.hypot(proj[0], proj[1]))
-            if d < best_d:
-                best_d, best_s = d, float(arc[i] + t * math.sqrt(ab2))
-        return best_s
 
     def _seg_index(self, s, arc):
         i = int(np.searchsorted(arc, s, side="right")) - 1

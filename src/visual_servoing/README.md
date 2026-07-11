@@ -161,9 +161,11 @@ Q** rides the path at arc length `s`. With the robot at the `base_link` origin h
 - **Linear**: `v` is held **constant** at `cruise_speed` (the paper's `v_ref`) — the convergence guarantee requires non-zero `v`, so this follower does not stop or turn in place; it follows the path as a smooth arc.
 
 This drives the Lyapunov function `V = ½(x_e² + y_e² + (ψ_e − σ)²) → 0`, i.e. the robot
-provably converges onto and follows the path. Arrival is declared when the robot is
-within `reach_radius` of the **last** waypoint (or the virtual target passes the path
-end). The `in_front` flag is not needed by this law — the whole polyline is the path.
+provably converges onto and follows the path. **Arrival requires the virtual target to
+sweep the entire path** (so the robot follows every waypoint in order) **and** the
+robot to reach or pass the last waypoint — proximity to the last waypoint alone is not
+enough, so a loop / turn-around whose last point sits near the start doesn't finish
+early. The `in_front` flag is not needed by this law — the whole polyline is the path.
 
 > **Note (coarse paths / sharp corners):** the law follows the path at constant speed,
 > so a VLM path with a near-cusp (e.g. a 180° reversal) may not be exactly trackable at
@@ -182,7 +184,7 @@ end). The `in_front` flag is not needed by this law — the whole polyline is th
 
 | Outcome | Condition |
 |---|---|
-| `success = true` | **Arrived** — the robot reached the last waypoint (within `reach_radius`, or the virtual target passed the path end) |
+| `success = true` | **Arrived** — the virtual target swept the whole path (every waypoint followed in order) *and* the robot reached/passed the last waypoint |
 | `success = false` | Tracker stayed `UNTRACKED` beyond `init_timeout`, `OCCLUDED` beyond `occlusion_timeout`, tracker reset unexpectedly after tracking, waypoints rejected, or goal cancelled |
 
 Only one goal is accepted at a time; new goals are rejected while one is active.
