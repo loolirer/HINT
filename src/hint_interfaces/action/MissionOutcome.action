@@ -1,0 +1,13 @@
+# Goal
+string step_id       # the step being recorded (from the matching MissionStep result)
+bool success         # did execution (plan + follow) succeed?
+string message       # execution result detail (planner / follower messages)
+string observation   # optional grounded perception verbatim (e.g. a verify VLM answer); empty if none
+---
+# Result
+bool completed       # judge verdict: was the step actually completed?
+bool mission_done    # true if the whole mission is now complete
+string message       # judge reason / outcome note
+---
+# Feedback
+string state         # "RUNNING" while judging / compressing
