@@ -165,12 +165,20 @@ class MissionPlannerNode(Node):
         return base + "."
 
     def _plan_text(self):
+        envs = self._plan.get("environments", [])
+        cur = self._narrative.get("current_environment", "") if self._narrative else ""
+        cur_idx = next((i for i, e in enumerate(envs) if e.get("name") == cur), 0)
         lines = [f"Mission: {self._plan.get('mission', '')}", "Environments (in order):"]
-        for i, env in enumerate(self._plan.get("environments", []), 1):
+        for i, env in enumerate(envs):
             name = env.get("name", "")
-            desc = env.get("description", "")
-            head = f"  {i}. {name}" + (f" — {desc}" if desc else "")
-            lines.append(f"{head}: {env.get('intent', '')}")
+            if i < cur_idx:
+                # Past environments are captured in the narrative's `done`; send
+                # only the name to save tokens (their description/intent are moot).
+                lines.append(f"  {i + 1}. {name} (done)")
+            else:
+                desc = env.get("description", "")
+                head = f"  {i + 1}. {name}" + (f" — {desc}" if desc else "")
+                lines.append(f"{head}: {env.get('intent', '')}")
         return "\n".join(lines)
 
     def _set_env_description(self, name, description):

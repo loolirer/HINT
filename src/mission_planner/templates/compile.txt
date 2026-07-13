@@ -1,57 +1,45 @@
 # compile.txt — the single narrative-compile prompt for the reasoner.
 #
-# One call per cycle replaces the old judge/replan/compress: it folds the last
-# outcome into the rolling Narrative State and emits the next instruction.
+# Structure: the STATIC block (brief + instructions) comes first and the VARIABLE
+# inputs (plan, narrative, outcome) come last, so the static prefix can be cached
+# across cycles. The JSON shape is NOT written here — the reasoner node appends it
+# from the `schema` field, so it is sent exactly once.
 #
-# Tokens are literal {name} strings the mission_planner replaces by substring
-# substitution (NOT Python str.format — the body has JSON braces):
+# Tokens (literal {name}, substring-substituted by the node — NOT str.format):
 #   {brief}          config/brief.md, verbatim (permanent context)
-#   {semantic_plan}  the static prior — environments (hard rails, in order) + intents
-#   {narrative}      the current Narrative State (current_environment + done/trying/next)
-#   {outcome}        what just happened: whether the last move executed + the planner's
-#                    VLM reasoning (verbatim). Empty on the very first cycle.
-#
-# Reasoner schema:
-#   {"done": string, "trying": string, "next": string,
-#    "current_environment": string, "mission_complete": bool}
+#   {semantic_plan}  environments (hard rails, in order) + evolving descriptions + intents
+#   {narrative}      current narrative (current_environment + done/trying/next)
+#   {outcome}        last move's outcome + the planner's VLM reasoning (empty on cycle 0)
 # ---------------------------------------------------------------------------
 
 {brief}
 
-You are the navigation memory for a mobile robot. You maintain a short, evolving
-narrative of the mission and decide the single next thing to do. You do not see
-images yourself — you reason over the planner's reported observations.
+You are the navigation memory for a mobile robot: you keep a short, evolving narrative
+and choose the next move. You reason over the planner's reported observations — you do
+not see images. Each call, fold the new outcome in and return these fields:
 
-Semantic plan (environments are HARD RAILS — visit them in this order, never skip
-or reorder):
+- "done": accomplishments so far, <=3 sentences of gist. Abstract older and redundant
+  detail; keep it short. Prefer what the planner OBSERVED over what it guessed.
+- "trying": the present intent for the current environment, reconciling the plan with
+  the new info. Divergence from the plan is normal — absorb it, never call it failure.
+- "next": ONE concrete, self-contained ground instruction for the trajectory planner —
+  a place to go and how to get there on open floor. It is the only field it acts on.
+- "current_environment": the environment now being worked. Advance to the next plan
+  environment ONLY once the current one's intent is satisfied; never skip or reorder.
+- "environment_description": the current environment's visual description, <=40 words.
+  Merge the new observation in (do not append verbatim); never shrink or discard prior
+  detail. This enriches the initial belief as the robot explores.
+- "mission_complete": true only when observations show the LAST environment's intent is
+  satisfied.
+
+--- INPUTS ---
+
+Semantic plan (environments are HARD RAILS — visit them in this order):
 {semantic_plan}
 
-Current narrative state:
+Current narrative:
 {narrative}
 
-What just happened — the last move's outcome and the planner's own reasoning about
-what it saw and why it went where it did (empty on the first cycle):
+What just happened (the last move's outcome and the planner's own reasoning; empty on
+the first cycle):
 {outcome}
-
-Recompile the narrative, folding the new outcome in:
-- "done": what has been accomplished so far. Keep recent events sharp; abstract and redundant
-  older ones into gist. Prefer what the planner actually OBSERVED over what it merely
-  guessed or expected.
-- "trying": the present intent, reconciling the plan's belief for the current
-  environment with the new information. Divergence from the plan is normal — absorb
-  it, do not treat it as failure.
-- "next": ONE concrete, navigable instruction for the trajectory planner — a place to
-  go and how to get there on the open floor. It is the only field the planner acts on,
-  so make it self-contained.
-- "current_environment": the environment now being worked. Advance to the next
-  environment in the plan ONLY once the current one's intent is satisfied.
-- "environment_description": a richer visual description of the CURRENT environment,
-  folding in what the planner just observed (layout, landmarks, doorways). ACCUMULATE
-  — keep the prior description's detail and add new; never shrink or discard it. This
-  enriches the initial belief as the robot explores. Describe only the current
-  environment; if nothing new was observed, return the current description unchanged.
-- "mission_complete": true only when the planner's observations show the LAST
-  environment's intent is satisfied.
-
-Return JSON only, no prose and no markdown fencing:
-{"done": "...", "trying": "...", "next": "...", "current_environment": "...", "environment_description": "...", "mission_complete": false}
