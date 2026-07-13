@@ -19,6 +19,7 @@ Every HINT-specific BT leaf type is registered once, in one place: `hint_bt::reg
 | `PlanTrajectoryAction` | `include/hint_bt/nodes/plan_trajectory_action.hpp` | `/trajectory_planner_node/plan_trajectory` |
 | `FollowTrajectoryAction` | `include/hint_bt/nodes/follow_trajectory_action.hpp` | `/pursuit_servo_node/follow_trajectory` |
 | `VisualQuestionAction` | `include/hint_bt/nodes/visual_question_action.hpp` | `/visual_question_node/ask` |
+| `ReasonAction` | `include/hint_bt/nodes/reason_action.hpp` | `/reasoner_node/reason` |
 
 Adding a new leaf: drop a new `RosActionNode<...>` subclass header under `include/hint_bt/nodes/`, register it inside `registerHintNodes()`. No executable needs to change — `bt_executor_node` picks up any tree that references it.
 
@@ -119,5 +120,22 @@ ros2 action send_goal /bt_executor_node/execute_behavior_tree btcpp_ros2_interfa
 ```
 
 `jq -n --arg tree ... --arg xml ... '{target_tree: $tree, payload: $xml}'` builds the JSON goal object with `jq` handling all quote escaping — no manual `\"` needed even for an inline XML string. `--rawfile xml <path>` (instead of `--arg xml '...'`) works the same way for sending a whole file's content verbatim; just don't point it at a tree ID that's already preloaded from `behaviors/` — `registerBehaviorTreeFromText` registers into the same factory as the preload step, and re-registering the same `<BehaviorTree ID="...">` a second time throws.
+
+### Reason over text with `ReasonAction`
+
+`ReasonAction` calls the `reasoner` node (`/reasoner_node/reason`) — generic
+text-in / JSON-out LLM reasoning, no camera. `prompt` is the text/context to
+reason over; the optional `schema` constrains the reply to a JSON shape; the
+model's reply lands on the `response` output port (`SUCCESS`), or the failure
+reason does (`FAILURE`, when the reasoner aborts). It's the reasoning primitive
+the semantic mission planner leans on — judging a run log, revising a planner
+prompt, summarizing an area — but it stands alone for a one-off query too
+(requires the `reasoner` node running, uncommented in `bringup.launch.py`):
+
+```bash
+ros2 action send_goal /bt_executor_node/execute_behavior_tree btcpp_ros2_interfaces/action/ExecuteTree "$(jq -n --arg tree AdHocReason --arg xml '<?xml version="1.0"?><root BTCPP_format="4"><BehaviorTree ID="AdHocReason"><ReasonAction prompt="In one sentence, is a hallway a good place to drive a robot?" response="{reply}"/></BehaviorTree></root>' '{target_tree: $tree, payload: $xml}')" --feedback
+```
+
+Bind `schema` to a JSON shape (e.g. `schema='{&quot;completed&quot;: bool, &quot;reason&quot;: string}'`) to force structured output; `{reply}` on `response` makes the JSON available to downstream leaves via the blackboard.
 
 ---

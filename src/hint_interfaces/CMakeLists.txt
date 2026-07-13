@@ -18,6 +18,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/GroundDescription.action"
   "action/VisualQuestion.action"
   "action/PlanTrajectory.action"
+  "action/Reason.action"
   DEPENDENCIES builtin_interfaces std_msgs sensor_msgs geometry_msgs
 )
 

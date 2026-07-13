@@ -1,0 +1,10 @@
+# Goal
+string prompt   # assembled prompt / context to reason over (text only, no frame)
+string schema   # optional JSON shape/schema hint the reply must match; empty = free-form text
+---
+# Result
+bool success    # true when the model returned a usable reply (valid JSON when a schema was requested)
+string response # the model's reply: canonical JSON when a schema was requested, else raw text; the failure reason when success is false
+---
+# Feedback
+string state    # "RUNNING" while the API call is in flight
