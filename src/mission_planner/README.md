@@ -1,17 +1,18 @@
 # mission_planner
 
-The semantic mission planner: it turns a human/LLM-authored mission into sequential,
-hierarchical, self-prompted navigation. It walks an ordered to-do of **areas** (bigger
-tasks tied to a discrete environment) each holding ordered **steps** (concrete visual
-instructions), hands each step's instruction to the existing
-`trajectory_planner → waypoint_tracker → pursuit_servo` pipeline via the BT, and uses the
-**reasoner** (`/reasoner_node/reason`, text-in / JSON-out) for the deliberation a
-single-frame VLM check can't do — judging completion from a run log, revising an
-instruction after a failure, and compressing a completed area into a summary.
+The semantic mission planner — a **narrative director**. It starts from a static **Semantic
+Plan** (a prior: which environments to visit, in order, and a brief intent for each) and drives
+navigation by maintaining a rolling **Narrative State** that it **recompiles every cycle** with
+a single `reasoner` call: fold the last move's outcome (the trajectory planner's own VLM
+reasoning) into the narrative, and emit the next instruction.
 
-> **Status.** Fully implemented and buildable: the data contracts (mission format, structured
-> log, prompt templates, brief), the `mission_planner_node` that drives them, and the `hint_bt`
-> `RunMission` loop tree (a single `MissionAdvance` leaf) — see
+There are **no discrete steps, statuses, retries or pass/fail judging**. The old model outlined
+a happy path and read every divergence as failure, forcing constant replanning; here divergence
+is the normal material the narrative absorbs. Completion is a narrative judgment, not a checklist
+exhausted.
+
+> **Status.** Fully implemented and buildable: the data contracts, the `mission_planner_node`,
+> and the `hint_bt` `RunMission` loop tree (a single `MissionAdvance` leaf) — see
 > [BT integration](#bt-integration). You can also drive the node directly with
 > `ros2 action send_goal` (see [Test](#test)).
 
@@ -19,12 +20,10 @@ instruction after a failure, and compressing a completed area into a summary.
 
 ```
 mission_planner/
-  mission_planner/mission_planner_node.py  # the state-authority node
-  missions/apartment_tidy.yaml             # worked-example mission (schema by example)
-  templates/judge.txt                      # completion-judgement prompt template
-  templates/replan.txt                     # failure-replan prompt template
-  templates/compress.txt                   # area-summary prompt template
-  config/brief.md                          # permanent context: capabilities + rules + ambiguity policy
+  mission_planner/mission_planner_node.py  # the narrative-director node
+  missions/apartment_tidy.yaml             # a Semantic Plan (the static prior)
+  templates/compile.txt                    # the single narrative-compile prompt
+  config/brief.md                          # permanent context: capabilities + rules + policy
   README.md                                # this file — single source of truth
 ```
 
@@ -33,199 +32,179 @@ colcon build --symlink-install --packages-select hint_interfaces mission_planner
 source install/setup.bash
 ```
 
-At runtime the node writes two sibling files next to the mission YAML: `<mission>.state.yaml`
-(the live checkpoint — status/attempts/result/summary) and `<mission>.log.jsonl` (the
-structured log). On startup it **resumes** from `<mission>.state.yaml` if it exists; delete
-that file to start the mission fresh.
+At runtime the node writes two append-only siblings next to the mission YAML:
+`<mission>.narrative.jsonl` (the versioned narrative history) and `<mission>.log.jsonl` (the raw
+action log). On startup it **resumes** from the tail of `<mission>.narrative.jsonl` if it exists;
+delete that file to start the mission fresh.
 
-## Mission file (`missions/*.yaml`)
+## The loop, in one line
 
-Hierarchy: `mission → areas[] → steps[]`. An **area** is a bigger task bound to a discrete
-environment (a room); a **step** is a small, concrete visual instruction fed *verbatim* to
-`trajectory_planner` as its `description`. Order is authoritative — areas are visited in
-order, steps within an area in order.
+Per cycle there are **two** model calls with a clean division of labour:
+- **trajectory_planner (vision):** the narrative's `next` + the image → waypoints **and** a
+  reasoning `message` (what it saw / why it went there). That VLM reasoning *is* the grounding —
+  no separate verify call.
+- **reasoner (text):** one `compile.txt` call folds that reasoning into the narrative and emits
+  the next instruction + completion.
 
-| Field | Level | Type | Meaning |
-|---|---|---|---|
-| `mission` | root | string | One-line mission statement; permanent context on every reasoner call |
-| `id` | area / step | string | Stable identifier (`step.id` conventionally `"<area>.<n>"`) |
-| `goal` | area | string | What "done" means for the area — the judge's target |
-| `instruction` | step | string | The actionable path description handed to `trajectory_planner` |
-| `verify` | step | string | Optional yes/no the judge grounds on; may cite a logged VLM answer (empty = judge on the outcome alone) |
-| `status` | area / step | enum | `pending` \| `active` \| `done` \| `failed` |
-| `attempts` | step | int | Best-effort re-plan counter (incremented on each failed try) |
-| `result` | step | string | Last outcome message |
-| `summary` | area | string | Filled by the compress step when the area completes |
+The `reasoner` is the director (memory + intent); the trajectory planner is the actor-with-eyes.
 
-**Status semantics**
+## Data contract 1 — Semantic Plan (`missions/*.yaml`)
 
-| Status | Meaning |
-|---|---|
-| `pending` | Not yet reached |
-| `active` | Currently being worked (set when handed to the executor) |
-| `done` | Completed and verified — **kept, never deleted** ("done but not forgotten") |
-| `failed` | Gave up after exhausting best-effort re-planning — **aborts the whole mission** (its area is marked `failed` too) |
+The static prior, authored once (by a human or an LLM). Environments are **hard rails**: visited
+in order, never skipped or reordered. Each carries only a brief **intent** — not steps.
 
-**Persistence / resume.** The node writes `status` / `attempts` / `result` / `summary` back
-to this file (or a sibling `*.state.yaml`) after every transition, so the file doubles as the
-checkpoint: a restart resumes where it left off, and the retained `done` entries *are* the
-"not forgotten" memory. (Write path is the node pass; here the fields are defined.)
-
-## Structured log (`<mission>.log.jsonl`)
-
-Append-only, one JSON object per line — machine-parseable so the judge reads it reliably and
-the compress step rolls it up. Perception stays in the VLM nodes; their grounded outputs land
-here **verbatim** in `observation`, and the reasoner reasons *over* the log, it does not
-re-perceive.
-
-| Field | Type | Value |
-|---|---|---|
-| `ts` | string | ISO-8601 timestamp |
-| `area` | string | Area id |
-| `step_id` | string | Step id |
-| `event` | enum | `plan` \| `follow` \| `judge` \| `replan` \| `compress` |
-| `prompt` | string | What was sent for this event (instruction / reasoner prompt), if any |
-| `result` | string | Action result / verdict / message |
-| `observation` | string | Any VLM answer or description, verbatim (empty if none) |
-| `status` | string | The step/area status *after* this event |
-
-```jsonl
-{"ts":"2026-07-13T10:00:00Z","area":"bedroom","step_id":"bedroom.1","event":"plan","prompt":"Walk to the foot of the bed...","result":"planned 4 waypoints","observation":"","status":"active"}
-{"ts":"2026-07-13T10:00:31Z","area":"bedroom","step_id":"bedroom.1","event":"follow","prompt":"","result":"reached last waypoint","observation":"","status":"active"}
-{"ts":"2026-07-13T10:00:34Z","area":"bedroom","step_id":"bedroom.1","event":"judge","prompt":"","result":"completed=true","observation":"VLM: yes, the bed is beside the robot","status":"done"}
+```yaml
+mission: "<one-line mission statement>"
+environments:
+  - name: bedroom
+    intent: "Pass through the bedroom to the doorway into the living room, keeping to open floor."
+  - name: living_room
+    intent: "Enter the living room and stop on the floor in front of the couch."
 ```
 
-## Prompt templates (`templates/*.txt`)
+## Data contract 2 — Narrative State (`<mission>.narrative.jsonl`)
 
-Prompts are **data, not code** — the node fills them and calls the reasoner, so they iterate
-without a rebuild. Placeholders are **literal `{name}` tokens replaced by substring
-substitution** (not Python `str.format`), so the JSON braces inside the templates are safe.
-Each file's header comment names its tokens and the exact JSON `schema` string the node passes
-to the reasoner's `schema` field.
+The living memory, recompiled every cycle: prose, recency-weighted, lossy by design, and the
+**primary context for the next plan** (`narrative.next` is fed to `trajectory_planner`).
 
-| Template | Purpose | Tokens | Reasoner `schema` |
-|---|---|---|---|
-| `judge.txt` | Did the step complete? | `brief`, `mission`, `area_goal`, `step_instruction`, `step_verify`, `outcome`, `log` | `{"completed": bool, "reason": string, "summary": string}` |
-| `replan.txt` | Revise a failed instruction | `brief`, `mission`, `area_goal`, `step_instruction`, `log` | `{"revised_instruction": string, "reason": string}` |
-| `compress.txt` | Summarize a finished area | `brief`, `mission`, `area_goal`, `log` | `{"summary": string}` |
+It is stored as a **versioned, git-like history** — each recompile **appends a full snapshot**
+(one JSON record per line) rather than overwriting, so the whole belief evolution is retained
+and any version reconstructs directly. Each record embeds the outcome that *triggered* it, so
+the history is self-explaining.
 
-`{brief}` is `config/brief.md` verbatim, present in every template — the permanent context.
+| Field | Value |
+|---|---|
+| `version` | monotonic snapshot index (0, 1, 2 …) |
+| `ts` | ISO-8601 timestamp |
+| `current_environment` | the environment being worked (advances only in plan order) |
+| `mission_complete` | `true` once the last environment's intent is satisfied |
+| `trigger` | `{success, observation}` that caused this recompile (`null` on version 0) |
+| `narrative.done` | recency-weighted history; older info abstracted, newer sharp |
+| `narrative.trying` | present intent, reconciling the plan with new info |
+| `narrative.next` | the immediate next instruction — fed to `trajectory_planner` |
 
-## Robot brief (`config/brief.md`)
+```jsonl
+{"version":0,"ts":"…","current_environment":"bedroom","mission_complete":false,"trigger":null,"narrative":{"done":"Nothing yet.","trying":"Enter the bedroom and head for the far doorway.","next":"Drive forward across the open floor toward the doorway on the far wall."}}
+{"version":1,"ts":"…","current_environment":"bedroom","mission_complete":false,"trigger":{"success":true,"observation":"planner: a wall is directly ahead, no doorway visible; turning left to look"},"narrative":{"done":"Drove forward and met a wall — no doorway that way.","trying":"Find the doorway by looking left.","next":"Turn toward the left side of the room and drive along the open floor."}}
+```
 
-The permanent context prepended to every reasoner call. Three sections: **Capabilities** (the
-actions the robot actually has and their limits), **Semantic navigation rules** (keep to open
-floor, honor preferences, doorways bound areas…), and an **actionable Ambiguity policy** (each
-ambiguity maps to a concrete move — e.g. unsure a step completed → `completed:false` so it
-re-plans; under-specified instruction → take the conservative open-floor path — never
-prose-only).
+- **Current state** = the last record. **Resume** = read the tail, continue the `version` counter.
+- **Reconstruct history** = read records `0..N` (e.g. `jq . <mission>.narrative.jsonl`, or diff
+  consecutive `narrative` objects to see how the belief changed at each step).
+
+## Data contract 3 — Pure Log (`<mission>.log.jsonl`)
+
+Every move's raw outcome, append-only, one JSON object per line
+(`{ts, event, result, observation}`) — the debug trail **and** the per-cycle increment folded
+into the narrative. Kept distinct from the narrative history: this is the *raw actions*, that is
+the *compiled belief*.
+
+## Prompt template (`templates/compile.txt`)
+
+The single reasoner prompt (replacing the old judge/replan/compress). Placeholders are literal
+`{name}` tokens the node substitutes (not `str.format` — the body has JSON braces):
+
+| Token | Filled with |
+|---|---|
+| `{brief}` | `config/brief.md`, verbatim (permanent context) |
+| `{semantic_plan}` | the environments (hard rails, in order) + intents |
+| `{narrative}` | the current narrative (`current_environment` + `done`/`trying`/`next`) |
+| `{outcome}` | this cycle's move outcome + the planner's VLM reasoning (empty on cycle 0) |
+
+Reasoner `schema`:
+`{"done": string, "trying": string, "next": string, "current_environment": string, "mission_complete": bool}`.
+
+`config/brief.md` is the permanent-context prefix (capabilities, navigation preferences, ambiguity
+policy) prepended on every call.
 
 ## Node
 
-`mission_planner_node` is the state authority. It loads the mission YAML, `brief.md`, and the
-templates; owns the status hierarchy, the log, and area compression; delegates every LLM job
-to `/reasoner_node/reason` (holding no `genai`/API key); and persists after every transition.
-It exposes **one** BT-facing action server, `~/advance`, called in a `advance → execute` loop.
-
-`advance` is a **report-and-advance** step: the caller reports the outcome of the step it just
-executed, the node judges that step, then returns the next directive — one round-trip per step
-instead of a separate `next_step` + `record_outcome`.
-
-Retries live **inside the node**: a step that the judge rules incomplete stays `active` and is
-re-served by the next `advance` — with its instruction revised via `replan.txt` — until it
-either completes or hits `max_attempts`, at which point it is marked `failed`. **A failed step
-aborts the whole mission**: its area is marked `failed`, `advance` refuses to advance past it
-and reports `mission_failed`, and no further steps are served. So the caller's loop is a dumb
-`advance → execute` cycle; the node handles judging, re-planning, advancement, and the abort.
+`mission_planner_node` loads the Semantic Plan, `brief.md`, and `compile.txt`; holds the current
+narrative in memory; and exposes **one** action server, `~/advance`, called in an
+`advance → execute` loop. Each `advance` is one reasoner call.
 
 ### Interfaces
 
 | Interface | Type | Direction |
 |---|---|---|
 | `~/advance` | `hint_interfaces/action/MissionAdvance` | Action server |
-| `/reasoner_node/reason` (see `reasoner_action`) | `hint_interfaces/action/Reason` | Action client — judge / replan / compress |
+| `/reasoner_node/reason` (see `reasoner_action`) | `hint_interfaces/action/Reason` | Action client — the narrative recompile |
 
-**`advance`** — Goal: `success` (did the step just executed succeed?) and `observation`
-(grounded VLM feedback, verbatim — e.g. the planner's path reasoning). The node judges the
-active step from that outcome (`judge.txt`), logs it, updates status, compresses the area
-(`compress.txt`) on a boundary, and aborts on a failed step; then it selects the next step
-(revising the instruction via `replan.txt` on a retry). Result: `mission_done`, `mission_failed`,
-`description` (next instruction for `trajectory_planner`), `area`, `step_id`, `message`. On the
-first call nothing has executed (`success` defaults true, `observation` empty), so it just
-hands out the first step.
-
-> **Feeding the judge grounded feedback.** The judge is only as good as the `observation` it
-> gets. In the `RunMission` tree, `PlanTrajectoryAction` exposes the trajectory planner's VLM
-> reasoning about the chosen path (its result `message`), which is routed into `advance`'s
-> `observation` — so the judge sees *why the planner went where it did*, not just "the follow
-> reached its last waypoint". Any VLM leaf's reasoning field (a `VisualQuestion` `rationale`, a
-> `GroundDescription` label) can be routed the same way; a dedicated verify-VLM leaf is the
-> natural next addition (see the note below).
+**`advance`** — Goal: `success` (did the last move execute?) + `observation` (the planner's VLM
+reasoning, verbatim). The node appends the outcome to the pure log, recompiles the narrative
+(`compile.txt` → reasoner), appends the new snapshot to `<mission>.narrative.jsonl`, and returns
+Result: `mission_done` (the narrative's `mission_complete`), `description` (= `narrative.next`),
+`area` (= `current_environment`), `message` (= `narrative.trying`). On the first call nothing has
+executed (`success` defaults true, `observation` empty) so it just emits the opening instruction.
 
 ### Parameters
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `mission_path` | share `missions/apartment_tidy.yaml` | Mission YAML to run |
+| `mission_path` | share `missions/apartment_tidy.yaml` | Semantic Plan to run |
 | `brief_path` | share `config/brief.md` | Permanent-context brief |
-| `templates_dir` | share `templates/` | Directory of the three prompt templates |
-| `state_path` | `""` | Checkpoint file; empty → `<mission>.state.yaml` sibling |
-| `log_path` | `""` | Log file; empty → `<mission>.log.jsonl` sibling |
+| `templates_dir` | share `templates/` | Directory holding `compile.txt` |
+| `narrative_path` | `""` | Narrative history; empty → `<mission>.narrative.jsonl` sibling |
+| `log_path` | `""` | Raw log; empty → `<mission>.log.jsonl` sibling |
 | `reasoner_action` | `/reasoner_node/reason` | Reasoner action name |
-| `reasoner_timeout` | `30.0` | Seconds to wait on each reasoner phase |
-| `max_attempts` | `3` | Best-effort re-plan cap before a step is marked `failed` |
+| `reasoner_timeout` | `30.0` | Seconds to wait on the reasoner call |
 
 ### Test
 
-Run the node (the `reasoner` node must be up for judge/replan/compress to resolve):
+Run the node (the `reasoner` node must be up):
 
 ```bash
 ros2 run mission_planner mission_planner_node
 ```
 
-Drive the loop manually. The first call reports nothing and returns step one; each subsequent
-call reports the previous step's outcome and returns the next directive:
+Drive the loop manually. The first call reports nothing and returns the opening instruction;
+each subsequent call reports the previous move's outcome (with the planner's reasoning) and
+returns the next:
 
 ```bash
-# first call — just get step one (nothing executed yet)
+# cycle 0 — nothing executed yet
 ros2 action send_goal /mission_planner_node/advance hint_interfaces/action/MissionAdvance \
   "{success: true, observation: ''}" --feedback
 
-# report that step's outcome + get the next
+# report the move + get the next
 ros2 action send_goal /mission_planner_node/advance hint_interfaces/action/MissionAdvance \
-  "{success: true, observation: 'planner: routed along the open floor to the foot of the bed'}" \
+  "{success: true, observation: 'planner: routed to the far wall, a doorway is now visible ahead'}" \
   --feedback
 ```
 
-The checkpoint and log are written next to the mission YAML — with the defaults, tail
-`missions/apartment_tidy.state.yaml` and `missions/apartment_tidy.log.jsonl` in the installed
-`share/mission_planner/` (or wherever `mission_path` points). Delete the `.state.yaml` to
-restart the mission from scratch.
+Watch the narrative evolve — every call appends one snapshot:
+
+```bash
+tail -f missions/apartment_tidy.narrative.jsonl | jq .
+```
+
+Delete the `.narrative.jsonl` to restart the mission from scratch.
 
 ## BT integration
 
-The mission loop is **visible in the BT** — it lives in XML ticked by `bt_executor_node`
-(`hint_bt/behaviors/run_mission.xml`, tree ID `RunMission`). A **single** thin leaf,
-`MissionAdvance` (→ `~/advance`), is the whole node interface: each tick it reports the last
-step's outcome and returns the next directive, writing `{description}`/`{area}`/`{step_id}`/
-`{mission_failed}` to the blackboard and returning `FAILURE` when the mission is over.
+The loop is **visible in the BT** — `hint_bt/behaviors/run_mission.xml` (tree ID `RunMission`),
+ticked by `bt_executor_node`. A **single** thin leaf, `MissionAdvance` (→ `~/advance`), is the
+whole node interface: each tick it reports the last move's outcome and returns the next directive.
 
 ```
 Fallback
-  KeepRunningUntilFailure                        # ends when MissionAdvance reports mission over
+  KeepRunningUntilFailure                       # ends when MissionAdvance reports mission_complete
     Sequence
-      MissionAdvance(success={last_ok}, observation={plan_message}) → {description}, {mission_failed}
-      Fallback                                    # capture follow success/failure into {last_ok}
+      MissionAdvance(success={last_ok}, observation={plan_message}) → {description}, {area}
+      Fallback                                   # capture follow success/failure into {last_ok}
         Sequence: FollowPlannedTrajectory(description)→{plan_message} ; SetBlackboard(last_ok := true)
         SetBlackboard(last_ok := false)
-  Precondition if="mission_failed" else="SUCCESS" # abort → overall FAILURE, clean → SUCCESS
-    AlwaysFailure
+  AlwaysSuccess                                  # completion → overall SUCCESS
 ```
 
-Since the node owns judging/retries/advancement/abort, the loop needs no `RetryUntilSuccessful`
-— it repeats until `MissionAdvance` ends it. The only custom term in the loop is `MissionAdvance`;
-`Fallback`/`Precondition`/`SetBlackboard`/`AlwaysFailure` are all stock BT.cpp. The planner's VLM
-path reasoning (`{plan_message}`) is fed straight into `MissionAdvance`'s `observation`, so it
-lands in the log as the grounded feedback the judge reasons over; the `SetBlackboard` pair
-captures whether the follow succeeded (`{last_ok}`) for the next tick. The outer `Precondition`
-maps a clean finish to overall `SUCCESS` and an abort (`{mission_failed}`) to `FAILURE`.
+The planner's VLM reasoning (`{plan_message}`) is fed straight into `MissionAdvance`'s
+`observation`, so the narrative reasons over grounded feedback. There is **no abort path** —
+divergence is absorbed by the narrative, so the loop only ends on completion, and the outer
+`AlwaysSuccess` maps that to overall `SUCCESS`. The only custom term in the loop is
+`MissionAdvance`; `Fallback`/`KeepRunningUntilFailure`/`SetBlackboard`/`AlwaysSuccess` are stock
+BT.cpp.
+
+> **Future refinements (deferred):** the trajectory planner returning *no* waypoints as an
+> explicit "arrived" signal, and a scan/rotate primitive so the planner can look where the goal
+> isn't currently in view (the current forward-arc action space can't turn around). Movement work
+> is out of scope for now; completion is inferred from the planner's reasoning.
