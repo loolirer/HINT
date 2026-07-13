@@ -44,7 +44,8 @@ from rclpy.node import Node
 from hint_interfaces.action import MissionAdvance, Reason
 
 NARRATIVE_SCHEMA = ('{"done": string, "trying": string, "next": string, '
-                    '"current_environment": string, "mission_complete": bool}')
+                    '"current_environment": string, "environment_description": string, '
+                    '"mission_complete": bool}')
 
 
 class MissionPlannerNode(Node):
@@ -140,13 +141,19 @@ class MissionPlannerNode(Node):
         if not isinstance(data, dict):
             self.get_logger().warn("Narrative compile failed — keeping previous narrative.")
             return None
+        current_env = str(data.get("current_environment",
+                                   self._narrative.get("current_environment", "")))
+        # Fold the enriched description back into the in-memory plan (the source
+        # YAML is never touched); it is persisted in the narrative snapshot for
+        # resume/reconstruction. A blank reply leaves the accumulated detail intact.
+        new_desc = str(data.get("environment_description", "")).strip()
+        if new_desc:
+            self._set_env_description(current_env, new_desc)
         return {
             "done": str(data.get("done", "")),
             "trying": str(data.get("trying", "")),
             "next": str(data.get("next", "")),
-            "current_environment": str(
-                data.get("current_environment",
-                         self._narrative.get("current_environment", ""))),
+            "current_environment": current_env,
             "mission_complete": bool(data.get("mission_complete", False)),
         }
 
@@ -160,8 +167,18 @@ class MissionPlannerNode(Node):
     def _plan_text(self):
         lines = [f"Mission: {self._plan.get('mission', '')}", "Environments (in order):"]
         for i, env in enumerate(self._plan.get("environments", []), 1):
-            lines.append(f"  {i}. {env.get('name', '')}: {env.get('intent', '')}")
+            name = env.get("name", "")
+            desc = env.get("description", "")
+            head = f"  {i}. {name}" + (f" — {desc}" if desc else "")
+            lines.append(f"{head}: {env.get('intent', '')}")
         return "\n".join(lines)
+
+    def _set_env_description(self, name, description):
+        """Update an environment's (evolving) description in the in-memory plan."""
+        for env in self._plan.get("environments", []):
+            if env.get("name") == name:
+                env["description"] = description
+                return
 
     @staticmethod
     def _narrative_text(nar):
@@ -256,6 +273,10 @@ class MissionPlannerNode(Node):
                 "current_environment": last.get("current_environment", ""),
                 "mission_complete": bool(last.get("mission_complete", False)),
             }
+            # Restore the enriched environment descriptions onto the in-memory plan.
+            for name, desc in (last.get("environments") or {}).items():
+                if desc:
+                    self._set_env_description(name, desc)
             self._served = True   # resuming mid-mission; a prior instruction existed
             self.get_logger().info(f"Resumed narrative from {path} at v{self._version}.")
         else:
@@ -277,6 +298,10 @@ class MissionPlannerNode(Node):
             "current_environment": self._narrative.get("current_environment", ""),
             "mission_complete": bool(self._narrative.get("mission_complete", False)),
             "trigger": trigger,
+            # The evolving environment descriptions (the enriched belief) travel
+            # with each snapshot so the history reconstructs and resumes fully.
+            "environments": {e.get("name", ""): e.get("description", "")
+                             for e in self._plan.get("environments", [])},
             "narrative": {
                 "done": self._narrative.get("done", ""),
                 "trying": self._narrative.get("trying", ""),

@@ -57,10 +57,19 @@ in order, never skipped or reordered. Each carries only a brief **intent** — n
 mission: "<one-line mission statement>"
 environments:
   - name: bedroom
+    description: "A regular bedroom"     # initial belief — enriched as the robot explores
     intent: "Pass through the bedroom to the doorway into the living room, keeping to open floor."
   - name: living_room
+    description: "A regular living room"
     intent: "Enter the living room and stop on the floor in front of the couch."
 ```
+
+`description` is the **initial** visual belief for each environment. It is not just
+documentation: each cycle the reasoner enriches the *current* environment's description with
+what the planner observed (accumulating detail, frozen once the robot moves on). The enrichment
+lives in the in-memory plan and the narrative snapshots — the **source YAML is never
+mutated** — so a finished mission's narrative tail holds a learned visual map of every visited
+environment.
 
 ## Data contract 2 — Narrative State (`<mission>.narrative.jsonl`)
 
@@ -79,13 +88,14 @@ the history is self-explaining.
 | `current_environment` | the environment being worked (advances only in plan order) |
 | `mission_complete` | `true` once the last environment's intent is satisfied |
 | `trigger` | `{success, observation}` that caused this recompile (`null` on version 0) |
+| `environments` | `{name: description}` — the evolving per-environment visual beliefs at this version |
 | `narrative.done` | recency-weighted history; older info abstracted, newer sharp |
 | `narrative.trying` | present intent, reconciling the plan with new info |
 | `narrative.next` | the immediate next instruction — fed to `trajectory_planner` |
 
 ```jsonl
-{"version":0,"ts":"…","current_environment":"bedroom","mission_complete":false,"trigger":null,"narrative":{"done":"Nothing yet.","trying":"Enter the bedroom and head for the far doorway.","next":"Drive forward across the open floor toward the doorway on the far wall."}}
-{"version":1,"ts":"…","current_environment":"bedroom","mission_complete":false,"trigger":{"success":true,"observation":"planner: a wall is directly ahead, no doorway visible; turning left to look"},"narrative":{"done":"Drove forward and met a wall — no doorway that way.","trying":"Find the doorway by looking left.","next":"Turn toward the left side of the room and drive along the open floor."}}
+{"version":0,"ts":"…","current_environment":"bedroom","mission_complete":false,"trigger":null,"environments":{"bedroom":"A regular bedroom","living_room":"A regular living room"},"narrative":{"done":"Nothing yet.","trying":"Enter the bedroom and head for the far doorway.","next":"Drive forward across the open floor toward the doorway on the far wall."}}
+{"version":1,"ts":"…","current_environment":"bedroom","mission_complete":false,"trigger":{"success":true,"observation":"planner: a wall is directly ahead, no doorway visible; turning left to look"},"environments":{"bedroom":"A regular bedroom; a wall directly ahead, no doorway that way","living_room":"A regular living room"},"narrative":{"done":"Drove forward and met a wall — no doorway that way.","trying":"Find the doorway by looking left.","next":"Turn toward the left side of the room and drive along the open floor."}}
 ```
 
 - **Current state** = the last record. **Resume** = read the tail, continue the `version` counter.
@@ -107,12 +117,14 @@ The single reasoner prompt (replacing the old judge/replan/compress). Placeholde
 | Token | Filled with |
 |---|---|
 | `{brief}` | `config/brief.md`, verbatim (permanent context) |
-| `{semantic_plan}` | the environments (hard rails, in order) + intents |
+| `{semantic_plan}` | the environments (hard rails, in order) + their **evolving** descriptions + intents |
 | `{narrative}` | the current narrative (`current_environment` + `done`/`trying`/`next`) |
 | `{outcome}` | this cycle's move outcome + the planner's VLM reasoning (empty on cycle 0) |
 
 Reasoner `schema`:
-`{"done": string, "trying": string, "next": string, "current_environment": string, "mission_complete": bool}`.
+`{"done": string, "trying": string, "next": string, "current_environment": string, "environment_description": string, "mission_complete": bool}`
+— `environment_description` is the enriched description of the current environment, folded back
+into the plan each cycle.
 
 `config/brief.md` is the permanent-context prefix (capabilities, navigation preferences, ambiguity
 policy) prepended on every call.

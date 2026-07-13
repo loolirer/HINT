@@ -45,8 +45,13 @@ Recompile the narrative, folding the new outcome in:
   so make it self-contained.
 - "current_environment": the environment now being worked. Advance to the next
   environment in the plan ONLY once the current one's intent is satisfied.
+- "environment_description": a richer visual description of the CURRENT environment,
+  folding in what the planner just observed (layout, landmarks, doorways). ACCUMULATE
+  — keep the prior description's detail and add new; never shrink or discard it. This
+  enriches the initial belief as the robot explores. Describe only the current
+  environment; if nothing new was observed, return the current description unchanged.
 - "mission_complete": true only when the planner's observations show the LAST
   environment's intent is satisfied.
 
 Return JSON only, no prose and no markdown fencing:
-{"done": "...", "trying": "...", "next": "...", "current_environment": "...", "mission_complete": false}
+{"done": "...", "trying": "...", "next": "...", "current_environment": "...", "environment_description": "...", "mission_complete": false}
