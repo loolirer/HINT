@@ -99,6 +99,13 @@ def generate_launch_description():
         parameters=[{"api_key_path": "/root/secrets/gemini_api_key.txt"}],
     )
 
+    reasoner = Node(
+        package="gemini_robotics_er",
+        executable="reasoner",
+        output="screen",
+        parameters=[{"api_key_path": "/root/secrets/gemini_api_key.txt"}],
+    )
+
     bt_executor = Node(
         package="hint_bt",
         executable="bt_executor_node",
@@ -128,8 +135,8 @@ def generate_launch_description():
     return LaunchDescription(
         [
             teleop,
-            cartographer,
-            occupancy_grid,
+            #cartographer,
+            #occupancy_grid,
             #lk_tracker,
             waypoint_tracker,
             #visual_servo,
@@ -137,6 +144,7 @@ def generate_launch_description():
             #description_detector,
             #visual_question,
             trajectory_planner,
+            reasoner,
             bt_executor,
             rviz2,
         ]
