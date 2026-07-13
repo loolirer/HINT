@@ -1,0 +1,26 @@
+# compress.txt — area-summary prompt for the reasoner (context compression).
+#
+# Tokens are literal {name} strings the mission_planner replaces by substring
+# substitution (NOT Python str.format):
+#   {brief}       config/brief.md, verbatim (permanent context)
+#   {mission}     the mission statement
+#   {area_goal}   the completed area's `goal`
+#   {log}         the full log for the area — all its steps (jsonl lines)
+#
+# Reasoner `schema`: {"summary": string}
+# ---------------------------------------------------------------------------
+
+{brief}
+
+An area of the mission is complete. Roll its full log up into one short paragraph capturing
+what happened and the robot's final state, so downstream reasoning can drop the step-by-step
+detail and keep only this summary as context for the rest of the mission.
+
+Mission: {mission}
+Completed area goal: {area_goal}
+
+Full area log:
+{log}
+
+Return JSON only, no prose and no markdown fencing:
+{"summary": "<2-3 sentences: what was done in this area and the robot's final state>"}

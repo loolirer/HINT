@@ -1,0 +1,53 @@
+# HINT mission definition — the sequential, hierarchical to-do the mission_planner
+# consumes. Hierarchy:
+#   mission -> areas   (bigger tasks, each tied to a discrete environment)
+#           -> steps   (smaller, concrete visual instructions fed straight to
+#                       trajectory_planner as its `description`)
+#
+# status values (areas and steps alike): pending | active | done | failed
+#   pending  not yet reached
+#   active   currently being worked (set when handed out to the executor)
+#   done     completed and verified — kept, never deleted ("done but not forgotten")
+#   failed   gave up after exhausting best-effort re-planning (non-fatal; mission advances)
+#
+# The mission_planner writes status/attempts/result/summary back to this file (or a
+# sibling *.state.yaml) after every transition, so a restart resumes where it left off.
+
+mission: "Tidy the apartment: pass through the bedroom to the living room and stop by the couch."
+
+areas:
+  - id: bedroom
+    goal: "The robot has crossed the bedroom and is at the doorway leading to the living room."
+    status: pending
+    summary: ""            # filled by the compress step when the area completes
+    steps:
+      - id: bedroom.1
+        instruction: "Walk to the foot of the bed, keeping to the open floor and off the rug."
+        verify: "Is the bed directly beside the robot?"
+        status: pending
+        attempts: 0
+        result: ""
+      - id: bedroom.2
+        instruction: "Continue to the open doorway on the far wall, staying clear of the wardrobe."
+        verify: "Is an open doorway directly ahead of the robot?"
+        status: pending
+        attempts: 0
+        result: ""
+
+  - id: living_room
+    goal: "The robot has reached the living room and is stopped in front of the couch."
+    status: pending
+    summary: ""
+    steps:
+      - id: living_room.1
+        instruction: "Enter the living room through the doorway and head toward the center of the room."
+        verify: "Is the robot inside the living room?"
+        status: pending
+        attempts: 0
+        result: ""
+      - id: living_room.2
+        instruction: "Approach the couch, stopping on the floor just in front of it."
+        verify: "Is the couch directly in front of the robot?"
+        status: pending
+        attempts: 0
+        result: ""

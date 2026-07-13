@@ -1,0 +1,33 @@
+# judge.txt — completion-judgement prompt for the reasoner.
+#
+# Tokens are literal {name} strings the mission_planner replaces by substring
+# substitution (NOT Python str.format — so the JSON braces below are safe):
+#   {brief}             config/brief.md, verbatim (permanent context)
+#   {mission}           the mission statement
+#   {area_goal}         the current area's `goal`
+#   {step_instruction}  the step's `instruction`
+#   {step_verify}       the step's `verify` question (may be empty)
+#   {outcome}           the execution result — whether follow succeeded + its message
+#   {log}               the recent structured log slice for this step (jsonl lines)
+#
+# Reasoner `schema`: {"completed": bool, "reason": string, "summary": string}
+# ---------------------------------------------------------------------------
+
+{brief}
+
+You are the mission supervisor for a mobile robot. Decide, from the record below,
+whether the current step was completed. Judge ONLY from the evidence in the log and
+the reported outcome — do not assume anything that is not recorded.
+
+Mission: {mission}
+Current area goal: {area_goal}
+Current step: {step_instruction}
+Completion check for this step: {step_verify}
+
+Execution outcome: {outcome}
+
+Recent log for this step:
+{log}
+
+Return JSON only, no prose and no markdown fencing:
+{"completed": <true|false>, "reason": "<one sentence citing the evidence>", "summary": "<one short sentence of what happened, for the mission record>"}

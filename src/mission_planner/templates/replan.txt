@@ -1,0 +1,30 @@
+# replan.txt — failure-replan prompt for the reasoner.
+#
+# Tokens are literal {name} strings the mission_planner replaces by substring
+# substitution (NOT Python str.format):
+#   {brief}             config/brief.md, verbatim (permanent context)
+#   {mission}           the mission statement
+#   {area_goal}         the current area's `goal`
+#   {step_instruction}  the instruction that just failed
+#   {log}               the failure log for this step (jsonl lines)
+#
+# Reasoner `schema`: {"revised_instruction": string, "reason": string}
+# ---------------------------------------------------------------------------
+
+{brief}
+
+A navigation step for a mobile robot failed. Propose a revised instruction that is more
+likely to succeed while staying faithful to the area goal and the semantic rules above.
+The instruction is fed verbatim to a ground-trajectory planner, so it must describe a
+concrete, traversable route in plain language — a place to go and how to get there on the
+open floor.
+
+Mission: {mission}
+Current area goal: {area_goal}
+Instruction that failed: {step_instruction}
+
+Why it failed (log):
+{log}
+
+Return JSON only, no prose and no markdown fencing:
+{"revised_instruction": "<the new instruction>", "reason": "<one sentence on what you changed and why>"}
