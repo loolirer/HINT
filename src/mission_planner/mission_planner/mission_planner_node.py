@@ -1,14 +1,16 @@
 """Semantic mission planner — the state authority for HINT missions.
 
 Consumes a hierarchical mission YAML (mission -> areas -> steps) and drives it
-one step at a time, exposing two BT-facing action servers:
+one step at a time through a single BT-facing action server:
 
-- ``~/next_step``      — hand out the next actionable step's instruction (and, on
-                         a retry after a failed judge, revise it via the reasoner
-                         first). Signals ``mission_done`` when nothing is left.
-- ``~/record_outcome`` — given a step's execution outcome, judge completion via
-                         the reasoner, update status, append the structured log,
-                         and compress a finished area into a summary.
+- ``~/advance`` — a report-and-advance step. The caller reports the outcome of
+                  the step it just executed (``success`` + the VLM
+                  ``observation``); the node judges that step (updating status,
+                  appending the log, compressing a finished area, aborting on a
+                  failed step), then returns the *next* directive (the next
+                  step's instruction, re-planned via the reasoner on a retry), or
+                  ``mission_done`` when the mission is over. On the first call
+                  nothing has executed yet, so it just hands out the first step.
 
 All LLM work is delegated to the ``reasoner`` node (``/reasoner_node/reason``,
 text-in / JSON-out); this node holds no genai/API key. State (status, attempts,
@@ -32,7 +34,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
-from hint_interfaces.action import MissionOutcome, MissionStep, Reason
+from hint_interfaces.action import MissionAdvance, Reason
 
 # A step/area is "finished" (skipped by the sequencer) in either terminal state.
 FINISHED = ("done", "failed")
@@ -63,35 +65,55 @@ class MissionPlannerNode(Node):
         cbg = ReentrantCallbackGroup()
         self._reasoner = ActionClient(
             self, Reason, self._p("reasoner_action"), callback_group=cbg)
-        self._next_srv = ActionServer(
-            self, MissionStep, "~/next_step",
-            execute_callback=self._next_step_cb, callback_group=cbg)
-        self._outcome_srv = ActionServer(
-            self, MissionOutcome, "~/record_outcome",
-            execute_callback=self._record_outcome_cb, callback_group=cbg)
+        self._advance_srv = ActionServer(
+            self, MissionAdvance, "~/advance",
+            execute_callback=self._advance_cb, callback_group=cbg)
 
         self.get_logger().info(
             f"Mission planner ready — '{self._mission.get('mission', '')}' "
             f"({len(self._mission.get('areas', []))} areas).")
 
     # ------------------------------------------------------------------
-    # Action servers
+    # Action server — report-and-advance (one step of the mission loop)
 
-    def _next_step_cb(self, goal_handle):
+    def _advance_cb(self, goal_handle):
         with self._lock:
-            self._feedback(goal_handle, MissionStep, "RUNNING")
-            area, step = self._first_unfinished()
-            result = MissionStep.Result()
+            req = goal_handle.request
+            self._feedback(goal_handle, MissionAdvance, "RUNNING")
+            result = MissionAdvance.Result()
 
+            # 1. Judge the step we just executed (if any). On the first call no
+            #    step is active, so this is skipped and we simply serve step one.
+            area, step = self._active_step()
+            if step is not None:
+                self._judge_and_update(area, step, req)
+
+            # 2. A failed step aborts the whole mission — never advance past it.
+            fail_area, fail_step = self._failed_step()
+            if fail_step is not None:
+                result.mission_done = True
+                result.mission_failed = True
+                result.message = (
+                    f"Mission failed at {fail_area['id']}/{fail_step['id']}: "
+                    f"{fail_step.get('result', '')}")
+                self._persist()
+                goal_handle.succeed()
+                self.get_logger().warn(result.message)
+                return result
+
+            # 3. Otherwise hand out the next actionable step, or finish.
+            area, step = self._first_unfinished()
             if step is None:
                 result.mission_done = True
+                result.mission_failed = False
                 result.message = self._mission_summary()
+                self._persist()
                 goal_handle.succeed()
                 self.get_logger().info(result.message)
                 return result
 
-            # Retry after a failed judge (attempts>0, still active): revise the
-            # instruction via the reasoner before re-serving it.
+            # A step still active with attempts>0 is a retry after a failed judge:
+            # revise its instruction via the reasoner before re-serving it.
             if step.get("status") == "active" and step.get("attempts", 0) > 0:
                 revised = self._replan(area, step)
                 if revised:
@@ -105,6 +127,7 @@ class MissionPlannerNode(Node):
             self._persist()
 
             result.mission_done = False
+            result.mission_failed = False
             result.description = step.get("instruction", "")
             result.area = area["id"]
             result.step_id = step["id"]
@@ -114,64 +137,44 @@ class MissionPlannerNode(Node):
             self.get_logger().info(result.message)
             return result
 
-    def _record_outcome_cb(self, goal_handle):
-        with self._lock:
-            req = goal_handle.request
-            self._feedback(goal_handle, MissionOutcome, "RUNNING")
+    def _judge_and_update(self, area, step, req):
+        """Judge the just-executed step from its reported outcome and update state."""
+        # Record the execution outcome; the grounded VLM observation is logged
+        # verbatim for the judge to reason over.
+        self._append_log(area["id"], step["id"], "follow",
+                         result="success" if req.success else "failure",
+                         observation=req.observation, status="active")
 
-            area, step = self._find_step(req.step_id)
-            result = MissionOutcome.Result()
-            if step is None:
-                result.completed = False
-                result.mission_done = self._all_finished()
-                result.message = f"Unknown or already-finished step '{req.step_id}'."
-                goal_handle.succeed()
-                return result
+        verdict = self._judge(area, step, req)
+        completed = bool(verdict.get("completed")) if verdict else False
+        reason = (verdict.get("reason") if verdict else None) or "judge unavailable"
+        summary = (verdict.get("summary") if verdict else "") or ""
 
-            # Record the execution outcome; a grounded observation (e.g. a verify
-            # VLM answer) is logged verbatim for the judge to reason over.
-            self._append_log(
-                area["id"], step["id"], "follow",
-                result=("success: " if req.success else "failure: ") + req.message,
-                observation=req.observation, status="active")
+        if completed:
+            step["status"] = "done"
+            step["result"] = summary or reason
+        else:
+            step["attempts"] = step.get("attempts", 0) + 1
+            step["result"] = reason
+            if step["attempts"] >= int(self._p("max_attempts")):
+                # A failed step fails its area and aborts the whole mission.
+                step["status"] = "failed"
+                area["status"] = "failed"
+            # else stays "active" — the next advance re-serves it with a replan.
 
-            verdict = self._judge(area, step, req)
-            completed = bool(verdict.get("completed")) if verdict else False
-            reason = ((verdict.get("reason") if verdict else None)
-                      or "judge unavailable")
-            summary = (verdict.get("summary") if verdict else "") or ""
+        self._append_log(area["id"], step["id"], "judge",
+                         result=f"completed={completed}", observation=reason,
+                         status=step["status"])
 
-            if completed:
-                step["status"] = "done"
-                step["result"] = summary or reason
-            else:
-                step["attempts"] = step.get("attempts", 0) + 1
-                step["result"] = reason
-                if step["attempts"] >= int(self._p("max_attempts")):
-                    step["status"] = "failed"
-                # else stays "active" — next_step re-serves it with a replan.
-
-            self._append_log(area["id"], step["id"], "judge",
-                             result=f"completed={completed}", observation=reason,
-                             status=step["status"])
-
-            # Area completion + compression once all its steps are finished.
-            if (area.get("status") != "done"
-                    and all(s.get("status") in FINISHED
-                            for s in area.get("steps", []))):
-                area["status"] = "done"
-                area["summary"] = self._compress(area) or area.get("summary", "")
-                self._append_log(area["id"], "", "compress", result="area complete",
-                                 observation=area["summary"], status="done")
-
-            self._persist()
-
-            result.completed = completed
-            result.mission_done = self._all_finished()
-            result.message = reason
-            goal_handle.succeed()
-            self.get_logger().info(f"{step['id']}: completed={completed} — {reason}")
-            return result
+        # Area completion + compression only when ALL its steps completed
+        # successfully (a failed step aborts the mission, so it is never compressed).
+        if (area.get("status") not in FINISHED
+                and all(s.get("status") == "done" for s in area.get("steps", []))):
+            area["status"] = "done"
+            area["summary"] = self._compress(area) or area.get("summary", "")
+            self._append_log(area["id"], "", "compress", result="area complete",
+                             observation=area["summary"], status="done")
+        self.get_logger().info(f"{step['id']}: completed={completed} — {reason}")
 
     # ------------------------------------------------------------------
     # Mission-state helpers
@@ -184,15 +187,21 @@ class MissionPlannerNode(Node):
                     return area, step
         return None, None
 
-    def _find_step(self, step_id):
+    def _active_step(self):
+        """(area, step) of the step currently being executed (status active); else (None, None)."""
         for area in self._mission.get("areas", []):
             for step in area.get("steps", []):
-                if step.get("id") == step_id:
+                if step.get("status") == "active":
                     return area, step
         return None, None
 
-    def _all_finished(self):
-        return self._first_unfinished()[1] is None
+    def _failed_step(self):
+        """(area, step) of the first failed step (which aborts the mission); else (None, None)."""
+        for area in self._mission.get("areas", []):
+            for step in area.get("steps", []):
+                if step.get("status") == "failed":
+                    return area, step
+        return None, None
 
     def _mission_summary(self):
         total = failed = 0
@@ -209,8 +218,7 @@ class MissionPlannerNode(Node):
     # Reasoner-backed steps (judge / replan / compress)
 
     def _judge(self, area, step, req):
-        outcome = ("execution succeeded: " if req.success
-                   else "execution failed: ") + req.message
+        outcome = "execution succeeded" if req.success else "execution failed"
         if req.observation:
             outcome += f" | observation: {req.observation}"
         prompt = self._fill("judge.txt", {
@@ -333,6 +341,11 @@ class MissionPlannerNode(Node):
                 step.setdefault("attempts", 0)
                 step.setdefault("result", "")
                 step.setdefault("verify", "")
+                # A step left "active" by a prior run didn't finish this session;
+                # demote it so the first advance re-serves it cleanly instead of
+                # judging an execution that never happened.
+                if step["status"] == "active":
+                    step["status"] = "pending"
 
     def _persist(self):
         with open(self._state_path(), "w") as f:

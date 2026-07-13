@@ -8,7 +8,7 @@
 #   pending  not yet reached
 #   active   currently being worked (set when handed out to the executor)
 #   done     completed and verified — kept, never deleted ("done but not forgotten")
-#   failed   gave up after exhausting best-effort re-planning (non-fatal; mission advances)
+#   failed   gave up after exhausting best-effort re-planning — aborts the whole mission
 #
 # The mission_planner writes status/attempts/result/summary back to this file (or a
 # sibling *.state.yaml) after every transition, so a restart resumes where it left off.

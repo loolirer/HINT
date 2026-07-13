@@ -1,0 +1,15 @@
+# Goal — report the outcome of the step just executed, then get the next directive.
+# (On the first call nothing has executed yet: success defaults true, observation empty.)
+bool success        # did the step just executed (plan + follow) succeed? (ignored on the first call)
+string observation  # grounded VLM feedback from the execution, verbatim (e.g. the planner's path reasoning)
+---
+# Result — the next directive
+bool mission_done    # true when the mission is over (complete OR aborted)
+bool mission_failed  # true when the mission aborted because a step failed; false on clean completion
+string description   # the next step's instruction to feed trajectory_planner (empty when mission_done)
+string area          # next step's area id (empty when mission_done)
+string step_id       # next step's id (empty when mission_done)
+string message       # note: replan explanation, mission-complete summary, or abort reason
+---
+# Feedback
+string state         # "RUNNING" while judging / (re)planning

@@ -9,11 +9,11 @@ instructions), hands each step's instruction to the existing
 single-frame VLM check can't do — judging completion from a run log, revising an
 instruction after a failure, and compressing a completed area into a summary.
 
-> **Status.** The data contracts (mission format, structured log, prompt templates, brief)
-> **and** the `mission_planner_node` that drives them are implemented and buildable. Still
-> deferred to the next pass: the `hint_bt` leaves (`MissionNextStep` / `MissionRecordOutcome`)
-> and the `run_mission.xml` loop tree — see [BT integration](#bt-integration-deferred). Until
-> those land, drive the node directly with `ros2 action send_goal` (see [Test](#test)).
+> **Status.** Fully implemented and buildable: the data contracts (mission format, structured
+> log, prompt templates, brief), the `mission_planner_node` that drives them, and the `hint_bt`
+> `RunMission` loop tree (a single `MissionAdvance` leaf) — see
+> [BT integration](#bt-integration). You can also drive the node directly with
+> `ros2 action send_goal` (see [Test](#test)).
 
 ## Layout
 
@@ -64,7 +64,7 @@ order, steps within an area in order.
 | `pending` | Not yet reached |
 | `active` | Currently being worked (set when handed to the executor) |
 | `done` | Completed and verified — **kept, never deleted** ("done but not forgotten") |
-| `failed` | Gave up after exhausting best-effort re-planning; non-fatal — the mission advances |
+| `failed` | Gave up after exhausting best-effort re-planning — **aborts the whole mission** (its area is marked `failed` too) |
 
 **Persistence / resume.** The node writes `status` / `attempts` / `result` / `summary` back
 to this file (or a sibling `*.state.yaml`) after every transition, so the file doubles as the
@@ -125,31 +125,42 @@ prose-only).
 `mission_planner_node` is the state authority. It loads the mission YAML, `brief.md`, and the
 templates; owns the status hierarchy, the log, and area compression; delegates every LLM job
 to `/reasoner_node/reason` (holding no `genai`/API key); and persists after every transition.
-It exposes two BT-facing action servers, meant to be called in a `next_step → execute →
-record_outcome` loop.
+It exposes **one** BT-facing action server, `~/advance`, called in a `advance → execute` loop.
+
+`advance` is a **report-and-advance** step: the caller reports the outcome of the step it just
+executed, the node judges that step, then returns the next directive — one round-trip per step
+instead of a separate `next_step` + `record_outcome`.
 
 Retries live **inside the node**: a step that the judge rules incomplete stays `active` and is
-re-served by the next `next_step` — with its instruction revised via `replan.txt` — until it
-either completes or hits `max_attempts`, at which point it is marked `failed` and skipped
-(best-effort, never fatal). So the caller's loop is a dumb `next → execute → record` cycle;
-the node handles all re-planning and advancement.
+re-served by the next `advance` — with its instruction revised via `replan.txt` — until it
+either completes or hits `max_attempts`, at which point it is marked `failed`. **A failed step
+aborts the whole mission**: its area is marked `failed`, `advance` refuses to advance past it
+and reports `mission_failed`, and no further steps are served. So the caller's loop is a dumb
+`advance → execute` cycle; the node handles judging, re-planning, advancement, and the abort.
 
 ### Interfaces
 
 | Interface | Type | Direction |
 |---|---|---|
-| `~/next_step` | `hint_interfaces/action/MissionStep` | Action server |
-| `~/record_outcome` | `hint_interfaces/action/MissionOutcome` | Action server |
+| `~/advance` | `hint_interfaces/action/MissionAdvance` | Action server |
 | `/reasoner_node/reason` (see `reasoner_action`) | `hint_interfaces/action/Reason` | Action client — judge / replan / compress |
 
-**`next_step`** — hand out the next actionable step. Goal is empty. Result: `mission_done`,
-`description` (the instruction to feed `trajectory_planner`), `area`, `step_id`, `message`.
-On a retry it revises the instruction (`replan.txt`) before returning it.
+**`advance`** — Goal: `success` (did the step just executed succeed?) and `observation`
+(grounded VLM feedback, verbatim — e.g. the planner's path reasoning). The node judges the
+active step from that outcome (`judge.txt`), logs it, updates status, compresses the area
+(`compress.txt`) on a boundary, and aborts on a failed step; then it selects the next step
+(revising the instruction via `replan.txt` on a retry). Result: `mission_done`, `mission_failed`,
+`description` (next instruction for `trajectory_planner`), `area`, `step_id`, `message`. On the
+first call nothing has executed (`success` defaults true, `observation` empty), so it just
+hands out the first step.
 
-**`record_outcome`** — Goal: `step_id`, `success`, `message` (execution detail), `observation`
-(a grounded perception verbatim, e.g. a verify-VLM answer — optional). It logs the outcome,
-judges completion (`judge.txt`), updates status, and compresses the area (`compress.txt`) on a
-boundary. Result: `completed`, `mission_done`, `message` (judge reason).
+> **Feeding the judge grounded feedback.** The judge is only as good as the `observation` it
+> gets. In the `RunMission` tree, `PlanTrajectoryAction` exposes the trajectory planner's VLM
+> reasoning about the chosen path (its result `message`), which is routed into `advance`'s
+> `observation` — so the judge sees *why the planner went where it did*, not just "the follow
+> reached its last waypoint". Any VLM leaf's reasoning field (a `VisualQuestion` `rationale`, a
+> `GroundDescription` label) can be routed the same way; a dedicated verify-VLM leaf is the
+> natural next addition (see the note below).
 
 ### Parameters
 
@@ -172,13 +183,17 @@ Run the node (the `reasoner` node must be up for judge/replan/compress to resolv
 ros2 run mission_planner mission_planner_node
 ```
 
-Drive one step manually — get the next instruction, then report an outcome for it:
+Drive the loop manually. The first call reports nothing and returns step one; each subsequent
+call reports the previous step's outcome and returns the next directive:
 
 ```bash
-ros2 action send_goal /mission_planner_node/next_step hint_interfaces/action/MissionStep "{}" --feedback
+# first call — just get step one (nothing executed yet)
+ros2 action send_goal /mission_planner_node/advance hint_interfaces/action/MissionAdvance \
+  "{success: true, observation: ''}" --feedback
 
-ros2 action send_goal /mission_planner_node/record_outcome hint_interfaces/action/MissionOutcome \
-  "{step_id: 'bedroom.1', success: true, message: 'reached last waypoint', observation: 'VLM: yes, the bed is beside the robot'}" \
+# report that step's outcome + get the next
+ros2 action send_goal /mission_planner_node/advance hint_interfaces/action/MissionAdvance \
+  "{success: true, observation: 'planner: routed along the open floor to the foot of the bed'}" \
   --feedback
 ```
 
@@ -187,28 +202,30 @@ The checkpoint and log are written next to the mission YAML — with the default
 `share/mission_planner/` (or wherever `mission_path` points). Delete the `.state.yaml` to
 restart the mission from scratch.
 
-## BT integration (deferred)
+## BT integration
 
-The mission loop stays **visible in the BT** — the loop lives in XML ticked by
-`bt_executor_node`; the leaves are thin `RosActionNode` wrappers over the node's actions,
-matching every other `hint_bt` leaf:
-
-- `MissionNextStep` (→ `~/next_step`) — outputs `{description}`, `{step_id}`; `FAILURE` when
-  `mission_done` (breaks the loop).
-- `MissionRecordOutcome` (→ `~/record_outcome`) — reports the executed step's outcome.
-
-**`behaviors/run_mission.xml`** — the loop:
+The mission loop is **visible in the BT** — it lives in XML ticked by `bt_executor_node`
+(`hint_bt/behaviors/run_mission.xml`, tree ID `RunMission`). A **single** thin leaf,
+`MissionAdvance` (→ `~/advance`), is the whole node interface: each tick it reports the last
+step's outcome and returns the next directive, writing `{description}`/`{area}`/`{step_id}`/
+`{mission_failed}` to the blackboard and returning `FAILURE` when the mission is over.
 
 ```
-KeepRunningUntilFailure               # FAILURE from MissionNextStep = mission complete
-  Sequence
-    MissionNextStep      → {description}, {step_id}
-    FollowPlannedTrajectory(description)     # existing subtree: plan + follow
-    MissionRecordOutcome({step_id}, outcome) # records + judges; loop repeats
+Fallback
+  KeepRunningUntilFailure                        # ends when MissionAdvance reports mission over
+    Sequence
+      MissionAdvance(success={last_ok}, observation={plan_message}) → {description}, {mission_failed}
+      Fallback                                    # capture follow success/failure into {last_ok}
+        Sequence: FollowPlannedTrajectory(description)→{plan_message} ; SetBlackboard(last_ok := true)
+        SetBlackboard(last_ok := false)
+  Precondition if="mission_failed" else="SUCCESS" # abort → overall FAILURE, clean → SUCCESS
+    AlwaysFailure
 ```
 
-Since the node owns retries/advancement, the loop needs no `RetryUntilSuccessful` — it simply
-repeats until `MissionNextStep` reports `mission_done`. Two things to settle in that pass:
-capturing the `FollowPlannedTrajectory` success/failure to pass into `MissionRecordOutcome`
-(even on failure), and mapping "mission complete" (the loop's terminal `FAILURE`) to an overall
-`SUCCESS` at the top of the tree.
+Since the node owns judging/retries/advancement/abort, the loop needs no `RetryUntilSuccessful`
+— it repeats until `MissionAdvance` ends it. The only custom term in the loop is `MissionAdvance`;
+`Fallback`/`Precondition`/`SetBlackboard`/`AlwaysFailure` are all stock BT.cpp. The planner's VLM
+path reasoning (`{plan_message}`) is fed straight into `MissionAdvance`'s `observation`, so it
+lands in the log as the grounded feedback the judge reasons over; the `SetBlackboard` pair
+captures whether the follow succeeded (`{last_ok}`) for the next tick. The outer `Precondition`
+maps a clean finish to overall `SUCCESS` and an abort (`{mission_failed}`) to `FAILURE`.
