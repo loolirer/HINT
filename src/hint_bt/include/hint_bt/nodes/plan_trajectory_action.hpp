@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,8 @@ public:
       BT::InputPort<std::string>("description"),
       BT::OutputPort<std::vector<geometry_msgs::msg::Point>>("markers"),
       BT::OutputPort<builtin_interfaces::msg::Time>("stamp"),
+      BT::OutputPort<std::string>(
+        "message", "the VLM's explanation of the chosen path (or why planning failed)"),
     });
   }
 
@@ -40,6 +43,9 @@ public:
 
   BT::NodeStatus onResultReceived(const WrappedResult & wr) override
   {
+    // Surface the VLM's path reasoning on every path (success or planner-reported
+    // failure) so the mission log captures it as grounded visual feedback.
+    setOutput("message", wr.result->message);
     if (!wr.result->success) {
       RCLCPP_WARN(logger(), "Trajectory planning failed: %s", wr.result->message.c_str());
       return BT::NodeStatus::FAILURE;
@@ -49,9 +55,18 @@ public:
     return BT::NodeStatus::SUCCESS;
   }
 
-  BT::NodeStatus onFailure(BT::ActionNodeErrorCode error) override
+  // Aborts carry the model's rationale — empty waypoints mean "no path visible"
+  // or "already there", with the reason in the result message. Propagate it to
+  // {message} so a consumer (the mission narrative) gets that grounding instead
+  // of a stale value. Uses the two-arg overload because the abort path
+  // (bt_action_node.hpp) passes the result there; the single-arg one drops it.
+  BT::NodeStatus onFailure(BT::ActionNodeErrorCode error,
+                           const std::optional<WrappedResult> & wr) override
   {
-    RCLCPP_ERROR(logger(), "PlanTrajectory action error: %s", BT::toStr(error));
+    if (wr) {
+      setOutput("message", wr->result->message);
+    }
+    RCLCPP_WARN(logger(), "PlanTrajectory failed (%s)", BT::toStr(error));
     return BT::NodeStatus::FAILURE;
   }
 };

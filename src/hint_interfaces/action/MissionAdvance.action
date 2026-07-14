@@ -1,0 +1,14 @@
+# Goal — report the outcome of the move just executed, then get the next directive.
+# (On the first call nothing has executed yet: success defaults true, observation empty.)
+bool success        # did the move just executed (plan + follow) succeed? (ignored on the first call)
+string observation  # grounded VLM feedback from the execution, verbatim (the planner's path reasoning)
+---
+# Result — the next directive
+bool mission_done    # true when the mission is over (complete OR failed)
+bool mission_failed  # true when it ended in failure (stuck in an environment past the cycle cap); false on clean completion
+string description   # the next instruction to feed trajectory_planner (empty when mission_done)
+string area          # the current environment (from the narrative)
+string message       # the narrative's present intent, closing summary, or the failure reason
+---
+# Feedback
+string state         # "RUNNING" while judging / (re)planning

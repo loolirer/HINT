@@ -13,10 +13,11 @@ namespace hint_bt
 // Calls the reasoner's Reason action — generic text-in / JSON-out LLM
 // reasoning with no camera involved. Feeds the assembled "prompt" (optionally
 // constrained to a JSON "schema") to the model and writes the reply to the
-// "response" output port. This is the mission planner's reasoning leaf: judge a
-// run log, revise a trajectory-planner prompt after a failure, or roll an
-// area's log up into a summary. Prompts belong to the caller, so build the
-// "prompt" string upstream (e.g. from a template) and bind it here.
+// "response" output port. It is the generic reasoning primitive behind the
+// mission planner (which uses it directly, not via this leaf, to recompile its
+// narrative each cycle) and available to any tree that needs a text→JSON step.
+// Prompts belong to the caller, so build the "prompt" string upstream (e.g. from
+// a template) and bind it here.
 //
 // SUCCESS when the model returned a usable reply; FAILURE when the call could
 // not run (empty prompt, timeout, API error, unparseable JSON) — the reasoner
