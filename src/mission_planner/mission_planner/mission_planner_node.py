@@ -59,9 +59,7 @@ class MissionPlannerNode(Node):
         super().__init__("mission_planner_node")
 
         share = get_package_share_directory("mission_planner")
-        self.declare_parameter(
-            "mission_path",
-            os.path.join(share, "missions", "apartment_tidy", "mission.yaml"))
+        self.declare_parameter("mission_path", "")   # empty = start idle; pick a mission per ~/advance call
         self.declare_parameter("brief_path", os.path.join(share, "config", "brief.md"))
         self.declare_parameter("prompts_dir", os.path.join(share, "prompts"))
         self.declare_parameter("narrative_path", "")   # empty -> <mission>.narrative.jsonl
@@ -71,8 +69,9 @@ class MissionPlannerNode(Node):
         self.declare_parameter("max_env_cycles", 10)     # stuck backstop per environment
 
         self._lock = threading.Lock()
-        self._mission_path = os.path.abspath(self._p("mission_path"))  # runtime, switchable
-        self._plan = None                       # the semantic plan dict (mission line)
+        _mp = self._p("mission_path")
+        self._mission_path = os.path.abspath(_mp) if _mp else ""   # runtime, switchable
+        self._plan = None                       # loaded mission (None = idle, no mission)
         self._queue = []                        # remaining environments (head = current)
         self._visited = []                      # completed environments (for `back`)
         self._narrative = {"done": "", "next": ""}
@@ -82,7 +81,8 @@ class MissionPlannerNode(Node):
         self._served = False
 
         self._brief = self._read(self._p("brief_path"))
-        self._load_mission(self._mission_path)
+        if self._mission_path:
+            self._load_mission(self._mission_path)
 
         cbg = ReentrantCallbackGroup()
         self._reasoner = ActionClient(
@@ -92,9 +92,13 @@ class MissionPlannerNode(Node):
             execute_callback=self._advance_cb,
             cancel_callback=self._cancel_cb, callback_group=cbg)
 
-        self.get_logger().info(
-            f"Mission planner ready — '{self._plan.get('mission', '')}' "
-            f"(queue: {[e['name'] for e in self._queue]}), narrative v{self._version}.")
+        if self._plan is not None:
+            self.get_logger().info(
+                f"Mission planner ready — '{self._plan.get('mission', '')}' "
+                f"(queue: {[e['name'] for e in self._queue]}), narrative v{self._version}.")
+        else:
+            self.get_logger().info(
+                "Mission planner ready — no mission loaded; waiting for a mission_path.")
 
     # ------------------------------------------------------------------
     # Derived state (the queue is the source of truth)
@@ -119,6 +123,18 @@ class MissionPlannerNode(Node):
             if req.mission_path and os.path.abspath(req.mission_path) != self._mission_path:
                 self.get_logger().info(f"Switching mission -> {req.mission_path}")
                 self._load_mission(req.mission_path)
+
+            # No mission loaded and none provided — nothing to do; fail cleanly so
+            # the tree ends (FAILURE) rather than driving on an empty instruction.
+            if self._plan is None:
+                result = MissionAdvance.Result()
+                result.mission_done = True
+                result.mission_failed = True
+                result.message = "No mission loaded — pass mission_path in the advance goal."
+                goal_handle.succeed()
+                self.get_logger().warn(result.message)
+                return result
+
             self._feedback(goal_handle, MissionAdvance, "RUNNING")
 
             trigger = None

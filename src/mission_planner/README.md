@@ -32,7 +32,7 @@ on forever.
 ```
 mission_planner/
   mission_planner/mission_planner_node.py  # the narrative-director node
-  missions/apartment_tidy/mission.yaml     # a Semantic Plan (one dir per mission)
+  missions/<name>/mission.yaml             # a Semantic Plan (one dir per mission)
   prompts/compile.txt                      # the single narrative-compile prompt
   config/brief.md                          # permanent context: capabilities + rules + policy
   README.md                                # this file — single source of truth
@@ -43,11 +43,16 @@ colcon build --symlink-install --packages-select hint_interfaces mission_planner
 source install/setup.bash
 ```
 
+**There is no default mission.** The node starts **idle** and runs whichever mission a `~/advance`
+goal points it at (`mission_path`) — one running node serves any mission without a restart. (You
+*can* preload one with the `mission_path` param, but that's optional.) Author missions with the
+`/author-mission` command.
+
 Each mission lives in its **own directory** (`missions/<name>/mission.yaml`) so its runtime
 artifacts stay grouped with it. The node writes two append-only siblings next to the mission
 YAML: `mission.narrative.jsonl` (the versioned narrative history) and `mission.log.jsonl` (the raw
-action log). On startup it **resumes** from the tail of the narrative if it exists; delete that
-file to start fresh.
+action log). When it loads a mission it **resumes** from the tail of that mission's narrative if it
+exists; delete that file to start fresh.
 
 The siblings are written next to the **real** mission file: `os.path.realpath` resolves the
 `--symlink-install` symlink back to the source tree, so in a dev workspace they appear in
@@ -152,9 +157,11 @@ policy) prepended on every call.
 
 ## Node
 
-`mission_planner_node` loads the Semantic Plan, `brief.md`, and `compile.txt`; holds the current
-narrative in memory; and exposes **one** action server, `~/advance`, called in an
-`advance → execute` loop. Each `advance` is one reasoner call.
+`mission_planner_node` loads `brief.md` and `compile.txt` at startup and then **waits idle** for a
+mission. It holds the current narrative in memory and exposes **one** action server, `~/advance`,
+called in an `advance → execute` loop. Each `advance` is one reasoner call. The first `~/advance`
+that carries a `mission_path` loads that mission (and later ones switch it); an `advance` with no
+mission loaded and none provided fails cleanly (`mission_failed`).
 
 ### Interfaces
 
@@ -163,9 +170,11 @@ narrative in memory; and exposes **one** action server, `~/advance`, called in a
 | `~/advance` | `hint_interfaces/action/MissionAdvance` | Action server |
 | `/reasoner_node/reason` (see `reasoner_action`) | `hint_interfaces/action/Reason` | Action client — the narrative recompile |
 
-**`advance`** — Goal: `success` (did the last move execute?) + `observation` (the planner's VLM
-reasoning, verbatim). The node appends the outcome to the pure log, applies the queue edit +
-recompiles the narrative (`compile.txt` → reasoner), appends the new snapshot, and returns Result:
+**`advance`** — Goal: `success` (did the last move execute?), `observation` (the planner's VLM
+reasoning, verbatim), and `mission_path` (optional — the mission to run; loads/switches it when it
+changes, else keeps the current one). The node appends the outcome to the pure log, applies the
+queue edit + recompiles the narrative (`compile.txt` → reasoner), appends the new snapshot, and
+returns Result:
 `mission_done` (queue empty **or** failed), `mission_failed` (stuck past the cap), `description`
 (= the narrative's `next`), `area` (= the current queue head), `message` (= the narrative's `done`,
 or the failure reason). On the first call nothing has executed (`success` defaults true,
@@ -175,7 +184,7 @@ or the failure reason). On the first call nothing has executed (`success` defaul
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `mission_path` | share `missions/apartment_tidy/mission.yaml` | Semantic Plan loaded at startup (the **default**). A `~/advance` goal's `mission_path` overrides it per call — the node reloads on change, resuming that mission's narrative if it exists — so one running node serves any mission without a restart |
+| `mission_path` | `""` | Optional mission to preload at startup; empty → start **idle**. A `~/advance` goal's `mission_path` selects/switches the mission per call (the node reloads on change, resuming that mission's narrative if it exists), so one running node serves any mission without a restart |
 | `brief_path` | share `config/brief.md` | Permanent-context brief |
 | `prompts_dir` | share `prompts/` | Directory holding `compile.txt` |
 | `narrative_path` | `""` | Narrative history; empty → sibling of the real mission file (`<mission>.narrative.jsonl`) |
@@ -197,11 +206,12 @@ each subsequent call reports the previous move's outcome (with the planner's rea
 returns the next:
 
 ```bash
-# cycle 0 — nothing executed yet
+# cycle 0 — load a mission (via mission_path) and get the opening instruction
 ros2 action send_goal /mission_planner_node/advance hint_interfaces/action/MissionAdvance \
-  "{success: true, observation: ''}" --feedback
+  "{success: true, observation: '', mission_path: '/root/turtlebot3_ws/src/mission_planner/missions/bedroom_to_living_room/mission.yaml'}" \
+  --feedback
 
-# report the move + get the next
+# report the move + get the next (mission_path can be omitted once loaded)
 ros2 action send_goal /mission_planner_node/advance hint_interfaces/action/MissionAdvance \
   "{success: true, observation: 'planner: routed to the far wall, a doorway is now visible ahead'}" \
   --feedback
@@ -210,7 +220,7 @@ ros2 action send_goal /mission_planner_node/advance hint_interfaces/action/Missi
 Watch the narrative evolve — every call appends one snapshot:
 
 ```bash
-tail -f src/mission_planner/missions/apartment_tidy/mission.narrative.jsonl | jq .
+tail -f src/mission_planner/missions/bedroom_to_living_room/mission.narrative.jsonl | jq .
 ```
 
 Delete the `.narrative.jsonl` to restart the mission from scratch.

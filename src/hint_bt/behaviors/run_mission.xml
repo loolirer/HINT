@@ -9,11 +9,11 @@
   decides the next instruction and completion; the tree just loops
   report -> execute -> capture.
 
-  Which mission runs is chosen at the call: {mission} is the mission YAML path. If
-  unset (empty payload), the node keeps its startup default. To run a specific
-  mission, send a payload that binds it, e.g.
+  Which mission runs is chosen at the call: {mission} is the mission YAML path.
+  There is no default mission — send a payload that binds it, e.g.
     <SubTree ID="RunMission" mission="/abs/path/to/mission.yaml"/>
-  The node reloads only when the path changes (and resumes that mission's narrative).
+  The node reloads only when the path changes (and resumes that mission's
+  narrative). An empty {mission} with nothing loaded fails cleanly (FAILURE).
 
     1. MissionAdvance(success, observation) hands out the next instruction, or
        returns FAILURE when the narrative reports the mission complete.
