@@ -106,6 +106,12 @@ def generate_launch_description():
         parameters=[{"api_key_path": "/root/secrets/gemini_api_key.txt"}],
     )
 
+    mission_planner = Node(
+        package="mission_planner",
+        executable="mission_planner_node",
+        output="screen",
+    )
+
     bt_executor = Node(
         package="hint_bt",
         executable="bt_executor_node",
@@ -145,6 +151,7 @@ def generate_launch_description():
             #visual_question,
             trajectory_planner,
             reasoner,
+            mission_planner,
             bt_executor,
             rviz2,
         ]
