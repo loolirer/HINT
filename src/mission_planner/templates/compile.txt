@@ -8,7 +8,7 @@
 # Tokens (literal {name}, substring-substituted by the node — NOT str.format):
 #   {brief}          config/brief.md, verbatim (permanent context)
 #   {semantic_plan}  environments (hard rails, in order) + evolving descriptions + intents
-#   {narrative}      current narrative (current_environment + done/trying/next)
+#   {narrative}      current narrative carried forward (current_environment + done)
 #   {outcome}        last move's outcome + the planner's VLM reasoning (empty on cycle 0)
 # ---------------------------------------------------------------------------
 

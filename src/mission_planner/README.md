@@ -118,7 +118,7 @@ The single reasoner prompt (replacing the old judge/replan/compress). Placeholde
 |---|---|
 | `{brief}` | `config/brief.md`, verbatim (permanent context) |
 | `{semantic_plan}` | the environments (hard rails, in order) + their **evolving** descriptions + intents |
-| `{narrative}` | the current narrative (`current_environment` + `done`/`trying`/`next`) |
+| `{narrative}` | the narrative carried forward — `current_environment` + `done` only (`trying`/`next` are regenerated each cycle, so not echoed back) |
 | `{outcome}` | this cycle's move outcome + the planner's VLM reasoning (empty on cycle 0) |
 
 Reasoner `schema`:

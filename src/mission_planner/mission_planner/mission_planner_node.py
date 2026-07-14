@@ -30,13 +30,14 @@ The ``compile.txt`` prompt is filled by literal ``{token}`` substitution (NOT
 import json
 import os
 import threading
+import time
 from datetime import datetime, timezone
 
 import yaml
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
-from rclpy.action import ActionClient, ActionServer
+from rclpy.action import ActionClient, ActionServer, CancelResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
@@ -77,7 +78,8 @@ class MissionPlannerNode(Node):
             self, Reason, self._p("reasoner_action"), callback_group=cbg)
         self._advance_srv = ActionServer(
             self, MissionAdvance, "~/advance",
-            execute_callback=self._advance_cb, callback_group=cbg)
+            execute_callback=self._advance_cb,
+            cancel_callback=self._cancel_cb, callback_group=cbg)
 
         self.get_logger().info(
             f"Mission planner ready — '{self._plan.get('mission', '')}' "
@@ -103,12 +105,31 @@ class MissionPlannerNode(Node):
                                  observation=req.observation)
 
             # One reasoner call: fold the outcome into the rolling narrative.
-            new = self._compile(outcome_text)
-            if new is not None:
-                self._narrative = new
-            self._append_narrative(trigger)
+            new = self._compile(outcome_text, goal_handle)
+
+            if goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+                cancelled = MissionAdvance.Result()
+                cancelled.message = "Cancelled."
+                self.get_logger().info("Advance cancelled (BT halt).")
+                return cancelled
 
             result = MissionAdvance.Result()
+            if new is None:
+                # Compile failed (reasoner down / timeout / unparseable). Keep the
+                # previous narrative, append NO snapshot, and re-serve the current
+                # instruction — so the loop retries instead of falsely completing.
+                result.mission_done = False
+                result.area = self._narrative.get("current_environment", "")
+                result.description = self._narrative.get("next", "")
+                result.message = "Compile failed — re-serving previous instruction."
+                self._served = True
+                goal_handle.succeed()
+                self.get_logger().warn(result.message)
+                return result
+
+            self._narrative = new
+            self._append_narrative(trigger)
             result.area = self._narrative.get("current_environment", "")
 
             if self._narrative.get("mission_complete"):
@@ -130,14 +151,14 @@ class MissionPlannerNode(Node):
     # ------------------------------------------------------------------
     # Narrative recompile (the single reasoner call)
 
-    def _compile(self, outcome_text):
+    def _compile(self, outcome_text, goal_handle=None):
         prompt = self._fill("compile.txt", {
             "brief": self._brief,
             "semantic_plan": self._plan_text(),
             "narrative": self._narrative_text(self._narrative),
             "outcome": outcome_text,
         })
-        data = self._call_reasoner(prompt, NARRATIVE_SCHEMA)
+        data = self._call_reasoner(prompt, NARRATIVE_SCHEMA, goal_handle)
         if not isinstance(data, dict):
             self.get_logger().warn("Narrative compile failed — keeping previous narrative.")
             return None
@@ -190,19 +211,18 @@ class MissionPlannerNode(Node):
 
     @staticmethod
     def _narrative_text(nar):
+        # Only the accumulated `done` (+ current environment) carries forward into
+        # the prompt. `trying`/`next` are regenerated each cycle and the result of
+        # the last `next` is already in {outcome}, so echoing them back is redundant.
         return ("current_environment: {ce}\n"
-                "done: {done}\n"
-                "trying: {trying}\n"
-                "next: {next}").format(
+                "done: {done}").format(
             ce=nar.get("current_environment", ""),
-            done=nar.get("done", "") or "(nothing yet)",
-            trying=nar.get("trying", "") or "(nothing yet)",
-            next=nar.get("next", "") or "(nothing yet)")
+            done=nar.get("done", "") or "(nothing yet)")
 
     # ------------------------------------------------------------------
     # Reasoner client
 
-    def _call_reasoner(self, prompt, schema):
+    def _call_reasoner(self, prompt, schema, goal_handle=None):
         timeout = float(self._p("reasoner_timeout"))
         if not self._reasoner.wait_for_server(timeout_sec=timeout):
             self.get_logger().warn("Reasoner action server unavailable.")
@@ -210,13 +230,13 @@ class MissionPlannerNode(Node):
         goal = Reason.Goal()
         goal.prompt = prompt
         goal.schema = schema
-        handle = self._await(self._reasoner.send_goal_async(goal), timeout)
+        handle = self._await(self._reasoner.send_goal_async(goal), timeout, goal_handle)
         if handle is None or not handle.accepted:
             self.get_logger().warn("Reasoner rejected the goal or timed out.")
             return None
-        wrapped = self._await(handle.get_result_async(), timeout)
+        wrapped = self._await(handle.get_result_async(), timeout, goal_handle, handle)
         if wrapped is None:
-            self.get_logger().warn("Reasoner result timed out.")
+            self.get_logger().warn("Reasoner result timed out or cancelled.")
             return None
         res = wrapped.result
         if not res.success:
@@ -229,14 +249,25 @@ class MissionPlannerNode(Node):
             return None
 
     @staticmethod
-    def _await(future, timeout):
-        # Block the current server thread on a client future; the MultiThreaded
-        # executor keeps spinning the reasoner client's callbacks on other
-        # threads (reentrant group), so the done-callback fires and sets the event.
+    def _await(future, timeout, goal_handle=None, reasoner_handle=None):
+        # Block the current server thread on a client future, polling so we can
+        # bail out early on a BT-halt cancel. The MultiThreaded executor keeps
+        # spinning the reasoner client's callbacks on other threads (reentrant
+        # group), so the done-callback fires and sets the event. On timeout OR
+        # cancel we return None without waiting further; on cancel we also cancel
+        # the reasoner goal so it does not run orphaned server-side. (The in-flight
+        # Gemini call still finishes in the reasoner's background thread; only its
+        # result is dropped — cancellation is cooperative.)
         done = threading.Event()
         future.add_done_callback(lambda _f: done.set())
-        if not done.wait(timeout):
-            return None
+        deadline = time.monotonic() + timeout
+        while not done.wait(0.1):
+            if goal_handle is not None and goal_handle.is_cancel_requested:
+                if reasoner_handle is not None:
+                    reasoner_handle.cancel_goal_async()
+                return None
+            if time.monotonic() >= deadline:
+                return None
         return future.result()
 
     def _fill(self, template_name, tokens):
@@ -352,6 +383,10 @@ class MissionPlannerNode(Node):
     def _read(path):
         with open(path, "r") as f:
             return f.read()
+
+    def _cancel_cb(self, _goal_handle):
+        # Accept BT-halt cancellations so an in-flight advance can bail out.
+        return CancelResponse.ACCEPT
 
     @staticmethod
     def _feedback(goal_handle, action_type, state):
