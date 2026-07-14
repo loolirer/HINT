@@ -18,9 +18,11 @@
        MissionAdvance defaults success=true and, with nothing executed yet, just
        serves the first instruction.)
 
-  There is no abort/failure path — divergence from the plan is normal and is
-  absorbed by the narrative, so the loop only ever ends on completion, mapped to
-  overall SUCCESS by the outer AlwaysSuccess.
+  Divergence from the plan is normal and absorbed by the narrative, so the loop
+  usually ends on completion. The one failure path is the stuck backstop: if the
+  robot never leaves an environment within the cycle cap, MissionAdvance reports
+  mission_failed. When the loop ends the outer Fallback runs the Precondition — a
+  clean finish maps to overall SUCCESS, a failure ({mission_failed}) to FAILURE.
 -->
 <root BTCPP_format="4">
   <BehaviorTree ID="RunMission">
@@ -28,7 +30,8 @@
       <KeepRunningUntilFailure>
         <Sequence>
           <MissionAdvance success="{last_ok}" observation="{plan_message}"
-                          description="{description}" area="{area}"/>
+                          description="{description}" area="{area}"
+                          mission_failed="{mission_failed}"/>
           <Fallback>
             <Sequence>
               <SubTree ID="FollowPlannedTrajectory" description="{description}"
@@ -39,7 +42,9 @@
           </Fallback>
         </Sequence>
       </KeepRunningUntilFailure>
-      <AlwaysSuccess/>
+      <Precondition if="mission_failed" else="SUCCESS">
+        <AlwaysFailure/>
+      </Precondition>
     </Fallback>
   </BehaviorTree>
 </root>
