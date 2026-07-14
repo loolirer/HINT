@@ -105,6 +105,7 @@ def generate_launch_description():
         parameters=[{
             "api_key_path": "/root/secrets/gemini_api_key.txt",
             "model_id": "gemini-robotics-er-1.6-preview",
+            "thinking_budget": -1,
         }],
     )
 
