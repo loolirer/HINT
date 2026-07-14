@@ -2,7 +2,7 @@
 <root BTCPP_format="4">
     <BehaviorTree ID="FollowPlannedTrajectory">
       <Sequence>
-        <PlanTrajectoryAction description="{description}" markers="{markers}" stamp="{stamp}"/>
+        <PlanTrajectoryAction description="{description}" markers="{markers}" stamp="{stamp}" message="{plan_message}"/>
         <FollowTrajectoryAction waypoints="{markers}" stamp="{stamp}"/>
       </Sequence>
     </BehaviorTree>

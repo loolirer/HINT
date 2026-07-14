@@ -1,0 +1,45 @@
+<?xml version="1.0"?>
+<!--
+  RunMission — drive a mission_planner mission to completion.
+
+  One custom leaf, MissionAdvance, is the whole node interface: each tick it
+  reports the outcome of the move just executed (success + the planner's VLM
+  reasoning as {plan_message}) and returns the next directive. The mission_planner
+  node folds that outcome into its rolling narrative (one reasoner call) and
+  decides the next instruction and completion; the tree just loops
+  report -> execute -> capture.
+
+    1. MissionAdvance(success, observation) hands out the next instruction, or
+       returns FAILURE when the narrative reports the mission complete.
+    2. FollowPlannedTrajectory plans + follows it, surfacing the planner's VLM
+       reasoning as {plan_message}.
+    3. SetBlackboard records whether the execution succeeded into {last_ok}, fed
+       back to the next MissionAdvance. (On the first tick {last_ok} is unset;
+       MissionAdvance defaults success=true and, with nothing executed yet, just
+       serves the first instruction.)
+
+  There is no abort/failure path — divergence from the plan is normal and is
+  absorbed by the narrative, so the loop only ever ends on completion, mapped to
+  overall SUCCESS by the outer AlwaysSuccess.
+-->
+<root BTCPP_format="4">
+  <BehaviorTree ID="RunMission">
+    <Fallback>
+      <KeepRunningUntilFailure>
+        <Sequence>
+          <MissionAdvance success="{last_ok}" observation="{plan_message}"
+                          description="{description}" area="{area}"/>
+          <Fallback>
+            <Sequence>
+              <SubTree ID="FollowPlannedTrajectory" description="{description}"
+                       plan_message="{plan_message}"/>
+              <SetBlackboard output_key="last_ok" value="true"/>
+            </Sequence>
+            <SetBlackboard output_key="last_ok" value="false"/>
+          </Fallback>
+        </Sequence>
+      </KeepRunningUntilFailure>
+      <AlwaysSuccess/>
+    </Fallback>
+  </BehaviorTree>
+</root>
