@@ -47,7 +47,8 @@ from rclpy.node import Node
 from hint_interfaces.action import MissionAdvance, Reason
 
 NARRATIVE_SCHEMA = (
-    '{"done": string, "next": string, "environment_description": string, '
+    '{"situation": string, "done": string, "next": string, '
+    '"environment_description": string, '
     '"environment_action": "stay"|"advance"|"back"|"insert", '
     '"new_environment": {"name": string, "description": string}}')
 
@@ -74,7 +75,7 @@ class MissionPlannerNode(Node):
         self._plan = None                       # loaded mission (None = idle, no mission)
         self._queue = []                        # remaining environments (head = current)
         self._visited = []                      # completed environments (for `back`)
-        self._narrative = {"done": "", "next": ""}
+        self._narrative = {"situation": "", "done": "", "next": ""}
         self._env_cycles = 0                    # cycles spent on the current head
         self._failed = False                    # mission stuck past the cycle cap
         self._version = -1
@@ -175,7 +176,8 @@ class MissionPlannerNode(Node):
                 return result
 
             action = self._apply(data)
-            self._narrative = {"done": str(data.get("done", "")),
+            self._narrative = {"situation": str(data.get("situation", "")),
+                               "done": str(data.get("done", "")),
                                "next": str(data.get("next", ""))}
             self._append_snapshot(trigger, action)
 
@@ -263,6 +265,7 @@ class MissionPlannerNode(Node):
         prompt = self._fill("compile.txt", {
             "brief": self._brief,
             "environment": self._context_text(),
+            "situation": self._narrative.get("situation", "") or "(nothing yet)",
             "narrative": self._narrative_text(),
             "outcome": outcome_text,
         })
@@ -405,14 +408,15 @@ class MissionPlannerNode(Node):
             self._queue = last.get("queue") or []
             self._visited = last.get("visited") or []
             nar = last.get("narrative", {})
-            self._narrative = {"done": nar.get("done", ""), "next": nar.get("next", "")}
+            self._narrative = {"situation": nar.get("situation", ""),
+                               "done": nar.get("done", ""), "next": nar.get("next", "")}
             self._failed = bool(last.get("mission_failed", False))
             self._served = True   # resuming mid-mission
             self.get_logger().info(f"Resumed from {path} at v{self._version}.")
         else:
             self._queue = self._seed_queue()
             self._visited = []
-            self._narrative = {"done": "", "next": ""}
+            self._narrative = {"situation": "", "done": "", "next": ""}
             self._version = -1
             self._served = False
             self._failed = False
@@ -431,7 +435,8 @@ class MissionPlannerNode(Node):
             "trigger": trigger,
             "queue": self._queue,       # remaining environments (order shows inserts)
             "visited": self._visited,   # completed environments (enriched descriptions)
-            "narrative": {"done": self._narrative.get("done", ""),
+            "narrative": {"situation": self._narrative.get("situation", ""),
+                          "done": self._narrative.get("done", ""),
                           "next": self._narrative.get("next", "")},
         }
         with open(self._narrative_path(), "a") as f:

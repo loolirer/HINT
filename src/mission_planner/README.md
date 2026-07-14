@@ -115,11 +115,12 @@ the history is self-explaining.
 | `trigger` | `{success, observation}` that caused this recompile (`null` on version 0) |
 | `queue` | remaining environments `[{name, description, intent}, …]` — order shows any `insert`s |
 | `visited` | completed environments (their **enriched** descriptions — the learned map) |
+| `narrative.situation` | my current standing — where I am / what I face **right now**, rewritten fresh each cycle (the present moment, not history) |
 | `narrative.done` | recency-weighted history; older info abstracted, newer sharp |
 | `narrative.next` | the immediate next instruction — fed to `trajectory_planner` |
 
 ```jsonl
-{"version":1,"ts":"…","current_environment":"bedroom","mission_complete":false,"action":"insert","trigger":{"success":true,"observation":"planner: the only door leads to a hallway, not the living room"},"queue":[{"name":"bedroom","description":"a bedroom; door on the far wall opens to a hallway","intent":"pass through to the living room"},{"name":"corridor","description":"a hallway linking the rooms","intent":""},{"name":"living_room","description":"A regular living room","intent":"stop in front of the couch"}],"visited":[],"narrative":{"done":"Found the bedroom's only exit is a hallway.","next":"Drive to the doorway on the far wall."}}
+{"version":1,"ts":"…","current_environment":"bedroom","mission_complete":false,"action":"insert","trigger":{"success":true,"observation":"planner: the only door leads to a hallway, not the living room"},"queue":[{"name":"bedroom","description":"a bedroom; door on the far wall opens to a hallway","intent":"pass through to the living room"},{"name":"corridor","description":"a hallway linking the rooms","intent":""},{"name":"living_room","description":"A regular living room","intent":"stop in front of the couch"}],"visited":[],"narrative":{"situation":"I am in the bedroom, facing the far wall; a door to a hallway is directly ahead.","done":"Found the bedroom's only exit is a hallway.","next":"Drive to the doorway on the far wall."}}
 ```
 
 - **Current state** = the last record. **Resume** = read the tail (`queue` + `visited` restore the
@@ -143,12 +144,13 @@ The single reasoner prompt (replacing the old judge/replan/compress). Placeholde
 |---|---|
 | `{brief}` | `config/brief.md`, verbatim (permanent context) |
 | `{environment}` | the **current** environment (name/description/intent) + a one-line peek at the next — bounded regardless of queue length |
+| `{situation}` | last cycle's `situation` — my standing after the previous move (continuity for the fresh rewrite) |
 | `{narrative}` | the memory carried forward — `done` only (`next` is regenerated, its result already in `{outcome}`) |
 | `{outcome}` | this cycle's move outcome + the planner's VLM reasoning (empty on cycle 0) |
 
 Reasoner `schema`:
-`{"done": string, "next": string, "environment_description": string, "environment_action": "stay"|"advance"|"back"|"insert", "new_environment": {"name": string, "description": string}}`
-— the model reports progress + enriches the current description, and edits the queue only via
+`{"situation": string, "done": string, "next": string, "environment_description": string, "environment_action": "stay"|"advance"|"back"|"insert", "new_environment": {"name": string, "description": string}}`
+— the model reports its current `situation` + progress + enriches the current description, and edits the queue only via
 `environment_action` (`new_environment` carries the room to splice on `insert`). It never names
 the current environment; that's the queue head, owned by the node.
 
