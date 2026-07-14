@@ -13,7 +13,7 @@ setup(
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
         (os.path.join("share", package_name, "missions"), glob("missions/*.yaml")),
-        (os.path.join("share", package_name, "templates"), glob("templates/*.txt")),
+        (os.path.join("share", package_name, "prompts"), glob("prompts/*.txt")),
         (os.path.join("share", package_name, "config"), glob("config/*.md")),
     ],
     install_requires=["setuptools"],

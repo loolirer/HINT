@@ -33,7 +33,7 @@ on forever.
 mission_planner/
   mission_planner/mission_planner_node.py  # the narrative-director node
   missions/apartment_tidy.yaml             # a Semantic Plan (the static prior)
-  templates/compile.txt                    # the single narrative-compile prompt
+  prompts/compile.txt                      # the single narrative-compile prompt
   config/brief.md                          # permanent context: capabilities + rules + policy
   README.md                                # this file — single source of truth
 ```
@@ -122,7 +122,7 @@ Every move's raw outcome, append-only, one JSON object per line
 into the narrative. Kept distinct from the narrative history: this is the *raw actions*, that is
 the *compiled belief*.
 
-## Prompt template (`templates/compile.txt`)
+## Prompt template (`prompts/compile.txt`)
 
 The single reasoner prompt (replacing the old judge/replan/compress). Placeholders are literal
 `{name}` tokens the node substitutes (not `str.format` — the body has JSON braces):
@@ -170,7 +170,7 @@ or the failure reason). On the first call nothing has executed (`success` defaul
 |---|---|---|
 | `mission_path` | share `missions/apartment_tidy.yaml` | Semantic Plan to run |
 | `brief_path` | share `config/brief.md` | Permanent-context brief |
-| `templates_dir` | share `templates/` | Directory holding `compile.txt` |
+| `prompts_dir` | share `prompts/` | Directory holding `compile.txt` |
 | `narrative_path` | `""` | Narrative history; empty → `<mission>.narrative.jsonl` sibling |
 | `log_path` | `""` | Raw log; empty → `<mission>.log.jsonl` sibling |
 | `reasoner_action` | `/reasoner_node/reason` | Reasoner action name |

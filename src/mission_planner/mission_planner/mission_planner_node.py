@@ -19,7 +19,8 @@ never names or reorders environments — each cycle it emits `environment_action
 This enforces the plan order while letting reality refine it, keeps the model's prompt
 bounded (only the head + a one-line peek are shown, regardless of queue length), and
 makes `mission_complete` code-derived (the queue empties). A per-environment cycle cap
-force-advances a head the model never leaves, as a stuck backstop.
+(`max_env_cycles`) is the one failure path: if the model never leaves a head, the mission
+fails rather than dragging on.
 
 Persistence (siblings of the mission YAML), both append-only:
 - ``*.narrative.jsonl`` — one full snapshot per recompile (queue + visited + narrative
@@ -61,7 +62,7 @@ class MissionPlannerNode(Node):
         self.declare_parameter(
             "mission_path", os.path.join(share, "missions", "apartment_tidy.yaml"))
         self.declare_parameter("brief_path", os.path.join(share, "config", "brief.md"))
-        self.declare_parameter("templates_dir", os.path.join(share, "templates"))
+        self.declare_parameter("prompts_dir", os.path.join(share, "prompts"))
         self.declare_parameter("narrative_path", "")   # empty -> <mission>.narrative.jsonl
         self.declare_parameter("log_path", "")          # empty -> <mission>.log.jsonl
         self.declare_parameter("reasoner_action", "/reasoner_node/reason")
@@ -328,7 +329,7 @@ class MissionPlannerNode(Node):
         return future.result()
 
     def _fill(self, template_name, tokens):
-        text = self._read(os.path.join(self._p("templates_dir"), template_name))
+        text = self._read(os.path.join(self._p("prompts_dir"), template_name))
         # Drop the leading '#' comment header so it isn't sent to the model, then
         # substitute literal {name} tokens (NOT str.format — the body has JSON braces).
         body = "\n".join(ln for ln in text.splitlines()
