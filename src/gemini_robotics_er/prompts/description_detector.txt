@@ -1,11 +1,11 @@
-# description_detector.txt — ground a text description to one bounding box.
+# description_detector.txt — ground a text description to one bounding box, first-person.
 #
 # Tokens: {description}  the region to locate
 # Returns JSON: [{"box_2d": [ymin, xmin, ymax, xmax], "label": "<label>"}]  (or [])
 # ---------------------------------------------------------------------------
 
-Return a single bounding box for: "{description}".
-Return [] if the described region is not visible.
+Looking through my camera, return a single bounding box for: "{description}".
+Return [] if I cannot see the described region.
 
 JSON only, no markdown fencing:
 [{"box_2d": [ymin, xmin, ymax, xmax], "label": "<label>"}]

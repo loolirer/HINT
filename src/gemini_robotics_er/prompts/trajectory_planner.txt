@@ -1,33 +1,32 @@
-# trajectory_planner.txt — plan a ground trajectory AND describe the scene.
+# trajectory_planner.txt — plan a ground trajectory AND describe the scene, first-person.
 #
 # Tokens (literal {name}, substring-substituted by _fill_prompt — NOT str.format):
 #   {description}  the navigation instruction to follow
 #
-# Returns JSON: {"reasoning": <scene description + path rationale>,
+# Returns JSON: {"reasoning": <what I see + why this path>,
 #                "waypoints": [{"point": [y, x], "label": <n>}, ...]}
-# The "reasoning" is the ONLY report of the scene the mission narrative ever sees,
-# so it must DESCRIBE what is visible, not merely justify the path.
+# The "reasoning" is the ONLY report of the scene my mission memory ever gets, so it
+# must DESCRIBE what is visible from my viewpoint, not merely justify the path.
 # ---------------------------------------------------------------------------
 
-Place a sequence of at least 10 points on the floor forming the trajectory a mobile robot
-should drive to follow this instruction: "{description}".
+I am a mobile robot looking through my forward-facing camera. Plot the path I should drive to
+follow this instruction: "{description}".
 
-The points must lie ON the traversable ground plane only (never on walls, furniture, or
-obstacles), and should respect any semantic preference in the instruction (e.g. which side to
-keep, what to avoid). Label them in order from "0" (nearest the robot, at the bottom of the
-image) to <n> (the final point, the goal). Points are in [y, x] format normalized to 0-1000.
+Place a sequence of at least 10 points on the floor along that path. They must lie ON the
+traversable ground in front of me (never on walls, furniture, or obstacles), and honor any
+preference in the instruction (which side to keep, what to avoid). Label them in order from "0"
+(closest to me, at the bottom of the image) to <n> (my goal). Points are [y, x] normalized to 0-1000.
 
-In "reasoning", FIRST describe the scene you actually see, THEN justify the path:
-- the space you are in (room type and rough layout);
-- notable landmarks / furniture and where they are (left, right, ahead);
-- doorways, openings and exits — and where each appears to lead, if you can tell;
-- whether the instruction's target is actually visible, and if not, what blocks it;
-- then one sentence on the path you chose (or, if none, why).
-Report what you SEE, not what you assume or expect.
+In "reasoning", FIRST describe what I actually see around me, THEN why I chose this path:
+- the space I'm in (room type and rough layout);
+- landmarks and furniture, and where they are relative to me (ahead, to my left, to my right);
+- doorways and exits I can see — and where each seems to lead, if I can tell;
+- whether my target is actually in view, and if not, what is blocking me from it;
+- then one sentence on the path I'm taking (or, if there is none, why).
+Report what I SEE, not what I assume or expect.
 
 Return JSON only, no markdown fencing:
-{"reasoning": <2-4 sentences: scene description, then the path rationale>, "waypoints": [{"point": [y, x], "label": <n>}, ...]}
+{"reasoning": <2-4 sentences: what I see, then my path>, "waypoints": [{"point": [y, x], "label": <n>}, ...]}
 
-Use an empty "waypoints" list if no valid ground path toward the target is visible — because a
-wall or obstacle blocks it, or because you are already there — and still describe the scene and
-say why in "reasoning".
+Leave "waypoints" empty if there is no valid ground path toward my target — a wall or obstacle is
+in the way, or I am already there — and still describe what I see and say why in "reasoning".
