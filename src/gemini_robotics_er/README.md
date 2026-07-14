@@ -9,7 +9,7 @@ ROS2 package of nodes powered by the Gemini Robotics-ER model for HINT.
 | `description_detector` | Grounds a natural-language description to a bounding box (ROI) on a camera frame |
 | `visual_question` | Answers a yes/no question about a camera frame (VLM sanity-check fallback) |
 | `trajectory_planner` | Plans a ground-restricted trajectory (ordered waypoints) from a text instruction |
-| `reasoner` | Generic text-in / JSON-out LLM reasoner (no camera) — the mission planner's reasoning backend |
+| `reasoner` | Generic text(+optional-image)-in / JSON-out LLM reasoner — the mission planner's director (sees the move's before/after frames) |
 
 Shared plumbing (API-key loading + client, stamped camera ring buffer, timeout-guarded API call, single-goal action lifecycle, **prompt-template loading**) lives in `gemini_robotics_er/gemini_base.py` as `GeminiActionNode`; each executable subclasses it.
 
@@ -175,30 +175,33 @@ ros2 action send_goal /trajectory_planner_node/plan_trajectory \
 
 ## reasoner
 
-A **generic text-in / JSON-out** LLM reasoner. Unlike the other nodes it does
-**not** look at the camera — it reasons purely over the text it is handed. It is
-the model call the **semantic mission planner** relies on for the deliberation a
-single-frame VLM check can't do: judging from a run log whether a task was
-completed, revising a `trajectory_planner` prompt after a failure, and rolling an
-area's log up into a summary. Perception stays in the VLM nodes
-(`description_detector`, `visual_question`), whose grounded outputs land in the
-log; this node reasons *over* that log.
+A **generic text-(and-optional-image)-in / JSON-out** LLM reasoner. It reasons
+over the text it is handed and, when the goal carries `images`, over those frames
+too. It is the model call the **semantic mission planner** relies on as its
+**director**: each cycle the planner hands it the **before/after frames** of the
+move just executed plus the running narrative, and it assesses the move against
+what it actually sees and emits the next instruction. With an **empty `images`**
+list it degrades to pure text reasoning, so any text-only caller still works
+unchanged (empty prompt, timeout, API error, unparseable JSON all still abort).
 
-It subclasses `GeminiActionNode` for the API client, timeout-guarded call and
-single-goal lifecycle; the inherited camera ring buffer is simply unused.
+It subclasses `GeminiActionNode` for the API client, camera-frame decode,
+timeout-guarded call and single-goal lifecycle. The `images` are decoded (any
+unreadable frame is skipped) and prepended to the prompt in order, so the prompt
+can refer to "the first / second image".
 
-**Contract.** The goal carries a `prompt` and an optional `schema` (a JSON shape
-the reply must match). When a `schema` is given the reply is parsed and
-re-serialized, so the caller gets canonical JSON; when it is empty, raw text is
-returned. A genuine reply **succeeds** (BT `SUCCESS`); anything that stops the
-reasoning from running — empty prompt, timeout, API error, unparseable JSON —
-**aborts** (BT `FAILURE`) with the reason placed in `response`. Because the
-prompts belong to the caller, the mission planner keeps them as data (template
-files) and this node stays prompt-free — text in, JSON out.
+**Contract.** The goal carries a `prompt`, an optional `schema` (a JSON shape the
+reply must match), and an optional `images` list. When a `schema` is given the
+reply is parsed and re-serialized, so the caller gets canonical JSON; when it is
+empty, raw text is returned. A genuine reply **succeeds** (BT `SUCCESS`); anything
+that stops the reasoning from running — empty prompt, timeout, API error,
+unparseable JSON — **aborts** (BT `FAILURE`) with the reason placed in `response`.
+Because the prompts belong to the caller, the mission planner keeps them as data
+(template files) and this node stays prompt-free.
 
-> `model_id` defaults to the Robotics-ER model like the rest of the package, but
-> for pure text reasoning it can be pointed at a general Gemini model via the
-> parameter.
+> `model_id` defaults to the Robotics-ER model (vision-capable). If you point it
+> at a general Gemini model, keep it a **vision** model — the director now sends
+> images. It does **not** subscribe to the camera itself; frames arrive in the
+> goal (the mission planner captures and passes them).
 
 ### Interfaces
 
@@ -206,7 +209,8 @@ files) and this node stays prompt-free — text in, JSON out.
 |---|---|---|
 | `~/reason` | `hint_interfaces/action/Reason` | Action server |
 
-> No camera subscription and no `~/debug` publisher — this node is text-only.
+> No `~/debug` publisher; frames are supplied in the goal rather than pulled from
+> a camera subscription.
 
 **`reason` action fields**
 
@@ -214,6 +218,7 @@ files) and this node stays prompt-free — text in, JSON out.
 |---|---|---|
 | **Goal** `prompt` | `string` | Assembled prompt / context to reason over |
 | **Goal** `schema` | `string` | Optional JSON shape the reply must match; empty = free-form text |
+| **Goal** `images` | `sensor_msgs/CompressedImage[]` | Optional frames to reason over (empty = text-only); order is meaningful (e.g. before, after) |
 | **Result** `success` | `bool` | `true` when the model returned a usable reply (valid JSON when a schema was requested) |
 | **Result** `response` | `string` | The reply — canonical JSON when a schema was requested, else raw text; the failure reason when `success` is `false` |
 | **Feedback** `state` | `string` | `"RUNNING"` while the API call is in flight |

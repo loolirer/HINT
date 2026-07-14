@@ -11,16 +11,15 @@ from gemini_robotics_er.gemini_base import GeminiActionNode
 
 
 class ReasonerNode(GeminiActionNode):
-    """A generic text-in / JSON-out LLM reasoner.
+    """A generic text-(and-optional-image)-in / JSON-out LLM reasoner.
 
-    Unlike its siblings (``description_detector``, ``visual_question``,
-    ``trajectory_planner``) this node does **not** look at the camera: it
-    reasons purely over the text it is handed. It is the model call the
-    semantic mission planner leans on for the parts a single-frame VLM check
-    can't answer — judging from a run log whether a task was completed,
-    revising a trajectory-planner prompt after a failure, and rolling an area's
-    log up into a summary. Perception stays in the VLM nodes (whose grounded
-    outputs land in the log); this node reasons *over* that log.
+    It reasons over the text it is handed and, when the goal carries ``images``,
+    over those frames too. It is the model call the semantic mission planner
+    leans on as its **director**: each cycle the planner hands it the before/after
+    frames of the move just executed plus the running narrative, and it assesses
+    the move against what it actually sees and emits the next instruction. With
+    an empty ``images`` list it degrades to pure text reasoning, so any text-only
+    caller still works unchanged.
 
     It inherits ``GeminiActionNode``'s API client, timeout-guarded call and
     single-goal lifecycle. The inherited camera ring buffer is simply unused.
@@ -72,11 +71,23 @@ class ReasonerNode(GeminiActionNode):
                 f"matching this shape:\n{goal.schema}"
             )
 
+        # Optional grounding frames (e.g. the mission director's before/after
+        # views). Empty list -> pure text reasoning, exactly as before. Order is
+        # preserved so the prompt can refer to "the first / second image".
+        contents = []
+        for img in goal.images:
+            try:
+                _, pil_img = self._frame_to_pil(img)
+                contents.append(pil_img)
+            except Exception as e:  # noqa: BLE001 — skip an unreadable frame
+                self.get_logger().warn(f"Skipping an unreadable image: {e}")
+        contents.append(prompt)
+
         if goal_handle.is_cancel_requested:
             return self._cancel(goal_handle)
 
         try:
-            raw = self._call_api([prompt])
+            raw = self._call_api(contents)
         except TimeoutError as e:
             return self._fail(goal_handle, str(e))
         except Exception as e:  # noqa: BLE001 — surfaced to caller as FAILURE

@@ -45,6 +45,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
 from hint_interfaces.action import MissionAdvance, Reason
+from sensor_msgs.msg import CompressedImage
 
 NARRATIVE_SCHEMA = (
     '{"situation": string, "done": string, "next": string, '
@@ -68,6 +69,7 @@ class MissionPlannerNode(Node):
         self.declare_parameter("reasoner_action", "/reasoner_node/reason")
         self.declare_parameter("reasoner_timeout", 30.0)
         self.declare_parameter("max_env_cycles", 10)     # stuck backstop per environment
+        self.declare_parameter("camera_topic", "/camera/image_raw/compressed")
 
         self._lock = threading.Lock()
         _mp = self._p("mission_path")
@@ -80,6 +82,11 @@ class MissionPlannerNode(Node):
         self._failed = False                    # mission stuck past the cycle cap
         self._version = -1
         self._served = False
+        # Director vision: the latest camera frame, and the frame latched at the
+        # end of the previous advance (= the start of the move just executed).
+        # Together they are the before/after pair handed to the reasoner-director.
+        self._latest_frame = None
+        self._before_frame = None
 
         self._brief = self._read(self._p("brief_path"))
         if self._mission_path:
@@ -92,6 +99,11 @@ class MissionPlannerNode(Node):
             self, MissionAdvance, "~/advance",
             execute_callback=self._advance_cb,
             cancel_callback=self._cancel_cb, callback_group=cbg)
+        # Camera on the same reentrant group so frames keep arriving while an
+        # advance blocks on the reasoner call.
+        self.create_subscription(
+            CompressedImage, self._p("camera_topic"), self._camera_cb, 1,
+            callback_group=cbg)
 
         if self._plan is not None:
             self.get_logger().info(
@@ -112,6 +124,30 @@ class MissionPlannerNode(Node):
 
     def _complete(self):
         return not self._queue
+
+    # ------------------------------------------------------------------
+    # Director vision (before/after frames for the reasoner call)
+
+    def _camera_cb(self, msg):
+        self._latest_frame = msg
+
+    def _vision_inputs(self, before, after):
+        """Build the ``(images, description)`` pair handed to the reasoner-director.
+
+        Two frames when we have a before/after pair (so it can judge the move
+        against ground truth), one when only the current view exists (the first
+        move), none before any frame has arrived.
+        """
+        if before is not None and after is not None:
+            return [before, after], (
+                "Two camera images are attached. The FIRST is what I saw just before "
+                "my last move; the SECOND is what I see now, after it — compare them "
+                "to judge what my move actually did.")
+        if after is not None:
+            return [after], (
+                "One camera image is attached: my current view. (This is my first "
+                "move — there is nothing yet to compare it against.)")
+        return [], "(No camera image is available this cycle.)"
 
     # ------------------------------------------------------------------
     # Action server — report-and-advance (one narrative recompile per cycle)
@@ -152,7 +188,14 @@ class MissionPlannerNode(Node):
                                  result="success" if req.success else "failure",
                                  observation=req.observation)
 
-            data = self._compile(outcome_text, goal_handle)
+            # Latch the before/after frames for the director-VLM. `after` = where
+            # the last move ended (now); `before` = where it began (latched at the
+            # end of the previous advance).
+            after = self._latest_frame
+            before = self._before_frame
+            images, vision = self._vision_inputs(before, after)
+
+            data = self._compile(outcome_text, vision, images, goal_handle)
 
             if goal_handle.is_cancel_requested:
                 goal_handle.canceled()
@@ -170,6 +213,7 @@ class MissionPlannerNode(Node):
                 result.area = cur["name"] if cur else ""
                 result.description = self._narrative.get("next", "")
                 result.message = "Compile failed — re-serving previous instruction."
+                self._before_frame = self._latest_frame
                 self._served = True
                 goal_handle.succeed()
                 self.get_logger().warn(result.message)
@@ -205,6 +249,9 @@ class MissionPlannerNode(Node):
             result.mission_failed = False
             result.description = self._narrative.get("next", "")
             result.message = self._narrative.get("done", "")
+            # This instruction will now be executed — latch the current view as the
+            # "before" frame of that move, to pair with next cycle's "after".
+            self._before_frame = self._latest_frame
             self._served = True
             goal_handle.succeed()
             self.get_logger().info(
@@ -261,15 +308,16 @@ class MissionPlannerNode(Node):
     # ------------------------------------------------------------------
     # Narrative recompile (the single reasoner call)
 
-    def _compile(self, outcome_text, goal_handle=None):
+    def _compile(self, outcome_text, vision, images, goal_handle=None):
         prompt = self._fill("compile.txt", {
             "brief": self._brief,
             "environment": self._context_text(),
             "situation": self._narrative.get("situation", "") or "(nothing yet)",
             "narrative": self._narrative_text(),
+            "vision": vision,
             "outcome": outcome_text,
         })
-        data = self._call_reasoner(prompt, NARRATIVE_SCHEMA, goal_handle)
+        data = self._call_reasoner(prompt, NARRATIVE_SCHEMA, images, goal_handle)
         if not isinstance(data, dict):
             self.get_logger().warn("Narrative compile failed — keeping previous narrative.")
             return None
@@ -312,7 +360,7 @@ class MissionPlannerNode(Node):
     # ------------------------------------------------------------------
     # Reasoner client
 
-    def _call_reasoner(self, prompt, schema, goal_handle=None):
+    def _call_reasoner(self, prompt, schema, images=None, goal_handle=None):
         timeout = float(self._p("reasoner_timeout"))
         if not self._reasoner.wait_for_server(timeout_sec=timeout):
             self.get_logger().warn("Reasoner action server unavailable.")
@@ -320,6 +368,7 @@ class MissionPlannerNode(Node):
         goal = Reason.Goal()
         goal.prompt = prompt
         goal.schema = schema
+        goal.images = images or []
         handle = self._await(self._reasoner.send_goal_async(goal), timeout, goal_handle)
         if handle is None or not handle.accepted:
             self.get_logger().warn("Reasoner rejected the goal or timed out.")

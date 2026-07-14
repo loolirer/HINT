@@ -5,11 +5,11 @@ mission: "Get from the bedroom to the living room and stop by the couch."
 
 environments:
   - name: bedroom
-    description: "A bedroom; my way out is an open door."
-    intent: "Drive to the open door and out of the bedroom, turning left toward the hallway."
+    description: "An usual bedroom."
+    intent: "Drive to the open door and out of the bedroom and turn left on the hallway."
   - name: hallway
-    description: "A small hallway linking the bedroom to the living room."
+    description: "Has doors, but one open way, not defined by a door, that leads to the living room"
     intent: "Cross the hallway to the living-room entrance."
   - name: living_room
-    description: "A living room with a couch."
+    description: "An usual living room. Has a couch somewhere on it."
     intent: "Enter the living room and stop on the open floor in front of the couch."
