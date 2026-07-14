@@ -156,7 +156,11 @@ Built as a sibling of `description_detector`: same inputs (a camera `stamp` + a 
 
 ### Parameters
 
-Parameters are the same as `description_detector` (`api_key_path`, `model_id`, `temperature`, `api_timeout`, `thinking_budget`, `prompts_dir`).
+Same as `description_detector` (`api_key_path`, `model_id`, `temperature`, `api_timeout`, `thinking_budget`, `prompts_dir`), plus:
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `min_row` | `400` | Farthest image row (of 1000) a waypoint may occupy — caps forward reach. `1000` = right in front, smaller = farther/higher in the frame. The prompt asks the model to keep points at `y ≥ min_row`, and the node **clamps** any that overshoot (far points are where ground grounding is least reliable). Live-adjustable; raise it for shorter, more conservative steps |
 
 ### Test
 
