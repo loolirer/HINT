@@ -34,6 +34,8 @@ public:
       BT::InputPort<std::string>("success", "true", "did the move just executed succeed?"),
       BT::InputPort<std::string>("observation", "",
                                  "grounded VLM feedback from the execution (verbatim)"),
+      BT::InputPort<std::string>("mission", "",
+                                 "mission YAML to run; empty keeps the node's current/default"),
       BT::OutputPort<std::string>("description", "next instruction to feed trajectory_planner"),
       BT::OutputPort<std::string>("area", "the current environment (from the narrative)"),
       BT::OutputPort<bool>("mission_failed", "true when the mission ended stuck (past the cycle cap)"),
@@ -42,8 +44,9 @@ public:
 
   bool setGoal(Goal & goal) override
   {
-    goal.success     = (getInput<std::string>("success").value_or("true") != "false");
-    goal.observation = getInput<std::string>("observation").value_or("");
+    goal.success      = (getInput<std::string>("success").value_or("true") != "false");
+    goal.observation  = getInput<std::string>("observation").value_or("");
+    goal.mission_path = getInput<std::string>("mission").value_or("");
     return true;
   }
 

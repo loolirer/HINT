@@ -175,7 +175,7 @@ or the failure reason). On the first call nothing has executed (`success` defaul
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `mission_path` | share `missions/apartment_tidy/mission.yaml` | Semantic Plan to run |
+| `mission_path` | share `missions/apartment_tidy/mission.yaml` | Semantic Plan loaded at startup (the **default**). A `~/advance` goal's `mission_path` overrides it per call — the node reloads on change, resuming that mission's narrative if it exists — so one running node serves any mission without a restart |
 | `brief_path` | share `config/brief.md` | Permanent-context brief |
 | `prompts_dir` | share `prompts/` | Directory holding `compile.txt` |
 | `narrative_path` | `""` | Narrative history; empty → sibling of the real mission file (`<mission>.narrative.jsonl`) |

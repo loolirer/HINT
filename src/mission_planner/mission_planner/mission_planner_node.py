@@ -71,6 +71,7 @@ class MissionPlannerNode(Node):
         self.declare_parameter("max_env_cycles", 10)     # stuck backstop per environment
 
         self._lock = threading.Lock()
+        self._mission_path = os.path.abspath(self._p("mission_path"))  # runtime, switchable
         self._plan = None                       # the semantic plan dict (mission line)
         self._queue = []                        # remaining environments (head = current)
         self._visited = []                      # completed environments (for `back`)
@@ -81,8 +82,7 @@ class MissionPlannerNode(Node):
         self._served = False
 
         self._brief = self._read(self._p("brief_path"))
-        self._load_plan()
-        self._load_or_seed()
+        self._load_mission(self._mission_path)
 
         cbg = ReentrantCallbackGroup()
         self._reasoner = ActionClient(
@@ -114,6 +114,11 @@ class MissionPlannerNode(Node):
     def _advance_cb(self, goal_handle):
         with self._lock:
             req = goal_handle.request
+            # Per-call mission selection: switch missions if the goal points at a
+            # different YAML (resumes that mission's narrative if it already exists).
+            if req.mission_path and os.path.abspath(req.mission_path) != self._mission_path:
+                self.get_logger().info(f"Switching mission -> {req.mission_path}")
+                self._load_mission(req.mission_path)
             self._feedback(goal_handle, MissionAdvance, "RUNNING")
 
             trigger = None
@@ -247,37 +252,38 @@ class MissionPlannerNode(Node):
         return data
 
     def _outcome_text(self, req):
-        base = ("The last move executed successfully" if req.success
-                else "The last move failed or was interrupted")
+        base = ("I finished my last move" if req.success
+                else "My last move failed or was interrupted")
         if req.observation:
-            return f"{base}. Planner reasoning: {req.observation}"
+            return f"{base}. What I saw: {req.observation}"
         return base + "."
 
     def _context_text(self):
         """Only the current environment + a one-line peek — bounded regardless of
         how long or refined the queue is."""
-        lines = [f"Mission: {self._plan.get('mission', '')}"]
+        lines = [f"My mission: {self._plan.get('mission', '')}"]
         cur = self._current()
         if cur is None:
-            lines.append("All planned environments have been visited.")
+            lines.append("I have been through all my planned places.")
             return "\n".join(lines)
         desc = cur.get("description", "")
-        lines.append(f"Current environment: {cur['name']}"
+        lines.append(f"Where I am now: {cur['name']}"
                      + (f" — {desc}" if desc else ""))
         if cur.get("intent"):
-            lines.append(f"  Intent: {cur['intent']}")
+            lines.append(f"  What I need to do here: {cur['intent']}")
         peek = self._peek()
         if peek is not None:
-            lines.append(f"Next environment: {peek['name']}"
+            lines.append(f"Where I head next: {peek['name']}"
                          + (f" — {peek['intent']}" if peek.get("intent") else ""))
         else:
-            lines.append("Next environment: (none — the mission ends when this one is done)")
+            lines.append("Where I head next: (nowhere — I finish once I am done here)")
         return "\n".join(lines)
 
     def _narrative_text(self):
         # Only the accumulated `done` carries forward; `next` is regenerated and its
-        # result is already in {outcome}, so it is not echoed back.
-        return "done: {}".format(self._narrative.get("done", "") or "(nothing yet)")
+        # result is already in {outcome}, so it is not echoed back. The compile
+        # prompt frames this as "What I remember so far".
+        return self._narrative.get("done", "") or "(nothing yet)"
 
     # ------------------------------------------------------------------
     # Reasoner client
@@ -342,10 +348,18 @@ class MissionPlannerNode(Node):
     # ------------------------------------------------------------------
     # Persistence / IO
 
+    def _load_mission(self, path):
+        """(Re)load the mission at ``path`` and reset runtime state — or resume it
+        if that mission's narrative already exists. Switchable per ~/advance call."""
+        self._mission_path = os.path.abspath(path)
+        self._load_plan()
+        self._load_or_seed()
+        self._env_cycles = 0
+
     def _load_plan(self):
-        with open(self._p("mission_path"), "r") as f:
+        with open(self._mission_path, "r") as f:
             self._plan = yaml.safe_load(f)
-        self.get_logger().info(f"Loaded semantic plan from {self._p('mission_path')}.")
+        self.get_logger().info(f"Loaded semantic plan from {self._mission_path}.")
 
     def _seed_queue(self):
         return [{"name": e.get("name", ""),
@@ -380,6 +394,7 @@ class MissionPlannerNode(Node):
             self._narrative = {"done": "", "next": ""}
             self._version = -1
             self._served = False
+            self._failed = False
 
     def _append_snapshot(self, trigger, action):
         """Append a full snapshot — the versioned, git-like history (queue included)."""
@@ -420,7 +435,7 @@ class MissionPlannerNode(Node):
         # the --symlink-install symlink back to the source tree (editor-visible in a
         # dev workspace); on a plain copied install it is a no-op and they sit beside
         # the installed mission. Explicit narrative_path/log_path still override.
-        base, _ = os.path.splitext(os.path.realpath(self._p("mission_path")))
+        base, _ = os.path.splitext(os.path.realpath(self._mission_path))
         return base + suffix
 
     # ------------------------------------------------------------------

@@ -65,7 +65,7 @@ Every `.xml` file under `behaviors/` is installed to `share/hint_bt/behaviors` a
 | `sequential_bins_checked.xml` | `SequentialBinsChecked` | The bins mission with a VLM sanity check: two legs (blue, then yellow), each `RetryUntilSuccessful num_attempts="2"` over a `Fallback` — try `ApproachDescribedTarget`, and on its failure fall through to a `VisualQuestionAction` (each leg asks its own question). |
 | `follow_planned_trajectory.xml` | `FollowPlannedTrajectory` | Plans a ground trajectory from a text description (`PlanTrajectoryAction`), then follows it (`FollowTrajectoryAction`) — the trajectory-following twin of `ApproachDescribedTarget`. `PlanTrajectoryAction`'s `markers` output feeds `FollowTrajectoryAction`'s `waypoints` input via the `{markers}` blackboard entry; `description` is left as an unbound `{description}` reference, so it's meant to be driven as a `SubTree` that binds it from the caller. Also surfaces `{plan_message}` (the planner's VLM reasoning about the chosen path) as a blackboard entry a caller can remap out — e.g. `RunMission` logs it. |
 | `explore_ahead.xml` | `ExploreAhead` | Wander forward: `RetryUntilSuccessful num_attempts="3"` over a `SubTree` into `FollowPlannedTrajectory` — plans + follows a "head in the general direction ahead, keep to open floor, avoid obstacles, don't go too far; if blocked turn left or right (no preference)" trajectory, **re-planning and retrying** the whole leg up to 3 times if it fails (planning error / `occlusion_timeout`) and succeeding as soon as one leg completes. The exploration prompt is a literal `description` bound on the `SubTree`. |
-| `run_mission.xml` | `RunMission` | Drive a `mission_planner` mission to completion: a `KeepRunningUntilFailure` loop of `MissionAdvance` → `FollowPlannedTrajectory` → `SetBlackboard`. `MissionAdvance` is the whole node interface — each tick it reports the last move's outcome (`success` + the planner's VLM reasoning `{plan_message}` as `observation`) and returns the next directive; the `SetBlackboard` pair captures whether the follow succeeded into `{last_ok}` for the next tick. The node folds each outcome into its rolling narrative (one reasoner call) and decides the next instruction + completion, so the tree just loops report → execute → capture. There is no abort path — divergence is absorbed by the narrative — so the loop only ends on completion, mapped to overall `SUCCESS` by the outer `AlwaysSuccess`. Requires the `mission_planner` and `reasoner` nodes running. |
+| `run_mission.xml` | `RunMission` | Drive a `mission_planner` mission to completion: a `KeepRunningUntilFailure` loop of `MissionAdvance` → `FollowPlannedTrajectory` → `SetBlackboard`. `MissionAdvance` is the whole node interface — each tick it reports the last move's outcome (`success` + the planner's VLM reasoning `{plan_message}` as `observation`) and returns the next directive; the `SetBlackboard` pair captures whether the follow succeeded into `{last_ok}`. **Which mission runs is chosen at the call** via the `{mission}` port (a YAML path; empty → the node's startup default) — bind it in the payload to switch missions without restarting the node. The node folds each outcome into its rolling narrative (one reasoner call) and decides the next instruction + completion, so the tree just loops report → execute → capture. Divergence is absorbed by the narrative (no abort); the one failure path is the stuck backstop, so the outer `Precondition` maps a clean finish to `SUCCESS` and `{mission_failed}` to `FAILURE`. Requires the `mission_planner` and `reasoner` nodes running. |
 
 Preloading happens once, in the node constructor, before it starts spinning — editing a file under `behaviors/` needs a **node restart** to take effect (no rebuild, since `--symlink-install` mirrors `install(DIRECTORY behaviors/ ...)` straight to the source file).
 
@@ -116,12 +116,21 @@ ros2 action send_goal /bt_executor_node/execute_behavior_tree btcpp_ros2_interfa
 ### Run a mission
 
 `RunMission` (`behaviors/run_mission.xml`) drives a `mission_planner` mission to completion.
-It's preloaded, so it needs no `payload`; which mission runs is set by the `mission_planner`
-node's `mission_path` parameter, not the tree. Requires the `mission_planner` and `reasoner`
-nodes (and the `trajectory_planner`/`pursuit_servo` pipeline) running:
+Requires the `mission_planner` and `reasoner` nodes (and the `trajectory_planner`/`pursuit_servo`
+pipeline) running.
+
+**The node's startup default mission** (empty payload):
 
 ```bash
 ros2 action send_goal /bt_executor_node/execute_behavior_tree btcpp_ros2_interfaces/action/ExecuteTree "{target_tree: 'RunMission', payload: ''}" --feedback
+```
+
+**A specific mission, chosen at the call** — bind `mission` on a one-line wrapper `SubTree` into
+the preloaded `RunMission` (the node reloads it, resuming that mission's narrative if it exists; no
+node restart):
+
+```bash
+ros2 action send_goal /bt_executor_node/execute_behavior_tree btcpp_ros2_interfaces/action/ExecuteTree "$(jq -n --arg tree Mission --arg xml '<root BTCPP_format="4"><BehaviorTree ID="Mission"><SubTree ID="RunMission" mission="/root/turtlebot3_ws/src/mission_planner/missions/bedroom_to_living_room/mission.yaml"/></BehaviorTree></root>' '{target_tree: $tree, payload: $xml}')" --feedback
 ```
 
 ### Compose a one-off tree that reuses a preloaded `SubTree`

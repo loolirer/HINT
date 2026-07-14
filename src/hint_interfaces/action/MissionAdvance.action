@@ -2,6 +2,7 @@
 # (On the first call nothing has executed yet: success defaults true, observation empty.)
 bool success        # did the move just executed (plan + follow) succeed? (ignored on the first call)
 string observation  # grounded VLM feedback from the execution, verbatim (the planner's path reasoning)
+string mission_path # optional: load this mission YAML before advancing; empty keeps the current one
 ---
 # Result — the next directive
 bool mission_done    # true when the mission is over (complete OR failed)
