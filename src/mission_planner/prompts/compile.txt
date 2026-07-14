@@ -1,13 +1,14 @@
 # compile.txt — the single narrative-compile prompt for the reasoner, first-person.
 #
 # Structure: the STATIC block (brief + instructions) comes first and the VARIABLE
-# inputs (environment, memory, outcome) come last, so the static prefix can be
-# cached across cycles. The JSON shape is NOT written here — the reasoner node
+# inputs (environment, situation, memory, outcome) come last, so the static prefix
+# can be cached across cycles. The JSON shape is NOT written here — the reasoner node
 # appends it from the `schema` field, so it is sent exactly once.
 #
 # Tokens (literal {name}, substring-substituted by the node — NOT str.format):
 #   {brief}        config/brief.md, verbatim (who I am + how I navigate)
 #   {environment}  the place I'm in now (name/look/what to do) + a one-line peek at the next
+#   {situation}    my current standing — where I was / what I faced after my last move
 #   {narrative}    what I remember so far (done)
 #   {outcome}      what I just saw and did (empty on my first move)
 # ---------------------------------------------------------------------------
@@ -22,6 +23,9 @@ I move through my planned places ONE at a time, in order — I do not choose or 
 report my progress and, when what I see calls for it, adjust my route by one of a fixed set of
 moves. Each time I return:
 
+- "situation": where I am and what I am facing RIGHT NOW — 1-2 sentences, my immediate standing
+  after my last move (which way I face, what is in front of me, what is nearby). I REWRITE it fresh
+  each move from what I just saw; it is the present moment, not my history.
 - "done": what I have accomplished so far, <=3 sentences of gist. I abstract older and redundant
   detail, and I trust what I actually SAW over what I merely guessed.
 - "next": ONE concrete instruction for me to drive next — a place to go and how to get there on
@@ -41,6 +45,9 @@ moves. Each time I return:
 --- WHERE I AM ---
 
 {environment}
+
+Where I stood after my last move:
+{situation}
 
 What I remember so far:
 {narrative}
