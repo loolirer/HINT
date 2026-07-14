@@ -135,6 +135,11 @@ class MissionPlannerNode(Node):
                 self.get_logger().warn(result.message)
                 return result
 
+            if self._version >= 0 and not os.path.exists(self._narrative_path()):
+                self.get_logger().info(
+                    "Narrative file missing — restarting the mission from scratch.")
+                self._load_mission(self._mission_path)
+
             self._feedback(goal_handle, MissionAdvance, "RUNNING")
 
             trigger = None
