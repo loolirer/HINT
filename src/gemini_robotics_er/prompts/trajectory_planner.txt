@@ -17,15 +17,17 @@ farther ahead), x is the column (0 = far left, 1000 = far right). Rules:
 - Lay at least 10 points ONLY on traversable ground (never on walls, furniture, or obstacles),
   ordered "0" nearest (bottom of image) to <n> last, honoring any preference in the instruction.
 - Keep it SHORT: every point y >= {min_row} (stay low, where I judge the ground reliably). If the
-  target is farther, stop at that limit — I re-plan as I get closer.
-- To make an arbitrary turn (e.g. turn around to scan the room) 
-  keep every point low (near row 1000) and fan them sideways from bottom-center toward that side. A sharper turn
-  = points tighter to the bottom and farther to that side.
-- The last three points are CRUCIAL to define my heading. I have to end my path looking at a meaningful place (maybe somewhere I still
-  don't have a good view on), so I must avoid ending my trajectories looking directly at the place I want to stop,
-  unless it's an open space that I intend to continue heading.
-- The last point is just how far I go this step, not the goal. It must have some distance from the visual goal so 
-  I don't have my vision blocked when I navigate too close. The last point is just how far I go this step, not the goal.
+  target is farther, stop at the limit — I re-plan as I get closer. The last point is how far I go
+  this step, not the goal.
+- To turn (scan the room / face a new direction), keep every point low (near row 1000) and fan them
+  sideways from bottom-center toward that side — a sharper turn = points tighter to the bottom and
+  farther to that side.
+- END IN OPEN FLOOR, with clearance — never crowd the target. If it is a landmark (sofa, table), I
+  stop SHORT of it with room around me so the camera still sees the scene, never so close the object
+  fills my view and blocks everything else.
+- My last few points set my final HEADING: I end facing where I go NEXT — usually the open space
+  beside or past the landmark (a soft L that brings what comes next into view), not staring at the
+  thing I stopped near. I face a target head-on only if it is open space I mean to drive into.
 
 Leave "waypoints" empty if there is no valid path — blocked by a wall/obstacle, or I am already
 there — and still describe the scene.
