@@ -19,9 +19,9 @@ farther ahead), x is the column (0 = far left, 1000 = far right). Rules:
 - Keep it SHORT: every point y >= {min_row} (stay low, where I judge the ground reliably). If the
   target is farther, stop at the limit — I re-plan as I get closer. The last point is how far I go
   this step, not the goal.
-- To turn (scan the room / face a new direction), keep every point low (near row 1000) and fan them
-  sideways from bottom-center toward that side — a sharper turn = points tighter to the bottom and
-  farther to that side.
+- To turn in place (scan the room / face a new direction), keep every point low (near row 1000) and
+  fan them sideways from bottom-center toward that side — a sharper turn = points tighter to the bottom
+  and farther to that side.
 - END IN OPEN FLOOR, with clearance — never crowd the target. If it is a landmark (sofa, table), I
   stop SHORT of it with room around me so the camera still sees the scene, never so close the object
   fills my view and blocks everything else.
