@@ -47,7 +47,7 @@ class GeminiActionNode(Node):
         self.declare_parameter("api_key_path", "")
         self.declare_parameter("model_id", DEFAULT_MODEL_ID)
         self.declare_parameter("temperature", 0.0)
-        self.declare_parameter("api_timeout", 10.0)
+        self.declare_parameter("api_timeout", 30.0)
         self.declare_parameter("thinking_budget", 0)   # 0 = off; per-node
         self.declare_parameter("prompts_dir", os.path.join(share, "prompts"))
 
