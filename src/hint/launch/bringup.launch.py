@@ -114,9 +114,7 @@ def generate_launch_description():
         output="screen",
         parameters=[{
             "api_key_path": "/root/secrets/gemini_api_key.txt",
-            "model_id": "gemini-2.5-flash",
-            # The mission narrative compile is reasoning-heavy — give it a
-            # thinking budget (tokens; 0 = off, -1 = dynamic). Tune for cost/quality.
+            "model_id": "gemini-robotics-er-1.6-preview",
             "thinking_budget": -1,
         }],
     )
