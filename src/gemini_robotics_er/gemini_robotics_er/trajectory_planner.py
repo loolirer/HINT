@@ -19,7 +19,7 @@ class TrajectoryPlannerNode(GeminiActionNode):
         # Farthest image row (of 1000) a waypoint may occupy — caps how far ahead
         # the trajectory reaches. Smaller row = farther/higher in the frame = more
         # error-prone; larger = nearer/more conservative. Live-adjustable.
-        self.declare_parameter("min_row", 750)
+        self.declare_parameter("min_row", 600)
 
         self._debug_pub = self.create_publisher(Image, "~/debug", 10)
 
