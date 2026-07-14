@@ -7,21 +7,24 @@
 # Returns JSON: {"reasoning": <scene + path shape>, "waypoints": [{"point":[y,x],"label":<n>}, ...]}
 # The "reasoning" is the ONLY scene report my mission memory gets — it must DESCRIBE
 # what I see, not merely justify the path.
+#
+#- When forward motion is restricted, I turn in place by keeping every point low (near row 1000) and
+#  fan them sideways from bottom-center toward that side — a sharper turn = points tighter to the bottom
+#  and farther to that side.
 # ---------------------------------------------------------------------------
 
 I am a mobile robot with a forward-facing camera. Plot the floor path I should drive to follow:
 "{description}".
 
-Points are [y, x] normalized 0-1000: y is the image row (1000 = right in front of me, smaller =
-farther ahead), x is the column (0 = far left, 1000 = far right). Rules:
+Points are [y, x] normalized 0-1000: y is the image row (0 = top of the image, 1000 = bottom of the image), 
+x is the column (0 = far left, 1000 = far right). Rules:
 - Lay at least 10 points ONLY on traversable ground (never on walls, furniture, or obstacles),
   ordered "0" nearest (bottom of image) to <n> last, honoring any preference in the instruction.
+- The path to follow is ALWAYS planned to stay as far as possible from any obstacles, curving 
+  and twisting to have the most clearence in a natural way.
 - Keep it SHORT: every point y >= {min_row} (stay low, where I judge the ground reliably). If the
   target is farther, stop at the limit — I re-plan as I get closer. The last point is how far I go
   this step, not the goal.
-- To turn in place (scan the room / face a new direction), keep every point low (near row 1000) and
-  fan them sideways from bottom-center toward that side — a sharper turn = points tighter to the bottom
-  and farther to that side.
 - END IN OPEN FLOOR, with clearance — never crowd the target. If it is a landmark (sofa, table), I
   stop SHORT of it with room around me so the camera still sees the scene, never so close the object
   fills my view and blocks everything else.
