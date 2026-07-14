@@ -1,0 +1,13 @@
+# description_detector.txt — ground a text description to one bounding box.
+#
+# Tokens: {description}  the region to locate
+# Returns JSON: [{"box_2d": [ymin, xmin, ymax, xmax], "label": "<label>"}]  (or [])
+# ---------------------------------------------------------------------------
+
+Return a single bounding box for: "{description}".
+Return [] if the described region is not visible.
+
+JSON only, no markdown fencing:
+[{"box_2d": [ymin, xmin, ymax, xmax], "label": "<label>"}]
+
+Coordinates normalized to 0-1000, integer values only.

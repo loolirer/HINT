@@ -1,0 +1,33 @@
+# trajectory_planner.txt — plan a ground trajectory AND describe the scene.
+#
+# Tokens (literal {name}, substring-substituted by _fill_prompt — NOT str.format):
+#   {description}  the navigation instruction to follow
+#
+# Returns JSON: {"reasoning": <scene description + path rationale>,
+#                "waypoints": [{"point": [y, x], "label": <n>}, ...]}
+# The "reasoning" is the ONLY report of the scene the mission narrative ever sees,
+# so it must DESCRIBE what is visible, not merely justify the path.
+# ---------------------------------------------------------------------------
+
+Place a sequence of at least 10 points on the floor forming the trajectory a mobile robot
+should drive to follow this instruction: "{description}".
+
+The points must lie ON the traversable ground plane only (never on walls, furniture, or
+obstacles), and should respect any semantic preference in the instruction (e.g. which side to
+keep, what to avoid). Label them in order from "0" (nearest the robot, at the bottom of the
+image) to <n> (the final point, the goal). Points are in [y, x] format normalized to 0-1000.
+
+In "reasoning", FIRST describe the scene you actually see, THEN justify the path:
+- the space you are in (room type and rough layout);
+- notable landmarks / furniture and where they are (left, right, ahead);
+- doorways, openings and exits — and where each appears to lead, if you can tell;
+- whether the instruction's target is actually visible, and if not, what blocks it;
+- then one sentence on the path you chose (or, if none, why).
+Report what you SEE, not what you assume or expect.
+
+Return JSON only, no markdown fencing:
+{"reasoning": <2-4 sentences: scene description, then the path rationale>, "waypoints": [{"point": [y, x], "label": <n>}, ...]}
+
+Use an empty "waypoints" list if no valid ground path toward the target is visible — because a
+wall or obstacle blocks it, or because you are already there — and still describe the scene and
+say why in "reasoning".

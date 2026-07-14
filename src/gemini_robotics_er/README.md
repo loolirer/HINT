@@ -11,7 +11,9 @@ ROS2 package of nodes powered by the Gemini Robotics-ER model for HINT.
 | `trajectory_planner` | Plans a ground-restricted trajectory (ordered waypoints) from a text instruction |
 | `reasoner` | Generic text-in / JSON-out LLM reasoner (no camera) — the mission planner's reasoning backend |
 
-Shared plumbing (API-key loading + client, stamped camera ring buffer, timeout-guarded API call, single-goal action lifecycle) lives in `gemini_robotics_er/gemini_base.py` as `GeminiActionNode`; each executable subclasses it.
+Shared plumbing (API-key loading + client, stamped camera ring buffer, timeout-guarded API call, single-goal action lifecycle, **prompt-template loading**) lives in `gemini_robotics_er/gemini_base.py` as `GeminiActionNode`; each executable subclasses it.
+
+**Prompt templates.** Each node's prompt is an external `.txt` file under `prompts/` (installed to the package share), loaded and filled via `GeminiActionNode._fill_prompt(name, **tokens)` — the same convention as `mission_planner`'s `compile.txt`: a `#` comment header (stripped), literal `{token}` substitution (not `str.format`, so the JSON braces in the body need no `{{ }}` escaping). Edit a prompt and restart the node (no rebuild, with `--symlink-install`). Point `prompts_dir` elsewhere to override.
 
 ## Usage
 
@@ -65,6 +67,8 @@ Converts a text description into a bounding box (ROI) using the Gemini Robotics-
 | `model_id` | `gemini-robotics-er-1.6-preview` | Gemini model to use |
 | `temperature` | `0.0` | Sampling temperature (0.0 for deterministic output) |
 | `api_timeout` | `10.0` | Seconds before the API call is abandoned and the action is aborted |
+| `thinking_budget` | `0` | Gemini thinking budget in tokens (`0` = off). Per-node — raise it for a reasoning-heavy node (e.g. the `reasoner`), leave `0` for the perception nodes |
+| `prompts_dir` | package `share/prompts` | Directory the node loads its prompt template from |
 
 ### Test
 
@@ -103,7 +107,7 @@ Like `description_detector`, it keeps a ring buffer of the last 30 frames; the g
 
 ### Parameters
 
-Parameters are the same as `description_detector` (`api_key_path`, `model_id`, `temperature`, `api_timeout`).
+Parameters are the same as `description_detector` (`api_key_path`, `model_id`, `temperature`, `api_timeout`, `thinking_budget`, `prompts_dir`).
 
 ### Test
 
@@ -120,6 +124,15 @@ ros2 action send_goal /visual_question_node/ask \
 Plans a **ground-restricted trajectory** from a natural-language instruction using Gemini Robotics-ER's point-defining capability. Given a description (e.g. *"walk to the door keeping to the right of the wall"* or *"reach the table without going over the mattress"*), it returns an ordered set of floor waypoints (`markers`) — `visual_tracker/waypoint_tracker` then tracks them in the image and `visual_servoing/pursuit_servo` follows them by pure pursuit (the `FollowPlannedTrajectory` behavior in `hint_bt` chains the plan → follow). This opens room for semantic navigation preferences and constraint-aware waypoint generation.
 
 Built as a sibling of `description_detector`: same inputs (a camera `stamp` + a text field) and the same stamp-based ring buffer / API plumbing (both subclass `GeminiActionNode`). Instead of one bounding box it grounds an **ordered marker array in normalized image space** (`geometry_msgs/Point[]`, `x`/`y ∈ [-1, 1]` (center 0), `z` unused, `markers[0]` nearest → `markers[-1]` farthest) plus the frame `stamp`. The model is prompted to keep points on the traversable ground plane, ordered nearest→farthest, and to honor any semantic preference in the instruction.
+
+> **The `reasoning` field is a scene report, not just a path justification.** The prompt
+> (`prompts/trajectory_planner.txt`) asks the model to first *describe what it sees* — room type,
+> landmarks and their side, doorways/exits and where they lead, whether the target is visible —
+> then justify the path. That `reasoning` rides out on the result `message` and is the **only**
+> view of the scene the `mission_planner` narrative gets, so it is what drives environment
+> descriptions, corridor discovery (`insert`), and re-orientation. On an empty `waypoints` list
+> (wall / already there) the node aborts, but the scene report still reaches the caller (via
+> `hint_bt`'s two-arg `onFailure`).
 
 ### Interfaces
 
@@ -143,7 +156,7 @@ Built as a sibling of `description_detector`: same inputs (a camera `stamp` + a 
 
 ### Parameters
 
-Parameters are the same as `description_detector` (`api_key_path`, `model_id`, `temperature`, `api_timeout`).
+Parameters are the same as `description_detector` (`api_key_path`, `model_id`, `temperature`, `api_timeout`, `thinking_budget`, `prompts_dir`).
 
 ### Test
 
@@ -204,7 +217,8 @@ files) and this node stays prompt-free — text in, JSON out.
 ### Parameters
 
 Parameters are the same as `description_detector` (`api_key_path`, `model_id`,
-`temperature`, `api_timeout`).
+`temperature`, `api_timeout`, `thinking_budget`, `prompts_dir`). For the reasoner's
+narrative-heavy compile you may want a non-zero `thinking_budget`.
 
 ### Test
 

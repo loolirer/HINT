@@ -1,0 +1,11 @@
+# visual_question.txt — a yes/no VLM check over one frame.
+#
+# Tokens: {question}  the yes/no question to answer
+# Returns JSON: {"answer": "yes"|"no", "rationale": "<one short sentence>"}
+# ---------------------------------------------------------------------------
+
+Look at the image and answer this yes/no question: "{question}".
+Answer only about what is actually visible in this image.
+
+Respond with JSON only, no markdown fencing:
+{"answer": "yes" or "no", "rationale": "<one short sentence>"}

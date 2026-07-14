@@ -11,23 +11,6 @@ from sensor_msgs.msg import Image
 
 from gemini_robotics_er.gemini_base import GeminiActionNode
 
-_TRAJECTORY_PROMPT = (
-    "Place a sequence of at least 10 points on the floor forming the trajectory a mobile "
-    'robot should drive to follow this instruction: "{description}". '
-    "The points must lie ON the traversable ground plane only (never on walls, "
-    "furniture, or obstacles), and should respect any semantic preference in "
-    "the instruction (e.g. which side to keep, what to avoid). "
-    "The points should be labeled by order of the trajectory, from '0' "
-    "(start point, nearest to the robot at the bottom of the image) to <n> "
-    "(final point, the goal). "
-    "The answer should follow the json format: "
-    '{{"reasoning": <one or two sentences explaining the chosen path>, '
-    '"waypoints": [{{"point": <point>, "label": <label>}}, ...]}}. '
-    "The points are in [y, x] format normalized to 0-1000. "
-    "Use an empty waypoints list if no valid ground path is visible, and still "
-    "explain why in reasoning."
-)
-
 
 class TrajectoryPlannerNode(GeminiActionNode):
     def __init__(self):
@@ -69,7 +52,7 @@ class TrajectoryPlannerNode(GeminiActionNode):
         if goal_handle.is_cancel_requested:
             return self._cancel(goal_handle)
 
-        prompt = _TRAJECTORY_PROMPT.format(description=goal.description)
+        prompt = self._fill_prompt("trajectory_planner.txt", description=goal.description)
         try:
             raw = self._call_api([pil_img, prompt])
         except TimeoutError as e:

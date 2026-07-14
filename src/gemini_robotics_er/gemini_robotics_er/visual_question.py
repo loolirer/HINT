@@ -9,16 +9,6 @@ from sensor_msgs.msg import Image
 
 from gemini_robotics_er.gemini_base import GeminiActionNode
 
-# A yes/no sanity-check over a single frame. Kept deliberately strict so the
-# answer maps cleanly onto action success/failure, with a one-line rationale
-# the behavior tree can log or branch on.
-_QUESTION_PROMPT = (
-    'Look at the image and answer this yes/no question: "{question}". '
-    "Answer only about what is actually visible in this image. "
-    "Respond with JSON only — no markdown fencing: "
-    '{{"answer": "yes" or "no", "rationale": "<one short sentence>"}}.'
-)
-
 
 class VisualQuestionNode(GeminiActionNode):
     """Answers a yes/no question about a camera frame with a VLM.
@@ -80,7 +70,7 @@ class VisualQuestionNode(GeminiActionNode):
         if goal_handle.is_cancel_requested:
             return self._cancel(goal_handle)
 
-        prompt = _QUESTION_PROMPT.format(question=goal.question)
+        prompt = self._fill_prompt("visual_question.txt", question=goal.question)
         try:
             raw = self._call_api([pil_img, prompt])
         except TimeoutError as e:

@@ -14,6 +14,7 @@ import threading
 from collections import deque
 
 import cv2
+from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 from google import genai
 from google.genai import types
@@ -42,10 +43,13 @@ class GeminiActionNode(Node):
     ):
         super().__init__(node_name)
 
+        share = get_package_share_directory("gemini_robotics_er")
         self.declare_parameter("api_key_path", "")
         self.declare_parameter("model_id", DEFAULT_MODEL_ID)
         self.declare_parameter("temperature", 0.0)
         self.declare_parameter("api_timeout", 10.0)
+        self.declare_parameter("thinking_budget", 0)   # 0 = off; per-node
+        self.declare_parameter("prompts_dir", os.path.join(share, "prompts"))
 
         self._client = genai.Client(api_key=self._load_api_key())
         self._bridge = CvBridge()
@@ -134,7 +138,8 @@ class GeminiActionNode(Node):
                     contents=contents,
                     config=types.GenerateContentConfig(
                         temperature=float(self._p("temperature")),
-                        thinking_config=types.ThinkingConfig(thinking_budget=0),
+                        thinking_config=types.ThinkingConfig(
+                            thinking_budget=int(self._p("thinking_budget"))),
                     ),
                 )
             except Exception as e:  # noqa: BLE001 — surfaced to caller
@@ -182,3 +187,19 @@ class GeminiActionNode(Node):
 
     def _p(self, name):
         return self.get_parameter(name).value
+
+    def _fill_prompt(self, name, **tokens):
+        """Load ``prompts_dir/name`` and substitute ``{token}`` placeholders.
+
+        Mirrors the mission_planner: the leading ``#`` comment header is stripped
+        and placeholders are literal ``{name}`` substrings (NOT ``str.format``), so
+        the literal JSON braces in the body need no escaping. Editing a template
+        takes effect on node restart (no rebuild, with ``--symlink-install``).
+        """
+        with open(os.path.join(self._p("prompts_dir"), name), "r") as f:
+            text = f.read()
+        body = "\n".join(ln for ln in text.splitlines()
+                         if not ln.lstrip().startswith("#"))
+        for key, value in tokens.items():
+            body = body.replace("{" + key + "}", str(value))
+        return body.strip()
