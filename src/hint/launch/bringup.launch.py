@@ -82,28 +82,43 @@ def generate_launch_description():
         package="gemini_robotics_er",
         executable="description_detector",
         output="screen",
-        parameters=[{"api_key_path": "/root/secrets/gemini_api_key.txt"}],
+        parameters=[{
+            "api_key_path": "/root/secrets/gemini_api_key.txt",
+            "model_id": "gemini-robotics-er-1.6-preview",
+        }],
     )
 
     visual_question = Node(
         package="gemini_robotics_er",
         executable="visual_question",
         output="screen",
-        parameters=[{"api_key_path": "/root/secrets/gemini_api_key.txt"}],
+        parameters=[{
+            "api_key_path": "/root/secrets/gemini_api_key.txt",
+            "model_id": "gemini-robotics-er-1.6-preview",
+        }],
     )
 
     trajectory_planner = Node(
         package="gemini_robotics_er",
         executable="trajectory_planner",
         output="screen",
-        parameters=[{"api_key_path": "/root/secrets/gemini_api_key.txt"}],
+        parameters=[{
+            "api_key_path": "/root/secrets/gemini_api_key.txt",
+            "model_id": "gemini-robotics-er-1.6-preview",
+        }],
     )
 
     reasoner = Node(
         package="gemini_robotics_er",
         executable="reasoner",
         output="screen",
-        parameters=[{"api_key_path": "/root/secrets/gemini_api_key.txt"}],
+        parameters=[{
+            "api_key_path": "/root/secrets/gemini_api_key.txt",
+            "model_id": "gemini-2.5-flash",
+            # The mission narrative compile is reasoning-heavy — give it a
+            # thinking budget (tokens; 0 = off, -1 = dynamic). Tune for cost/quality.
+            "thinking_budget": -1,
+        }],
     )
 
     mission_planner = Node(
