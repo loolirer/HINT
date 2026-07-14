@@ -1,41 +1,40 @@
-# trajectory_planner.txt — plan a ground trajectory AND describe the scene, first-person.
+# trajectory_planner.txt — plan a short ground path AND describe the scene, first-person.
 #
 # Tokens (literal {name}, substring-substituted by _fill_prompt — NOT str.format):
 #   {description}  the navigation instruction to follow
-#   {min_row}      farthest image row (of 1000) a point may occupy (reach cap)
+#   {min_row}      reach cap — every point must have y >= this (of 1000)
 #
-# Returns JSON: {"reasoning": <what I see + why this path>,
-#                "waypoints": [{"point": [y, x], "label": <n>}, ...]}
-# The "reasoning" is the ONLY report of the scene my mission memory ever gets, so it
-# must DESCRIBE what is visible from my viewpoint, not merely justify the path.
+# Returns JSON: {"reasoning": <scene + path shape>, "waypoints": [{"point":[y,x],"label":<n>}, ...]}
+# The "reasoning" is the ONLY scene report my mission memory gets — it must DESCRIBE
+# what I see, not merely justify the path.
 # ---------------------------------------------------------------------------
 
-I am a mobile robot looking through my forward-facing camera. Plot the path I should drive to
-follow this instruction: "{description}".
+I am a mobile robot with a forward-facing camera. Plot the floor path I should drive to follow:
+"{description}".
 
-Place a sequence of at least 10 points on the floor along that path. They must lie ON the
-traversable ground in front of me (never on walls, furniture, or obstacles), and honor any
-preference in the instruction (which side to keep, what to avoid). Label them in order from "0"
-(closest to me, at the bottom of the image) to <n> (the last point). Points are [y, x] normalized
-to 0-1000, where y is the image row: 1000 is right in front of me, and smaller y is farther ahead.
+Points are [y, x] normalized 0-1000: y is the image row (1000 = right in front of me, smaller =
+farther ahead), x is the column (0 = far left, 1000 = far right). Rules:
+- Lay at least 10 points ONLY on traversable ground (never on walls, furniture, or obstacles),
+  ordered "0" nearest (bottom of image) to <n> last, honoring any preference in the instruction.
+- Keep it SHORT: every point y >= {min_row} (stay low, where I judge the ground reliably). If the
+  target is farther, stop at that limit — I re-plan as I get closer.
+- To make an arbitrary turn (e.g. turn around to scan the room) 
+  keep every point low (near row 1000) and fan them sideways from bottom-center toward that side. A sharper turn
+  = points tighter to the bottom and farther to that side.
+- The last three points are CRUCIAL to define my heading. I have to end my path looking at a meaningful place (maybe somewhere I still
+  don't have a good view on), so I must avoid ending my trajectories looking directly at the place I want to stop,
+  unless it's an open space that I intend to continue heading.
+- The last point is just how far I go this step, not the goal. It must have some distance from the visual goal so 
+  I don't have my vision blocked when I navigate too close. The last point is just how far I go this step, not the goal.
 
-Keep the trajectory SHORT and conservative. Place NO point above row {min_row} — every point must
-have y >= {min_row}. Stay in the nearer, lower part of the image, where the ground is close and I
-can judge it reliably; the farther a point is (smaller y, toward the top), the less accurately I
-can place it. If my target is farther than that, do NOT try to reach it in one plan: lay a short
-path toward it and stop at the reach limit — I will re-plan and continue as I get closer. The last
-point is just how far I go this step, not necessarily the final goal.
+Leave "waypoints" empty if there is no valid path — blocked by a wall/obstacle, or I am already
+there — and still describe the scene.
 
-In "reasoning", FIRST describe what I actually see around me, THEN why I chose this path:
-- the space I'm in (room type and rough layout);
-- landmarks and furniture, and where they are relative to me (ahead, to my left, to my right);
-- doorways and exits I can see — and where each seems to lead, if I can tell;
-- whether my target is actually in view, and if not, what is blocking me from it;
-- then one sentence on the path I'm taking (or, if there is none, why).
-Report what I SEE, not what I assume or expect.
+In "reasoning" (2-4 sentences), FIRST what I actually SEE (not what I assume): the room type and
+layout; landmarks/furniture and their side (left / right / ahead); doorways or exits and where each
+leads if I can tell; whether my target is in view, and if not what blocks it. THEN one short sentence
+naming the SHAPE of the path I laid — e.g. "straight ahead a bit", "a soft curve left around the
+chair", "a sharp right toward the door".
 
 Return JSON only, no markdown fencing:
-{"reasoning": <2-4 sentences: what I see, then my path>, "waypoints": [{"point": [y, x], "label": <n>}, ...]}
-
-Leave "waypoints" empty if there is no valid ground path toward my target — a wall or obstacle is
-in the way, or I am already there — and still describe what I see and say why in "reasoning".
+{"reasoning": <what I see, then the path shape>, "waypoints": [{"point": [y, x], "label": <n>}, ...]}
