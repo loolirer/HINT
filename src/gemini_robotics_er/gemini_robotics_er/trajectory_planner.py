@@ -16,6 +16,11 @@ class TrajectoryPlannerNode(GeminiActionNode):
     def __init__(self):
         super().__init__("trajectory_planner_node")
 
+        # Farthest image row (of 1000) a waypoint may occupy — caps how far ahead
+        # the trajectory reaches. Smaller row = farther/higher in the frame = more
+        # error-prone; larger = nearer/more conservative. Live-adjustable.
+        self.declare_parameter("min_row", 750)
+
         self._debug_pub = self.create_publisher(Image, "~/debug", 10)
 
         self._action_server = ActionServer(
@@ -52,7 +57,9 @@ class TrajectoryPlannerNode(GeminiActionNode):
         if goal_handle.is_cancel_requested:
             return self._cancel(goal_handle)
 
-        prompt = self._fill_prompt("trajectory_planner.txt", description=goal.description)
+        prompt = self._fill_prompt(
+            "trajectory_planner.txt", description=goal.description,
+            min_row=int(self._p("min_row")))
         try:
             raw = self._call_api([pil_img, prompt])
         except TimeoutError as e:
@@ -115,12 +122,17 @@ class TrajectoryPlannerNode(GeminiActionNode):
         Each returned ``Point`` has ``x``/``y`` in ``[-1, 1]`` (image space,
         center = 0), ``z`` unused. Malformed entries are skipped.
         """
+        min_row = int(self._p("min_row"))
         markers = []
         for p in points:
             pt = p.get("point") if isinstance(p, dict) else None
             if not (isinstance(pt, (list, tuple)) and len(pt) == 2):
                 continue
             y, x = pt
+            # Hard cap on forward reach: pull any point past the limit (too far /
+            # too high in the frame) down to min_row. Far points are where the VLM's
+            # ground grounding is least reliable; this backstops the prompt.
+            y = max(float(y), float(min_row))
             marker = Point()
             marker.x = float(min(max(2.0 * x / 1000.0 - 1.0, -1.0), 1.0))
             marker.y = float(min(max(2.0 * y / 1000.0 - 1.0, -1.0), 1.0))
