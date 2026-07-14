@@ -60,7 +60,8 @@ class MissionPlannerNode(Node):
 
         share = get_package_share_directory("mission_planner")
         self.declare_parameter(
-            "mission_path", os.path.join(share, "missions", "apartment_tidy.yaml"))
+            "mission_path",
+            os.path.join(share, "missions", "apartment_tidy", "mission.yaml"))
         self.declare_parameter("brief_path", os.path.join(share, "config", "brief.md"))
         self.declare_parameter("prompts_dir", os.path.join(share, "prompts"))
         self.declare_parameter("narrative_path", "")   # empty -> <mission>.narrative.jsonl
@@ -415,7 +416,11 @@ class MissionPlannerNode(Node):
         return self._p("log_path") or self._sibling(".log.jsonl")
 
     def _sibling(self, suffix):
-        base, _ = os.path.splitext(self._p("mission_path"))
+        # Artifacts live next to the *real* mission file. os.path.realpath resolves
+        # the --symlink-install symlink back to the source tree (editor-visible in a
+        # dev workspace); on a plain copied install it is a no-op and they sit beside
+        # the installed mission. Explicit narrative_path/log_path still override.
+        base, _ = os.path.splitext(os.path.realpath(self._p("mission_path")))
         return base + suffix
 
     # ------------------------------------------------------------------

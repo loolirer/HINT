@@ -1,0 +1,4 @@
+# Runtime artifacts written by mission_planner_node next to the mission — not source.
+*.narrative.jsonl
+*.log.jsonl
+*.state.yaml

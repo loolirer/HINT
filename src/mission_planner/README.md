@@ -32,7 +32,7 @@ on forever.
 ```
 mission_planner/
   mission_planner/mission_planner_node.py  # the narrative-director node
-  missions/apartment_tidy.yaml             # a Semantic Plan (the static prior)
+  missions/apartment_tidy/mission.yaml     # a Semantic Plan (one dir per mission)
   prompts/compile.txt                      # the single narrative-compile prompt
   config/brief.md                          # permanent context: capabilities + rules + policy
   README.md                                # this file — single source of truth
@@ -43,10 +43,17 @@ colcon build --symlink-install --packages-select hint_interfaces mission_planner
 source install/setup.bash
 ```
 
-At runtime the node writes two append-only siblings next to the mission YAML:
-`<mission>.narrative.jsonl` (the versioned narrative history) and `<mission>.log.jsonl` (the raw
-action log). On startup it **resumes** from the tail of `<mission>.narrative.jsonl` if it exists;
-delete that file to start the mission fresh.
+Each mission lives in its **own directory** (`missions/<name>/mission.yaml`) so its runtime
+artifacts stay grouped with it. The node writes two append-only siblings next to the mission
+YAML: `mission.narrative.jsonl` (the versioned narrative history) and `mission.log.jsonl` (the raw
+action log). On startup it **resumes** from the tail of the narrative if it exists; delete that
+file to start fresh.
+
+The siblings are written next to the **real** mission file: `os.path.realpath` resolves the
+`--symlink-install` symlink back to the source tree, so in a dev workspace they appear in
+`src/mission_planner/missions/<name>/` (editor-visible); on a plain copied install they sit
+beside the installed mission. They are `.gitignore`d. (Set `narrative_path`/`log_path` to
+redirect them anywhere else.)
 
 ## The loop, in one line
 
@@ -168,11 +175,11 @@ or the failure reason). On the first call nothing has executed (`success` defaul
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `mission_path` | share `missions/apartment_tidy.yaml` | Semantic Plan to run |
+| `mission_path` | share `missions/apartment_tidy/mission.yaml` | Semantic Plan to run |
 | `brief_path` | share `config/brief.md` | Permanent-context brief |
 | `prompts_dir` | share `prompts/` | Directory holding `compile.txt` |
-| `narrative_path` | `""` | Narrative history; empty → `<mission>.narrative.jsonl` sibling |
-| `log_path` | `""` | Raw log; empty → `<mission>.log.jsonl` sibling |
+| `narrative_path` | `""` | Narrative history; empty → sibling of the real mission file (`<mission>.narrative.jsonl`) |
+| `log_path` | `""` | Raw log; empty → sibling of the real mission file (`<mission>.log.jsonl`) |
 | `reasoner_action` | `/reasoner_node/reason` | Reasoner action name |
 | `reasoner_timeout` | `30.0` | Seconds to wait on the reasoner call |
 | `max_env_cycles` | `8` | Cycles on one environment before the mission fails (stuck backstop) |
@@ -203,7 +210,7 @@ ros2 action send_goal /mission_planner_node/advance hint_interfaces/action/Missi
 Watch the narrative evolve — every call appends one snapshot:
 
 ```bash
-tail -f missions/apartment_tidy.narrative.jsonl | jq .
+tail -f src/mission_planner/missions/apartment_tidy/mission.narrative.jsonl | jq .
 ```
 
 Delete the `.narrative.jsonl` to restart the mission from scratch.
