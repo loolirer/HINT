@@ -1,0 +1,15 @@
+# My trip: bedroom -> hallway -> living room, ending by the couch.
+# Environments are hard rails: I visit them in this order, one at a time.
+
+mission: "Get from the bedroom to the living room and stop by the couch."
+
+environments:
+  - name: bedroom
+    description: "A bedroom; my way out is an open door."
+    intent: "Drive to the open door and out of the bedroom, turning left toward the hallway."
+  - name: hallway
+    description: "A small hallway linking the bedroom to the living room."
+    intent: "Cross the hallway to the living-room entrance."
+  - name: living_room
+    description: "A living room with a couch."
+    intent: "Enter the living room and stop on the open floor in front of the couch."
