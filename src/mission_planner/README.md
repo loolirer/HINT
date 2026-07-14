@@ -8,8 +8,19 @@ reasoning) into the narrative, and emit the next instruction.
 
 There are **no discrete steps, statuses, retries or pass/fail judging**. The old model outlined
 a happy path and read every divergence as failure, forcing constant replanning; here divergence
-is the normal material the narrative absorbs. Completion is a narrative judgment, not a checklist
-exhausted.
+is the normal material the narrative absorbs.
+
+**The environment queue.** Order is owned by *code*, not the model. The node holds a FIFO queue
+of environments (head = current) plus a stack of visited ones. The model never names or reorders
+environments — each cycle it emits `environment_action` ∈ `{stay, advance, back, insert}` and the
+node applies it: `advance` pops the head (its intent is met), `back` restores the previous head
+(advanced too early), `insert` splices a discovered intermediate the plan omitted (e.g. a corridor
+between two rooms) in as the next environment, `stay` keeps working the head. This enforces the
+plan order while letting reality *refine* it, keeps the prompt bounded (only the head + a one-line
+peek are ever shown, regardless of queue length), and makes completion **code-derived** (the queue
+empties). A per-environment cycle cap (`max_env_cycles`) is the one **failure** path: if the robot
+never leaves a head within the cap, the mission fails (mapped to BT `FAILURE`) rather than dragging
+on forever.
 
 > **Status.** Fully implemented and buildable: the data contracts, the `mission_planner_node`,
 > and the `hint_bt` `RunMission` loop tree (a single `MissionAdvance` leaf) — see
@@ -85,22 +96,24 @@ the history is self-explaining.
 |---|---|
 | `version` | monotonic snapshot index (0, 1, 2 …) |
 | `ts` | ISO-8601 timestamp |
-| `current_environment` | the environment being worked (advances only in plan order) |
-| `mission_complete` | `true` once the last environment's intent is satisfied |
+| `current_environment` | the queue head's name (`""` once complete) — **derived**, not model-named |
+| `mission_complete` | `true` once the queue is empty — **derived** |
+| `mission_failed` | `true` when the mission ended stuck (a head exceeded `max_env_cycles`) |
+| `action` | the queue edit applied this cycle: `stay` / `advance` / `back` / `insert` / `fail` |
 | `trigger` | `{success, observation}` that caused this recompile (`null` on version 0) |
-| `environments` | `{name: description}` — the evolving per-environment visual beliefs at this version |
+| `queue` | remaining environments `[{name, description, intent}, …]` — order shows any `insert`s |
+| `visited` | completed environments (their **enriched** descriptions — the learned map) |
 | `narrative.done` | recency-weighted history; older info abstracted, newer sharp |
-| `narrative.trying` | present intent, reconciling the plan with new info |
 | `narrative.next` | the immediate next instruction — fed to `trajectory_planner` |
 
 ```jsonl
-{"version":0,"ts":"…","current_environment":"bedroom","mission_complete":false,"trigger":null,"environments":{"bedroom":"A regular bedroom","living_room":"A regular living room"},"narrative":{"done":"Nothing yet.","trying":"Enter the bedroom and head for the far doorway.","next":"Drive forward across the open floor toward the doorway on the far wall."}}
-{"version":1,"ts":"…","current_environment":"bedroom","mission_complete":false,"trigger":{"success":true,"observation":"planner: a wall is directly ahead, no doorway visible; turning left to look"},"environments":{"bedroom":"A regular bedroom; a wall directly ahead, no doorway that way","living_room":"A regular living room"},"narrative":{"done":"Drove forward and met a wall — no doorway that way.","trying":"Find the doorway by looking left.","next":"Turn toward the left side of the room and drive along the open floor."}}
+{"version":1,"ts":"…","current_environment":"bedroom","mission_complete":false,"action":"insert","trigger":{"success":true,"observation":"planner: the only door leads to a hallway, not the living room"},"queue":[{"name":"bedroom","description":"a bedroom; door on the far wall opens to a hallway","intent":"pass through to the living room"},{"name":"corridor","description":"a hallway linking the rooms","intent":""},{"name":"living_room","description":"A regular living room","intent":"stop in front of the couch"}],"visited":[],"narrative":{"done":"Found the bedroom's only exit is a hallway.","next":"Drive to the doorway on the far wall."}}
 ```
 
-- **Current state** = the last record. **Resume** = read the tail, continue the `version` counter.
-- **Reconstruct history** = read records `0..N` (e.g. `jq . <mission>.narrative.jsonl`, or diff
-  consecutive `narrative` objects to see how the belief changed at each step).
+- **Current state** = the last record. **Resume** = read the tail (`queue` + `visited` restore the
+  full plan state, including inserts), continue the `version` counter.
+- **Reconstruct history** = read records `0..N` (e.g. `jq . <mission>.narrative.jsonl`) — the
+  `action` + `queue` fields show exactly how and when the plan was refined (e.g. a corridor spliced in).
 
 ## Data contract 3 — Pure Log (`<mission>.log.jsonl`)
 
@@ -117,14 +130,15 @@ The single reasoner prompt (replacing the old judge/replan/compress). Placeholde
 | Token | Filled with |
 |---|---|
 | `{brief}` | `config/brief.md`, verbatim (permanent context) |
-| `{semantic_plan}` | the environments (hard rails, in order) + their **evolving** descriptions + intents |
-| `{narrative}` | the narrative carried forward — `current_environment` + `done` only (`trying`/`next` are regenerated each cycle, so not echoed back) |
+| `{environment}` | the **current** environment (name/description/intent) + a one-line peek at the next — bounded regardless of queue length |
+| `{narrative}` | the memory carried forward — `done` only (`next` is regenerated, its result already in `{outcome}`) |
 | `{outcome}` | this cycle's move outcome + the planner's VLM reasoning (empty on cycle 0) |
 
 Reasoner `schema`:
-`{"done": string, "trying": string, "next": string, "current_environment": string, "environment_description": string, "mission_complete": bool}`
-— `environment_description` is the enriched description of the current environment, folded back
-into the plan each cycle.
+`{"done": string, "next": string, "environment_description": string, "environment_action": "stay"|"advance"|"back"|"insert", "new_environment": {"name": string, "description": string}}`
+— the model reports progress + enriches the current description, and edits the queue only via
+`environment_action` (`new_environment` carries the room to splice on `insert`). It never names
+the current environment; that's the queue head, owned by the node.
 
 `config/brief.md` is the permanent-context prefix (capabilities, navigation preferences, ambiguity
 policy) prepended on every call.
@@ -143,11 +157,12 @@ narrative in memory; and exposes **one** action server, `~/advance`, called in a
 | `/reasoner_node/reason` (see `reasoner_action`) | `hint_interfaces/action/Reason` | Action client — the narrative recompile |
 
 **`advance`** — Goal: `success` (did the last move execute?) + `observation` (the planner's VLM
-reasoning, verbatim). The node appends the outcome to the pure log, recompiles the narrative
-(`compile.txt` → reasoner), appends the new snapshot to `<mission>.narrative.jsonl`, and returns
-Result: `mission_done` (the narrative's `mission_complete`), `description` (= `narrative.next`),
-`area` (= `current_environment`), `message` (= `narrative.trying`). On the first call nothing has
-executed (`success` defaults true, `observation` empty) so it just emits the opening instruction.
+reasoning, verbatim). The node appends the outcome to the pure log, applies the queue edit +
+recompiles the narrative (`compile.txt` → reasoner), appends the new snapshot, and returns Result:
+`mission_done` (queue empty **or** failed), `mission_failed` (stuck past the cap), `description`
+(= the narrative's `next`), `area` (= the current queue head), `message` (= the narrative's `done`,
+or the failure reason). On the first call nothing has executed (`success` defaults true,
+`observation` empty) so it just emits the opening instruction.
 
 ### Parameters
 
@@ -160,6 +175,7 @@ executed (`success` defaults true, `observation` empty) so it just emits the ope
 | `log_path` | `""` | Raw log; empty → `<mission>.log.jsonl` sibling |
 | `reasoner_action` | `/reasoner_node/reason` | Reasoner action name |
 | `reasoner_timeout` | `30.0` | Seconds to wait on the reasoner call |
+| `max_env_cycles` | `8` | Cycles on one environment before the mission fails (stuck backstop) |
 
 ### Test
 

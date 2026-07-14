@@ -1,30 +1,31 @@
 """Semantic mission planner — the narrative director for HINT missions.
 
-Consumes a Semantic Plan (a static prior: environments visited in order — hard
-rails — each a brief intent) and drives navigation by maintaining a rolling
-Narrative State that is recompiled every cycle by the reasoner. Exposes one
-BT-facing action server:
+Consumes a Semantic Plan (environments to visit, in order, each a brief intent) and
+drives navigation by maintaining a rolling Narrative State, recompiled every cycle
+by one reasoner call. Exposes one BT-facing action server, ``~/advance``: the caller
+reports the outcome of the move it just executed (``success`` + the planner's VLM
+``observation``); the node folds it in and returns the next instruction, or
+``mission_done``.
 
-- ``~/advance`` — report-and-advance. The caller reports the outcome of the move
-                  it just executed (``success`` + the planner's VLM
-                  ``observation``); the node folds it into the narrative via a
-                  single reasoner call and returns the next instruction, or
-                  ``mission_done``.
+**The environment queue.** Order is owned by *code*, not the model. The node holds a
+FIFO queue of environments (head = current) plus a stack of visited ones. The model
+never names or reorders environments — each cycle it emits `environment_action` ∈
+{stay, advance, back, insert}, and the node applies it deterministically:
+- `advance` pops the head (its intent is met);
+- `back` restores the previous head (advanced too early);
+- `insert` splices a discovered intermediate (e.g. a corridor the plan omitted) in as
+  the next environment;
+- `stay` keeps working the head.
+This enforces the plan order while letting reality refine it, keeps the model's prompt
+bounded (only the head + a one-line peek are shown, regardless of queue length), and
+makes `mission_complete` code-derived (the queue empties). A per-environment cycle cap
+force-advances a head the model never leaves, as a stuck backstop.
 
-There are no discrete steps, statuses, retries or pass/fail judging: divergence
-from the plan is normal material the narrative absorbs. All LLM work is one
-``/reasoner_node/reason`` call per cycle (the ``compile.txt`` template); this
-node holds no genai/API key.
-
-Persistence (siblings of the mission YAML):
-- ``*.narrative.jsonl`` — the Narrative State as an append-only, versioned
-  history: one full snapshot per recompile, each embedding the outcome that
-  triggered it. The tail is the current state; reading records 0..N reconstructs
-  the whole belief evolution (git-like).
-- ``*.log.jsonl`` — the raw action log (debug + the per-cycle increment).
-
-The ``compile.txt`` prompt is filled by literal ``{token}`` substitution (NOT
-``str.format`` — the template contains JSON braces).
+Persistence (siblings of the mission YAML), both append-only:
+- ``*.narrative.jsonl`` — one full snapshot per recompile (queue + visited + narrative
+  + the triggering outcome + the action taken). Tail = current; 0..N reconstructs the
+  whole belief + queue evolution; resume reads the tail.
+- ``*.log.jsonl`` — the raw action log (debug).
 """
 
 import json
@@ -44,9 +45,12 @@ from rclpy.node import Node
 
 from hint_interfaces.action import MissionAdvance, Reason
 
-NARRATIVE_SCHEMA = ('{"done": string, "trying": string, "next": string, '
-                    '"current_environment": string, "environment_description": string, '
-                    '"mission_complete": bool}')
+NARRATIVE_SCHEMA = (
+    '{"done": string, "next": string, "environment_description": string, '
+    '"environment_action": "stay"|"advance"|"back"|"insert", '
+    '"new_environment": {"name": string, "description": string}}')
+
+ACTIONS = ("stay", "advance", "back", "insert")
 
 
 class MissionPlannerNode(Node):
@@ -62,16 +66,21 @@ class MissionPlannerNode(Node):
         self.declare_parameter("log_path", "")          # empty -> <mission>.log.jsonl
         self.declare_parameter("reasoner_action", "/reasoner_node/reason")
         self.declare_parameter("reasoner_timeout", 30.0)
+        self.declare_parameter("max_env_cycles", 10)     # stuck backstop per environment
 
         self._lock = threading.Lock()
-        self._plan = None        # the semantic plan dict (static prior)
-        self._narrative = None   # current narrative dict (5 keys, flat)
-        self._version = -1       # version of the last narrative snapshot written
-        self._served = False     # has a prior instruction been served this session?
+        self._plan = None                       # the semantic plan dict (mission line)
+        self._queue = []                        # remaining environments (head = current)
+        self._visited = []                      # completed environments (for `back`)
+        self._narrative = {"done": "", "next": ""}
+        self._env_cycles = 0                    # cycles spent on the current head
+        self._failed = False                    # mission stuck past the cycle cap
+        self._version = -1
+        self._served = False
 
         self._brief = self._read(self._p("brief_path"))
         self._load_plan()
-        self._load_or_seed_narrative()
+        self._load_or_seed()
 
         cbg = ReentrantCallbackGroup()
         self._reasoner = ActionClient(
@@ -83,8 +92,19 @@ class MissionPlannerNode(Node):
 
         self.get_logger().info(
             f"Mission planner ready — '{self._plan.get('mission', '')}' "
-            f"({len(self._plan.get('environments', []))} environments), "
-            f"narrative v{self._version}.")
+            f"(queue: {[e['name'] for e in self._queue]}), narrative v{self._version}.")
+
+    # ------------------------------------------------------------------
+    # Derived state (the queue is the source of truth)
+
+    def _current(self):
+        return self._queue[0] if self._queue else None
+
+    def _peek(self):
+        return self._queue[1] if len(self._queue) > 1 else None
+
+    def _complete(self):
+        return not self._queue
 
     # ------------------------------------------------------------------
     # Action server — report-and-advance (one narrative recompile per cycle)
@@ -94,7 +114,6 @@ class MissionPlannerNode(Node):
             req = goal_handle.request
             self._feedback(goal_handle, MissionAdvance, "RUNNING")
 
-            # Outcome of the previously-served instruction (none on the first call).
             trigger = None
             outcome_text = "(nothing yet — this is the first cycle)"
             if self._served:
@@ -104,8 +123,7 @@ class MissionPlannerNode(Node):
                                  result="success" if req.success else "failure",
                                  observation=req.observation)
 
-            # One reasoner call: fold the outcome into the rolling narrative.
-            new = self._compile(outcome_text, goal_handle)
+            data = self._compile(outcome_text, goal_handle)
 
             if goal_handle.is_cancel_requested:
                 goal_handle.canceled()
@@ -115,12 +133,12 @@ class MissionPlannerNode(Node):
                 return cancelled
 
             result = MissionAdvance.Result()
-            if new is None:
-                # Compile failed (reasoner down / timeout / unparseable). Keep the
-                # previous narrative, append NO snapshot, and re-serve the current
-                # instruction — so the loop retries instead of falsely completing.
-                result.mission_done = False
-                result.area = self._narrative.get("current_environment", "")
+            if data is None:
+                # Compile failed: keep state, append NO snapshot, re-serve current.
+                cur = self._current()
+                result.mission_done = self._complete()
+                result.mission_failed = False
+                result.area = cur["name"] if cur else ""
                 result.description = self._narrative.get("next", "")
                 result.message = "Compile failed — re-serving previous instruction."
                 self._served = True
@@ -128,25 +146,87 @@ class MissionPlannerNode(Node):
                 self.get_logger().warn(result.message)
                 return result
 
-            self._narrative = new
-            self._append_narrative(trigger)
-            result.area = self._narrative.get("current_environment", "")
+            action = self._apply(data)
+            self._narrative = {"done": str(data.get("done", "")),
+                               "next": str(data.get("next", ""))}
+            self._append_snapshot(trigger, action)
 
-            if self._narrative.get("mission_complete"):
+            cur = self._current()
+            result.area = cur["name"] if cur else ""
+
+            if self._failed:
                 result.mission_done = True
+                result.mission_failed = True
+                result.message = (
+                    f"Mission failed — stuck in '{result.area}' past the cycle cap.")
+                goal_handle.succeed()
+                self.get_logger().warn(result.message)
+                return result
+
+            if self._complete():
+                result.mission_done = True
+                result.mission_failed = False
                 result.message = self._narrative.get("done", "") or "Mission complete."
                 goal_handle.succeed()
-                self.get_logger().info(f"Mission complete (narrative v{self._version}).")
+                self.get_logger().info(f"Mission complete (v{self._version}).")
                 return result
 
             result.mission_done = False
+            result.mission_failed = False
             result.description = self._narrative.get("next", "")
-            result.message = self._narrative.get("trying", "")
+            result.message = self._narrative.get("done", "")
             self._served = True
             goal_handle.succeed()
             self.get_logger().info(
-                f"v{self._version} [{result.area}] next: {result.description}")
+                f"v{self._version} [{result.area}] ({action}) next: {result.description}")
             return result
+
+    def _apply(self, data):
+        """Enrich the current environment, apply the queue edit + stuck-cap.
+
+        Returns the action actually taken (for the snapshot).
+        """
+        cur = self._current()
+        # 1) Enrich the current environment's description from this cycle's observation
+        #    BEFORE any advance, so the final enrichment stays with the room being left.
+        desc = str(data.get("environment_description", "")).strip()
+        if cur is not None and desc:
+            cur["description"] = desc
+
+        # 2) Apply the model's queue edit — a fixed verb set on a code-owned queue.
+        action = str(data.get("environment_action", "stay")).strip().lower()
+        if action not in ACTIONS:
+            action = "stay"
+        head_changed = False
+        if action == "advance" and self._queue:
+            self._visited.append(self._queue.pop(0))
+            head_changed = True
+        elif action == "back" and self._visited:
+            self._queue.insert(0, self._visited.pop())
+            head_changed = True
+        elif action == "insert":
+            ne = data.get("new_environment") or {}
+            name = str(ne.get("name", "")).strip()
+            if name:
+                env = {"name": name,
+                       "description": str(ne.get("description", "")),
+                       "intent": ""}
+                self._queue.insert(1 if self._queue else 0, env)
+            else:
+                action = "stay"   # insert with no name is a no-op
+        # else "stay"
+
+        # 3) Stuck backstop: too many cycles on the same head -> fail the mission.
+        if head_changed:
+            self._env_cycles = 0
+        else:
+            self._env_cycles += 1
+            if self._queue and self._env_cycles > int(self._p("max_env_cycles")):
+                self.get_logger().warn(
+                    f"Env cycle cap on '{self._queue[0]['name']}' — failing the mission.")
+                self._failed = True
+                action = "fail"
+        return action
 
     # ------------------------------------------------------------------
     # Narrative recompile (the single reasoner call)
@@ -154,29 +234,15 @@ class MissionPlannerNode(Node):
     def _compile(self, outcome_text, goal_handle=None):
         prompt = self._fill("compile.txt", {
             "brief": self._brief,
-            "semantic_plan": self._plan_text(),
-            "narrative": self._narrative_text(self._narrative),
+            "environment": self._context_text(),
+            "narrative": self._narrative_text(),
             "outcome": outcome_text,
         })
         data = self._call_reasoner(prompt, NARRATIVE_SCHEMA, goal_handle)
         if not isinstance(data, dict):
             self.get_logger().warn("Narrative compile failed — keeping previous narrative.")
             return None
-        current_env = str(data.get("current_environment",
-                                   self._narrative.get("current_environment", "")))
-        # Fold the enriched description back into the in-memory plan (the source
-        # YAML is never touched); it is persisted in the narrative snapshot for
-        # resume/reconstruction. A blank reply leaves the accumulated detail intact.
-        new_desc = str(data.get("environment_description", "")).strip()
-        if new_desc:
-            self._set_env_description(current_env, new_desc)
-        return {
-            "done": str(data.get("done", "")),
-            "trying": str(data.get("trying", "")),
-            "next": str(data.get("next", "")),
-            "current_environment": current_env,
-            "mission_complete": bool(data.get("mission_complete", False)),
-        }
+        return data
 
     def _outcome_text(self, req):
         base = ("The last move executed successfully" if req.success
@@ -185,39 +251,31 @@ class MissionPlannerNode(Node):
             return f"{base}. Planner reasoning: {req.observation}"
         return base + "."
 
-    def _plan_text(self):
-        envs = self._plan.get("environments", [])
-        cur = self._narrative.get("current_environment", "") if self._narrative else ""
-        cur_idx = next((i for i, e in enumerate(envs) if e.get("name") == cur), 0)
-        lines = [f"Mission: {self._plan.get('mission', '')}", "Environments (in order):"]
-        for i, env in enumerate(envs):
-            name = env.get("name", "")
-            if i < cur_idx:
-                # Past environments are captured in the narrative's `done`; send
-                # only the name to save tokens (their description/intent are moot).
-                lines.append(f"  {i + 1}. {name} (done)")
-            else:
-                desc = env.get("description", "")
-                head = f"  {i + 1}. {name}" + (f" — {desc}" if desc else "")
-                lines.append(f"{head}: {env.get('intent', '')}")
+    def _context_text(self):
+        """Only the current environment + a one-line peek — bounded regardless of
+        how long or refined the queue is."""
+        lines = [f"Mission: {self._plan.get('mission', '')}"]
+        cur = self._current()
+        if cur is None:
+            lines.append("All planned environments have been visited.")
+            return "\n".join(lines)
+        desc = cur.get("description", "")
+        lines.append(f"Current environment: {cur['name']}"
+                     + (f" — {desc}" if desc else ""))
+        if cur.get("intent"):
+            lines.append(f"  Intent: {cur['intent']}")
+        peek = self._peek()
+        if peek is not None:
+            lines.append(f"Next environment: {peek['name']}"
+                         + (f" — {peek['intent']}" if peek.get("intent") else ""))
+        else:
+            lines.append("Next environment: (none — the mission ends when this one is done)")
         return "\n".join(lines)
 
-    def _set_env_description(self, name, description):
-        """Update an environment's (evolving) description in the in-memory plan."""
-        for env in self._plan.get("environments", []):
-            if env.get("name") == name:
-                env["description"] = description
-                return
-
-    @staticmethod
-    def _narrative_text(nar):
-        # Only the accumulated `done` (+ current environment) carries forward into
-        # the prompt. `trying`/`next` are regenerated each cycle and the result of
-        # the last `next` is already in {outcome}, so echoing them back is redundant.
-        return ("current_environment: {ce}\n"
-                "done: {done}").format(
-            ce=nar.get("current_environment", ""),
-            done=nar.get("done", "") or "(nothing yet)")
+    def _narrative_text(self):
+        # Only the accumulated `done` carries forward; `next` is regenerated and its
+        # result is already in {outcome}, so it is not echoed back.
+        return "done: {}".format(self._narrative.get("done", "") or "(nothing yet)")
 
     # ------------------------------------------------------------------
     # Reasoner client
@@ -250,14 +308,13 @@ class MissionPlannerNode(Node):
 
     @staticmethod
     def _await(future, timeout, goal_handle=None, reasoner_handle=None):
-        # Block the current server thread on a client future, polling so we can
-        # bail out early on a BT-halt cancel. The MultiThreaded executor keeps
-        # spinning the reasoner client's callbacks on other threads (reentrant
-        # group), so the done-callback fires and sets the event. On timeout OR
-        # cancel we return None without waiting further; on cancel we also cancel
-        # the reasoner goal so it does not run orphaned server-side. (The in-flight
-        # Gemini call still finishes in the reasoner's background thread; only its
-        # result is dropped — cancellation is cooperative.)
+        # Block the current server thread on a client future, polling so we can bail
+        # out early on a BT-halt cancel. The MultiThreaded executor keeps spinning the
+        # reasoner client's callbacks on other threads (reentrant group), so the
+        # done-callback fires and sets the event. On timeout OR cancel we return None
+        # without waiting further; on cancel we also cancel the reasoner goal so it
+        # does not run orphaned server-side. (The in-flight Gemini call still finishes
+        # in the reasoner's background thread; only its result is dropped — cooperative.)
         done = threading.Event()
         future.add_done_callback(lambda _f: done.set())
         deadline = time.monotonic() + timeout
@@ -273,9 +330,7 @@ class MissionPlannerNode(Node):
     def _fill(self, template_name, tokens):
         text = self._read(os.path.join(self._p("templates_dir"), template_name))
         # Drop the leading '#' comment header so it isn't sent to the model, then
-        # substitute literal {name} tokens (NOT str.format — the body has JSON
-        # braces). Token *values* (e.g. the markdown brief) are inserted after the
-        # comment strip, so their own '#' headings survive.
+        # substitute literal {name} tokens (NOT str.format — the body has JSON braces).
         body = "\n".join(ln for ln in text.splitlines()
                          if not ln.lstrip().startswith("#"))
         for key, value in tokens.items():
@@ -290,7 +345,13 @@ class MissionPlannerNode(Node):
             self._plan = yaml.safe_load(f)
         self.get_logger().info(f"Loaded semantic plan from {self._p('mission_path')}.")
 
-    def _load_or_seed_narrative(self):
+    def _seed_queue(self):
+        return [{"name": e.get("name", ""),
+                 "description": e.get("description", ""),
+                 "intent": e.get("intent", "")}
+                for e in self._plan.get("environments", [])]
+
+    def _load_or_seed(self):
         path = self._narrative_path()
         last = None
         if os.path.exists(path):
@@ -304,48 +365,36 @@ class MissionPlannerNode(Node):
                             pass
         if last is not None:
             self._version = int(last.get("version", -1))
+            self._queue = last.get("queue") or []
+            self._visited = last.get("visited") or []
             nar = last.get("narrative", {})
-            self._narrative = {
-                "done": nar.get("done", ""),
-                "trying": nar.get("trying", ""),
-                "next": nar.get("next", ""),
-                "current_environment": last.get("current_environment", ""),
-                "mission_complete": bool(last.get("mission_complete", False)),
-            }
-            # Restore the enriched environment descriptions onto the in-memory plan.
-            for name, desc in (last.get("environments") or {}).items():
-                if desc:
-                    self._set_env_description(name, desc)
-            self._served = True   # resuming mid-mission; a prior instruction existed
-            self.get_logger().info(f"Resumed narrative from {path} at v{self._version}.")
+            self._narrative = {"done": nar.get("done", ""), "next": nar.get("next", "")}
+            self._failed = bool(last.get("mission_failed", False))
+            self._served = True   # resuming mid-mission
+            self.get_logger().info(f"Resumed from {path} at v{self._version}.")
         else:
-            envs = self._plan.get("environments", [])
-            self._narrative = {
-                "done": "", "trying": "", "next": "",
-                "current_environment": envs[0].get("name", "") if envs else "",
-                "mission_complete": False,
-            }
+            self._queue = self._seed_queue()
+            self._visited = []
+            self._narrative = {"done": "", "next": ""}
             self._version = -1
             self._served = False
 
-    def _append_narrative(self, trigger):
-        """Append a full narrative snapshot — the versioned, git-like history."""
+    def _append_snapshot(self, trigger, action):
+        """Append a full snapshot — the versioned, git-like history (queue included)."""
         self._version += 1
+        cur = self._current()
         rec = {
             "version": self._version,
             "ts": self._now(),
-            "current_environment": self._narrative.get("current_environment", ""),
-            "mission_complete": bool(self._narrative.get("mission_complete", False)),
+            "current_environment": cur["name"] if cur else "",
+            "mission_complete": self._complete(),
+            "mission_failed": self._failed,
+            "action": action,
             "trigger": trigger,
-            # The evolving environment descriptions (the enriched belief) travel
-            # with each snapshot so the history reconstructs and resumes fully.
-            "environments": {e.get("name", ""): e.get("description", "")
-                             for e in self._plan.get("environments", [])},
-            "narrative": {
-                "done": self._narrative.get("done", ""),
-                "trying": self._narrative.get("trying", ""),
-                "next": self._narrative.get("next", ""),
-            },
+            "queue": self._queue,       # remaining environments (order shows inserts)
+            "visited": self._visited,   # completed environments (enriched descriptions)
+            "narrative": {"done": self._narrative.get("done", ""),
+                          "next": self._narrative.get("next", "")},
         }
         with open(self._narrative_path(), "a") as f:
             f.write(json.dumps(rec) + "\n")
