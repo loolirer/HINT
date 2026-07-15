@@ -54,6 +54,16 @@ YAML: `mission.narrative.jsonl` (the versioned narrative history) and `mission.l
 action log). When it loads a mission it **resumes** from the tail of that mission's narrative if it
 exists; delete that file to start fresh.
 
+**Missions never resume across runs.** Every new tree run starts clean. The **first** `~/advance` of
+a run reports no outcome (nothing has executed yet, so `observation` is empty — the BT's
+`{plan_message}` is unset in a fresh blackboard), which the node treats as "the tree was called
+again": it **deletes** any existing `.narrative.jsonl` + `.log.jsonl` and reseeds from the plan. This
+holds no matter how the previous run ended — clean completion, failure, or a premature **Ctrl+C**
+mid-run — because the detector keys on the fresh run's first tick, not on the old run's ending. The
+previous run's files persist *until* you launch the next run, so they stay there for debugging in
+between; they're wiped only when a new run actually begins. (Every mid-run advance carries the
+planner's reasoning in `observation`, so this only fires on a run's first tick, never mid-mission.)
+
 The siblings are written next to the **real** mission file: `os.path.realpath` resolves the
 `--symlink-install` symlink back to the source tree, so in a dev workspace they appear in
 `src/mission_planner/missions/<name>/` (editor-visible); on a plain copied install they sit

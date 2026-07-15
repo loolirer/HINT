@@ -197,6 +197,19 @@ class MissionPlannerNode(Node):
                     "Narrative file missing — restarting the mission from scratch.")
                 self._load_mission(self._mission_path)
 
+            # A NEW tree run's FIRST advance reports no outcome — the BT's
+            # {plan_message} is unset in a fresh blackboard, so `observation` is
+            # empty; every mid-run advance carries the planner's reasoning. So
+            # "already served before AND a no-outcome tick" = the tree was called
+            # again → wipe any existing narrative/log and reseed. Missions never
+            # resume across runs, no matter how the last one ended (finish, fail, or
+            # a premature Ctrl+C mid-run). The finished run's files persist until
+            # this next call, so they stay debuggable in between.
+            if self._served and not req.observation.strip():
+                self.get_logger().info(
+                    "New tree run (no outcome reported) — wiping old logs, starting fresh.")
+                self._reset_mission()
+
             self._feedback(goal_handle, MissionAdvance, "RUNNING")
 
             trigger = None
@@ -450,6 +463,21 @@ class MissionPlannerNode(Node):
         self._load_plan()
         self._load_or_seed()
         self._env_cycles = 0
+
+    def _reset_mission(self):
+        """Delete this mission's narrative + log and reseed from the plan — the
+        clean restart used when the tree is run again on a finished mission. The
+        finished artifacts are kept until this point (for debugging); the fresh run
+        recreates them as it appends."""
+        for path in (self._narrative_path(), self._log_path()):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError as e:
+                self.get_logger().warn(f"Could not delete {path}: {e}")
+        self._load_or_seed()          # narrative now absent -> seeds a fresh plan
+        self._env_cycles = 0
+        self._before_frame = None
 
     def _load_plan(self):
         with open(self._mission_path, "r") as f:
