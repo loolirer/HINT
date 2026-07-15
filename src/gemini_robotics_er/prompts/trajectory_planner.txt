@@ -39,8 +39,6 @@ Rules on the points:
   cleanly. I am WIDE — through a doorway/gap I pass SQUARE and CENTERED (the final-run rule above),
   leaving a clear body's-width of margin on each side; if the gap is barely wider than me, I line up
   first and creep through.
-- When forward motion is RESTRICTED, I turn in place by keeping every point low (near row 1000) and
-  fan them sideways from bottom-center toward that side in a SHORT line.
 - Every point y >= {min_row} (stay low, where I judge the ground reliably). If the target is farther,
   stop at the limit — I re-plan as I get closer. The last point is how far I go this step, not the goal.
 - END IN OPEN FLOOR, with clearance — never crowd the target. If it is a landmark (sofa, table), I
