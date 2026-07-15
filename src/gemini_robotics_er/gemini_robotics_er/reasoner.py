@@ -64,7 +64,11 @@ class ReasonerNode(GeminiActionNode):
 
         want_json = bool(goal.schema.strip())
         prompt = goal.prompt
-        if want_json:
+        # A real JSON schema -> constrained decoding (guaranteed well-formed JSON).
+        # A loose shape string (e.g. '{"x": bool}') isn't valid JSON, so fall back
+        # to appending it as a prompt hint, exactly as before.
+        response_schema = self._as_response_schema(goal.schema) if want_json else None
+        if want_json and response_schema is None:
             prompt = (
                 f"{goal.prompt}\n\n"
                 "Respond with JSON only — no prose, no markdown fencing — "
@@ -89,7 +93,7 @@ class ReasonerNode(GeminiActionNode):
             return self._cancel(goal_handle)
 
         try:
-            raw = self._call_api(contents)
+            raw = self._call_api(contents, response_schema=response_schema)
         except TimeoutError as e:
             return self._fail(goal_handle, str(e))
         except Exception as e:  # noqa: BLE001 — surfaced to caller as FAILURE
@@ -121,6 +125,17 @@ class ReasonerNode(GeminiActionNode):
 
     # ------------------------------------------------------------------
     # Helpers
+
+    @staticmethod
+    def _as_response_schema(schema_str):
+        """Return a JSON-schema dict for constrained decoding when the goal's
+        ``schema`` is real JSON (a dict), else ``None`` — loose shape strings like
+        ``'{"x": bool}'`` aren't valid JSON and stay as a prompt hint."""
+        try:
+            obj = json.loads(schema_str)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return obj if isinstance(obj, dict) else None
 
     def _publish_feedback(self, goal_handle, state):
         fb = Reason.Feedback()

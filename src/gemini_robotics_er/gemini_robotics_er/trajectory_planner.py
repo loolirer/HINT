@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import rclpy
+from google.genai import types
 from rclpy.action import ActionServer
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -19,7 +20,13 @@ class TrajectoryPlannerNode(GeminiActionNode):
         # Farthest image row (of 1000) a waypoint may occupy — caps how far ahead
         # the trajectory reaches. Smaller row = farther/higher in the frame = more
         # error-prone; larger = nearer/more conservative. Live-adjustable.
-        self.declare_parameter("min_row", 600)
+        self.declare_parameter("min_row", 500)
+
+        # Consensus sampling: ask for N candidate trajectories in ONE reply (this
+        # model rejects candidate_count>1, so the prompt requests a candidates list)
+        # and keep the medoid — the path closest to all the others — robust to the
+        # model splitting between routes at temperature > 0. 1 = a single plan.
+        self.declare_parameter("n_candidates", 1)
 
         # Continuity (T1): the frame and instruction from my previous plan, so the
         # next plan is grounded in how the view changed rather than starting cold.
@@ -66,9 +73,14 @@ class TrajectoryPlannerNode(GeminiActionNode):
         # tell the model what I was trying to do last step, so it builds on the
         # visible progress instead of planning cold. Build contents from the OLD
         # prev, then latch this frame/instruction as the prev for next time.
+        # N-candidate sampling is done IN ONE call: this model rejects
+        # candidate_count>1, so the prompt asks for N paths in a single response
+        # (via {return_spec}) and we pick the medoid. n<=1 is the plain single plan.
+        n = max(1, int(self._p("n_candidates")))
         prompt = self._fill_prompt(
             "trajectory_planner.txt", description=goal.description,
-            min_row=int(self._p("min_row")), continuity=self._continuity_text())
+            min_row=int(self._p("min_row")), continuity=self._continuity_text(),
+            return_spec=self._return_spec(n))
         # Text before images (Gemini best practice), previous frame before current
         # so "the last image attached" is my current view.
         frames = ([self._prev_pil, pil_img] if self._prev_pil is not None
@@ -77,7 +89,7 @@ class TrajectoryPlannerNode(GeminiActionNode):
         self._prev_pil = pil_img
         self._prev_description = goal.description
         try:
-            raw = self._call_api(contents)
+            raw = self._call_api(contents, response_schema=self._response_schema(n))
         except TimeoutError as e:
             return self._abort(goal_handle, str(e))
         except Exception as e:
@@ -86,19 +98,31 @@ class TrajectoryPlannerNode(GeminiActionNode):
         if goal_handle.is_cancel_requested:
             return self._cancel(goal_handle)
 
-        data = self._parse_json(raw)
-        reasoning, points = self._parse_reasoning_points(data)
+        # Parse every candidate the reply carries; keep those with a usable path.
+        cand_dicts = self._candidate_dicts(self._parse_json(raw))
+        cands, first_reason = [], ""
+        for cd in cand_dicts:
+            reasoning, points = self._parse_reasoning_points(cd)
+            first_reason = first_reason or reasoning
+            markers = self._points_to_markers(points)
+            if markers:
+                cands.append((reasoning, markers, points))
 
-        markers = self._points_to_markers(points)
-        if not markers:
-            # Still report the model's rationale for why no path was planned.
-            reason = reasoning or "no traversable ground path was visible"
+        if not cands:
+            # Every candidate declined (wall / already there) or was unparseable.
+            reason = first_reason or "no traversable ground path was visible"
             return self._abort(
                 goal_handle,
                 f'No trajectory for "{goal.description}": {reason}',
             )
 
-        self._publish_debug(cv_bgr, stamp, markers, points)
+        # Consensus: the medoid path — the candidate closest to all the others.
+        reasoning, markers, points = self._select_medoid(cands)
+        if len(cand_dicts) > 1:
+            self.get_logger().info(
+                f"Chose medoid of {len(cands)}/{len(cand_dicts)} candidate paths.")
+
+        self._publish_debug(cv_bgr, stamp, markers, [c[1] for c in cands])
 
         result = PlanTrajectory.Result()
         result.success = True
@@ -127,6 +151,109 @@ class TrajectoryPlannerNode(GeminiActionNode):
             f'trying to: "{prev}". The SECOND is my current view. Build smoothly on the progress '
             "visible between them — continue the approach, do not restart from scratch."
         )
+
+    @staticmethod
+    def _response_schema(n):
+        """Constrained-output schema: a single plan, or a candidates list.
+
+        Passed as ``response_schema`` so the model can only emit well-formed JSON
+        matching it — the fix for the corrupted/degenerate long replies. Mirrors
+        the ``{return_spec}`` prompt shape (single vs candidates) for ``n``.
+        """
+        waypoint = types.Schema(
+            type=types.Type.OBJECT,
+            required=["point"],
+            properties={
+                "point": types.Schema(
+                    type=types.Type.ARRAY, items=types.Schema(type=types.Type.INTEGER)),
+                "label": types.Schema(type=types.Type.STRING),
+            },
+        )
+        plan = types.Schema(
+            type=types.Type.OBJECT,
+            required=["reasoning", "waypoints"],
+            properties={
+                "reasoning": types.Schema(type=types.Type.STRING),
+                "waypoints": types.Schema(type=types.Type.ARRAY, items=waypoint),
+            },
+        )
+        if n <= 1:
+            return plan
+        return types.Schema(
+            type=types.Type.OBJECT,
+            required=["candidates"],
+            properties={"candidates": types.Schema(type=types.Type.ARRAY, items=plan)},
+        )
+
+    @staticmethod
+    def _return_spec(n):
+        """The {return_spec} block: single plan, or N candidate plans in ONE reply.
+
+        candidate_count>1 is unsupported by this model, so N-sampling is done by
+        asking for N paths in a single response and taking the medoid.
+        """
+        single = ('Return JSON only, no markdown fencing:\n'
+                  '{"reasoning": <what I did + why>, '
+                  '"waypoints": [{"point": [y, x], "label": <n>}, ...]}')
+        if n <= 1:
+            return single
+        return (
+            f"Give my top {n} candidate paths for this. If the way is clear they will be similar; if "
+            "the scene is ambiguous (two ways around something) let them differ so the real options "
+            "show. Each is a COMPLETE plan by the rules above. Return JSON only, no markdown fencing:\n"
+            '{"candidates": [{"reasoning": <what I did + why>, '
+            '"waypoints": [{"point": [y, x], "label": <n>}, ...]}, ...]}')
+
+    @staticmethod
+    def _candidate_dicts(data):
+        """Return the list of candidate replies from a parsed model response.
+
+        Accepts the multi form ``{"candidates": [...]}``, a single object
+        ``{"reasoning", "waypoints"}``, or a bare ``[...]`` waypoint list — each
+        element is then handed to ``_parse_reasoning_points``.
+        """
+        if isinstance(data, dict) and isinstance(data.get("candidates"), list):
+            cands = [c for c in data["candidates"] if isinstance(c, (dict, list))]
+            if cands:
+                return cands
+        return [data]
+
+    def _select_medoid(self, cands):
+        """Return the consensus candidate — the one whose (arc-length-resampled)
+        path is closest, summed, to all the others.
+
+        ``cands`` is a list of ``(reasoning, markers, points)`` triples. Averaging
+        whole paths is wrong (two valid routes average to a path between them), so
+        this picks the most central *actual* candidate instead. A single candidate
+        is returned as-is.
+        """
+        if len(cands) == 1:
+            return cands[0]
+        curves = [self._resample([(m.x, m.y) for m in c[1]]) for c in cands]
+        best_i, best_cost = 0, float("inf")
+        for i in range(len(curves)):
+            cost = sum(float(np.mean(np.linalg.norm(curves[i] - curves[j], axis=1)))
+                       for j in range(len(curves)) if j != i)
+            if cost < best_cost:
+                best_cost, best_i = cost, i
+        return cands[best_i]
+
+    @staticmethod
+    def _resample(pts, k=12):
+        """Resample an ordered polyline to ``k`` points, evenly by arc length, so
+        candidates of different lengths compare pointwise."""
+        a = np.asarray(pts, dtype=float)
+        if len(a) < 2:
+            base = a[:1] if len(a) else np.zeros((1, 2))
+            return np.repeat(base, k, axis=0)
+        seg = np.linalg.norm(np.diff(a, axis=0), axis=1)
+        arc = np.concatenate([[0.0], np.cumsum(seg)])
+        total = float(arc[-1])
+        if total < 1e-9:
+            return np.repeat(a[:1], k, axis=0)
+        targets = np.linspace(0.0, total, k)
+        return np.stack([np.interp(targets, arc, a[:, 0]),
+                         np.interp(targets, arc, a[:, 1])], axis=1)
 
     def _parse_reasoning_points(self, data):
         """Split the model reply into ``(reasoning, points)``.
@@ -178,21 +305,45 @@ class TrajectoryPlannerNode(GeminiActionNode):
         bgr = cv2.applyColorMap(val, cv2.COLORMAP_JET)[0, 0]
         return int(bgr[0]), int(bgr[1]), int(bgr[2])
 
-    def _publish_debug(self, cv_bgr, stamp, markers, points):
+    def _publish_debug(self, cv_bgr, stamp, selected, candidates):
+        """Draw every candidate path faint, then the chosen medoid highlighted.
+
+        ``selected`` is the medoid markers; ``candidates`` is the list of every
+        candidate's markers (medoid included). Non-selected paths render as thin
+        grey polylines; the medoid gets a bold white polyline + heatmap dots.
+        """
         try:
             frame = cv_bgr.copy()
             h, w = frame.shape[:2]
-            n = len(markers)
-            px = [
-                (int((m.x + 1.0) / 2.0 * w), int((m.y + 1.0) / 2.0 * h))
-                for m in markers
-            ]
 
+            def to_px(markers):
+                return [(int((m.x + 1.0) / 2.0 * w), int((m.y + 1.0) / 2.0 * h))
+                        for m in markers]
+
+            # All the rejected candidates first, as faint grey polylines.
+            for markers in candidates:
+                if markers is selected:
+                    continue
+                pts = to_px(markers)
+                if len(pts) >= 2:
+                    cv2.polylines(frame, [np.array(pts, np.int32)], False,
+                                  (140, 140, 140), 1, cv2.LINE_AA)
+
+            # The chosen medoid, highlighted: bold white spine + heatmap dots
+            # (first point hottest, last coldest).
+            px = to_px(selected)
+            if len(px) >= 2:
+                cv2.polylines(frame, [np.array(px, np.int32)], False,
+                              (255, 255, 255), 2, cv2.LINE_AA)
+            n = len(px)
             for i, (cx, cy) in enumerate(px):
-                # First point hottest (t=1), last coldest (t=0).
-                t = 1.0 - (i / max(n - 1, 1))
-                color = self._heatmap_color(t)
-                cv2.circle(frame, (cx, cy), 8, color, -1)
+                color = self._heatmap_color(1.0 - (i / max(n - 1, 1)))
+                cv2.circle(frame, (cx, cy), 7, color, -1)
+
+            if len(candidates) > 1:
+                cv2.putText(frame, f"medoid of {len(candidates)}", (8, h - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1,
+                            cv2.LINE_AA)
 
             out = self._bridge.cv2_to_imgmsg(frame, encoding="bgr8")
             out.header.stamp = stamp

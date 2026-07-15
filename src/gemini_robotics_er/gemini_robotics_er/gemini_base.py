@@ -120,12 +120,15 @@ class GeminiActionNode(Node):
     # ------------------------------------------------------------------
     # Gemini API
 
-    def _call_api(self, contents):
+    def _call_api(self, contents, response_schema=None):
         """Call ``generate_content`` under a timeout, returning ``.text``.
 
-        ``contents`` is the list handed to the model (e.g. ``[pil_img,
-        prompt]``). Raises ``TimeoutError`` if the call outlives
-        ``api_timeout``, or re-raises any API exception.
+        ``contents`` is the list handed to the model (text first, then any images,
+        e.g. ``[prompt, pil_img]``). When ``response_schema`` is given the output is
+        **constrained** to that JSON schema (``response_mime_type=application/json``),
+        so the reply is always well-formed JSON — no markdown fences, no degenerate
+        tokens on long structured replies. Raises ``TimeoutError`` if the call
+        outlives ``api_timeout``, or re-raises any API exception.
         """
         timeout = float(self._p("api_timeout"))
         result = [None]
@@ -133,14 +136,18 @@ class GeminiActionNode(Node):
 
         def _call():
             try:
+                cfg = dict(
+                    temperature=float(self._p("temperature")),
+                    thinking_config=types.ThinkingConfig(
+                        thinking_budget=int(self._p("thinking_budget"))),
+                )
+                if response_schema is not None:
+                    cfg["response_mime_type"] = "application/json"
+                    cfg["response_schema"] = response_schema
                 result[0] = self._client.models.generate_content(
                     model=self._p("model_id"),
                     contents=contents,
-                    config=types.GenerateContentConfig(
-                        temperature=float(self._p("temperature")),
-                        thinking_config=types.ThinkingConfig(
-                            thinking_budget=int(self._p("thinking_budget"))),
-                    ),
+                    config=types.GenerateContentConfig(**cfg),
                 )
             except Exception as e:  # noqa: BLE001 — surfaced to caller
                 error[0] = e
