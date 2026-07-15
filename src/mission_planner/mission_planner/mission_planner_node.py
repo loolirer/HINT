@@ -326,8 +326,10 @@ class MissionPlannerNode(Node):
     def _outcome_text(self, req):
         base = ("I finished my last move" if req.success
                 else "My last move failed or was interrupted")
+        # The observation is my navigator's note (what it tried / any block), not a
+        # scene report — I judge the actual result from the before/after images.
         if req.observation:
-            return f"{base}. What I saw: {req.observation}"
+            return f"{base}. My navigator's note: {req.observation}"
         return base + "."
 
     def _context_text(self):

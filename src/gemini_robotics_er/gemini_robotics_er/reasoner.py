@@ -74,14 +74,16 @@ class ReasonerNode(GeminiActionNode):
         # Optional grounding frames (e.g. the mission director's before/after
         # views). Empty list -> pure text reasoning, exactly as before. Order is
         # preserved so the prompt can refer to "the first / second image".
-        contents = []
+        pil_frames = []
         for img in goal.images:
             try:
                 _, pil_img = self._frame_to_pil(img)
-                contents.append(pil_img)
+                pil_frames.append(pil_img)
             except Exception as e:  # noqa: BLE001 — skip an unreadable frame
                 self.get_logger().warn(f"Skipping an unreadable image: {e}")
-        contents.append(prompt)
+        # Text before images (Gemini best practice); image order preserved so the
+        # prompt can refer to "the first / second image".
+        contents = [prompt] + pil_frames
 
         if goal_handle.is_cancel_requested:
             return self._cancel(goal_handle)

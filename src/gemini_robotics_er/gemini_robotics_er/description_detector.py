@@ -52,7 +52,7 @@ class DescriptionDetectorNode(GeminiActionNode):
 
         prompt = self._fill_prompt("description_detector.txt", description=goal.description)
         try:
-            raw = self._call_api([pil_img, prompt])
+            raw = self._call_api([prompt, pil_img])
         except TimeoutError as e:
             return self._abort(goal_handle, str(e))
         except Exception as e:

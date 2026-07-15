@@ -13,6 +13,8 @@ ROS2 package of nodes powered by the Gemini Robotics-ER model for HINT.
 
 Shared plumbing (API-key loading + client, stamped camera ring buffer, timeout-guarded API call, single-goal action lifecycle, **prompt-template loading**) lives in `gemini_robotics_er/gemini_base.py` as `GeminiActionNode`; each executable subclasses it.
 
+> **Gemini best practices applied** (per the [image-understanding](https://ai.google.dev/gemini-api/docs/image-understanding) and [robotics](https://ai.google.dev/gemini-api/docs/robotics-overview) docs): the contents list is **text-first, then image(s)** — every node calls `_call_api([prompt, *frames])` (with multi-frame order preserved so the prompt can say "the first / second image"). Coordinates follow the ER convention, `[y, x]` normalized `0–1000`. The ER model is tuned to **sample** for spatial reasoning, so pointing/trajectory nodes (`trajectory_planner`, `description_detector`) run **`temperature 1.0`**, not `0.0`; the `visual_question` verdict and the `reasoner` structured-JSON director stay deterministic.
+
 **Prompt templates.** Each node's prompt is an external `.txt` file under `prompts/` (installed to the package share), loaded and filled via `GeminiActionNode._fill_prompt(name, **tokens)` — the same convention as `mission_planner`'s `compile.txt`: a `#` comment header (stripped), literal `{token}` substitution (not `str.format`, so the JSON braces in the body need no `{{ }}` escaping). Edit a prompt and restart the node (no rebuild, with `--symlink-install`). Point `prompts_dir` elsewhere to override.
 
 ## Usage
@@ -65,7 +67,7 @@ Converts a text description into a bounding box (ROI) using the Gemini Robotics-
 |---|---|---|
 | `api_key_path` | `""` | Path to a file containing the Gemini API key; falls back to `GEMINI_API_KEY` env var if empty |
 | `model_id` | `gemini-robotics-er-1.6-preview` | Gemini model to use |
-| `temperature` | `0.0` | Sampling temperature (0.0 for deterministic output) |
+| `temperature` | `0.0` | Sampling temperature. Default `0.0` (deterministic); the docs recommend **`1.0` for spatial reasoning** (pointing/trajectory), so bringup sets `1.0` for `trajectory_planner` and `description_detector` |
 | `api_timeout` | `10.0` | Seconds before the API call is abandoned and the action is aborted |
 | `thinking_budget` | `0` | Gemini thinking budget in tokens (`0` = off). Per-node — raise it for a reasoning-heavy node (e.g. the `reasoner`), leave `0` for the perception nodes |
 | `prompts_dir` | package `share/prompts` | Directory the node loads its prompt template from |
@@ -125,14 +127,20 @@ Plans a **ground-restricted trajectory** from a natural-language instruction usi
 
 Built as a sibling of `description_detector`: same inputs (a camera `stamp` + a text field) and the same stamp-based ring buffer / API plumbing (both subclass `GeminiActionNode`). Instead of one bounding box it grounds an **ordered marker array in normalized image space** (`geometry_msgs/Point[]`, `x`/`y ∈ [-1, 1]` (center 0), `z` unused, `markers[0]` nearest → `markers[-1]` farthest) plus the frame `stamp`. The model is prompted to keep points on the traversable ground plane, ordered nearest→farthest, and to honor any semantic preference in the instruction.
 
-> **The `reasoning` field is a scene report, not just a path justification.** The prompt
-> (`prompts/trajectory_planner.txt`) asks the model to first *describe what it sees* — room type,
-> landmarks and their side, doorways/exits and where they lead, whether the target is visible —
-> then justify the path. That `reasoning` rides out on the result `message` and is the **only**
-> view of the scene the `mission_planner` narrative gets, so it is what drives environment
-> descriptions, corridor discovery (`insert`), and re-orientation. On an empty `waypoints` list
-> (wall / already there) the node aborts, but the scene report still reaches the caller (via
-> `hint_bt`'s two-arg `onFailure`).
+> **The `reasoning` field is a path note — what the model did and why (F2).** Since the
+> `mission_planner` director now sees the frames directly, `reasoning` is no longer the narrative's
+> only eyes, so the prompt (`prompts/trajectory_planner.txt`) asks for a short (1-2 sentence) note of
+> the **path shape** and any constraint that forced it (e.g. *"a soft curve left around the chair
+> toward the doorway"*), not a full scene report. It rides out on the result `message` → the
+> director's `{outcome}` as the "navigator's note" (its intent), while the images are the director's
+> evidence of the result. On an empty `waypoints` list (wall / already there) the node aborts, but the
+> note still reaches the caller (via `hint_bt`'s two-arg `onFailure`).
+>
+> **Continuity (T1).** The node remembers the frame and instruction from its **previous** plan and
+> attaches that frame ahead of the current one (with a `{continuity}` note of what it was trying to
+> do), so each plan builds on the visible progress between the two views instead of planning cold. The
+> model plans on the **current** (last-attached) view; on the first plan only that single frame is
+> sent.
 
 ### Interfaces
 
@@ -251,3 +259,10 @@ ros2 action send_goal /reasoner_node/reason \
 ```
 
 ---
+
+## References
+
+Gemini best practices this package follows (see the **Gemini best practices applied** note near the top):
+
+- Image understanding & technical details (tokenization, formats, text-before-images ordering): https://ai.google.dev/gemini-api/docs/image-understanding
+- Gemini Robotics-ER overview (pointing/trajectory `[y,x]` `0–1000` format, `temperature 1.0` for spatial reasoning, thinking budget): https://ai.google.dev/gemini-api/docs/robotics-overview

@@ -26,20 +26,32 @@ I move through my planned places ONE at a time, in order — I do not choose or 
 report my progress and, when what I see calls for it, adjust my route by one of a fixed set of
 moves. Each time I return:
 
-- "situation": where I am and what I am facing RIGHT NOW — 1-2 sentences read from my current view
-  (the latest image): which way I face, what is in front of me, what is nearby. I REWRITE it fresh
-  each move; it is the present moment, not my history.
-- "done": what I have accomplished so far, <=3 sentences of gist. I abstract older and redundant
-  detail. If a before and an after image are attached, I compare them to judge what my last move
-  ACTUALLY did — did I get closer, turn as intended, or barely move — and fold that truth in.
-- "next": ONE concrete instruction for me to drive next — a place to go and how to get there on
-  open floor. It is the only thing that actually moves me. When I move on, I aim "next" at the
-  place coming up below.
-- "environment_description": what the place I am in CURRENTLY looks like, <=40 words. I merge in
-  what I now see; I never shrink or drop detail I already had.
+- "situation": my POSE right now — 1-2 sentences read from my current view (the latest image): which
+  way I face and what is immediately in front of / around me. NOT my progress, NOT a room catalog. I
+  REWRITE it fresh each move. E.g. "I am in a doorway facing a living room; a couch sits a few metres
+  ahead-left with open floor between us."
+- "done": my PROGRESS through the mission — what I have accomplished toward the goal, <=3 sentences of
+  gist (older detail abstracted). NOT my current pose, NOT a furniture list. If a before and an after
+  image are attached, I compare them to judge what my last move ACTUALLY did — got closer, turned as
+  intended, or barely moved — and fold that truth in. E.g. "I crossed the bedroom and hallway; I am
+  now entering the living room, my last place."
+- "next": my next drive instruction — a SPECIFIC, detailed description (2-4 sentences) of how to
+  traverse to my immediate goal, read off my current view. I name the concrete target I head for, the
+  route to it (which side of which furniture/obstacles to pass, what to keep clear of), the shape of
+  the move (curve left, go straight, turn), and where I end up facing. Concrete and spatial, never
+  vague — e.g. "Head for the doorway on the far left, passing to the RIGHT of the coffee table and
+  staying clear of the couch on my left; curve so I approach the doorway straight-on and stop just
+  short of it, facing through into the next room." It is the only thing that actually moves me, and my
+  navigator plans the floor path from it, so detail helps it. When I move on, I aim it at the place
+  coming up below.
+- "environment_description": a durable CATALOG of THIS place's fixed features — its layout, exits,
+  and furniture and their sides — <=40 words. The map of the room, NOT my pose and NOT my progress. I
+  merge in what I now see and never shrink detail I already had. E.g. "Living room: couch on the left,
+  TV opposite, doorway back to the hallway on the right, window ahead."
 - "environment_action": how my route should change, from what I see:
     "stay"    — I am still working on where I am (the default; I use it unless it is clearly otherwise).
-    "advance" — I am done here; move on to the next place.
+    "advance" — I have actually CROSSED into the next place (the after-image shows me through the
+                doorway / past the boundary, not merely seeing it ahead); move on.
     "back"    — I moved on too soon and am not actually in the next place; go back.
     "insert"  — I see a space to cross that is NEITHER where I am nor where I am headed next (e.g. a
                 corridor between them that was not planned); add it as my next place, in "new_environment".

@@ -72,7 +72,7 @@ class VisualQuestionNode(GeminiActionNode):
 
         prompt = self._fill_prompt("visual_question.txt", question=goal.question)
         try:
-            raw = self._call_api([pil_img, prompt])
+            raw = self._call_api([prompt, pil_img])
         except TimeoutError as e:
             return self._unknown(goal_handle, str(e))
         except Exception as e:

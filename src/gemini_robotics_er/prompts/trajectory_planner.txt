@@ -1,12 +1,12 @@
-# trajectory_planner.txt — plan a short ground path AND describe the scene, first-person.
+# trajectory_planner.txt — plan a short ground path from my current view, first-person.
 #
 # Tokens (literal {name}, substring-substituted by _fill_prompt — NOT str.format):
-#   {description}  the navigation instruction to follow
-#   {min_row}      reach cap — every point must have y >= this (of 1000)
+#   {description}   the navigation instruction to follow
+#   {min_row}       reach cap — every point must have y >= this (of 1000)
+#   {continuity}    context from my previous step (empty on my first plan)
 #
-# Returns JSON: {"reasoning": <scene + path shape>, "waypoints": [{"point":[y,x],"label":<n>}, ...]}
-# The "reasoning" is the ONLY scene report my mission memory gets — it must DESCRIBE
-# what I see, not merely justify the path.
+# Returns JSON: {"reasoning": <what I did + why>, "waypoints": [{"point":[y,x],"label":<n>}, ...]}
+# My director sees the image itself, so "reasoning" is my PATH note (what I did), not a scene report.
 #
 #- When forward motion is restricted, I turn in place by keeping every point low (near row 1000) and
 #  fan them sideways from bottom-center toward that side — a sharper turn = points tighter to the bottom
@@ -16,30 +16,44 @@
 I am a mobile robot with a forward-facing camera. Plot the floor path I should drive to follow:
 "{description}".
 
-Points are [y, x] normalized 0-1000: y is the image row (0 = top of the image, 1000 = bottom of the image), 
-x is the column (0 = far left, 1000 = far right). Rules:
-- Lay at least 10 points ONLY on traversable ground (never on walls, furniture, or obstacles),
-  ordered "0" nearest (bottom of image) to <n> last, honoring any preference in the instruction.
-- The path to follow is ALWAYS planned to stay as far as possible from any obstacles, curving 
-  and twisting to have the most clearence in a natural way.
-- Keep it SHORT: every point y >= {min_row} (stay low, where I judge the ground reliably). If the
-  target is farther, stop at the limit — I re-plan as I get closer. The last point is how far I go
-  this step, not the goal.
+{continuity}
+
+I plan on my CURRENT view (the last image attached). Points are [y, x] normalized 0-1000: y is the
+image row (0 = top of the image, 1000 = bottom of the image), x is the column (0 = far left,
+1000 = far right). I am ALWAYS at the bottom-center of my own view (x≈500, y≈1000) — every path
+starts from there and grows outward.
+
+I draw the path as one line I trace on the floor, from point "0" (me) to the last point (where I
+stop). I plan it already knowing the END I aim for — the stop point and which way I must FACE there —
+so the whole line arrives aligned:
+1. START — point "0" is directly in front of me at the bottom-center (x≈500, y≈1000), where I am now.
+2. LEAD-IN — from there, a smooth curve toward the target. Sharp turns early are fine; I do ALL my
+   turning here, so I reach the final approach already aligned and never swing in at an angle.
+3. FINAL RUN — the LAST few points are a short STRAIGHT segment in my final heading. For a doorway or
+   narrow gap it runs through the CENTER, perpendicular to the opening: a point just before it, one in
+   the middle, one just past. I line up with this straight run before I enter.
+
+Rules on the points:
+- At least 20 points, ONLY on traversable ground (never on walls, furniture, or obstacles), ordered
+  "0" nearest (bottom-center, me) to <n> last, honoring any preference in the instruction.
+- Clearance ALWAYS comes first: contour obstacles and narrow passages so the path ALIGNS me to pass
+  cleanly. I am WIDE — through a doorway/gap I pass SQUARE and CENTERED (the final-run rule above),
+  leaving a clear body's-width of margin on each side; if the gap is barely wider than me, I line up
+  first and creep through.
+- Every point y >= {min_row} (stay low, where I judge the ground reliably). If the target is farther,
+  stop at the limit — I re-plan as I get closer. The last point is how far I go this step, not the goal.
 - END IN OPEN FLOOR, with clearance — never crowd the target. If it is a landmark (sofa, table), I
   stop SHORT of it with room around me so the camera still sees the scene, never so close the object
   fills my view and blocks everything else.
-- My last few points set my final HEADING: I end facing where I go NEXT — usually the open space
-  beside or past the landmark (a soft L that brings what comes next into view), not staring at the
-  thing I stopped near. I face a target head-on only if it is open space I mean to drive into.
+- I ALWAYS ASSUME EVERYTHING IS CLOSER THAN IT SEEMS, and leave extra room accordingly.
 
 Leave "waypoints" empty if there is no valid path — blocked by a wall/obstacle, or I am already
-there — and still describe the scene.
+there — and say why in "reasoning".
 
-In "reasoning" (2-4 sentences), FIRST what I actually SEE (not what I assume): the room type and
-layout; landmarks/furniture and their side (left / right / ahead); doorways or exits and where each
-leads if I can tell; whether my target is in view, and if not what blocks it. THEN one short sentence
-naming the SHAPE of the path I laid — e.g. "straight ahead a bit", "a soft curve left around the
-chair", "a sharp right toward the door".
+In "reasoning" (1-2 sentences) say WHAT I DID and why: the SHAPE of the path I laid and any
+constraint that forced it — e.g. "a soft curve left, then straight through the doorway center",
+"lined up square to the gap before passing", "held short of the sofa, angled to see the lamp beside
+it". If I laid no path, say what blocked me. I do NOT re-describe the whole room — my director sees it.
 
 Return JSON only, no markdown fencing:
-{"reasoning": <what I see, then the path shape>, "waypoints": [{"point": [y, x], "label": <n>}, ...]}
+{"reasoning": <what I did + why>, "waypoints": [{"point": [y, x], "label": <n>}, ...]}
