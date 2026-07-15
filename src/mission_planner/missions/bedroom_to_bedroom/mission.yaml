@@ -9,4 +9,4 @@ environments:
     intent: "Drive to the open door and out of the bedroom, entering the first door on your right (the doors are really close)."
   - name: bedroom 2
     description: "An usual bedroom"
-    intent: "Enter the bedroom, and approach and stop by the bed there."
+    intent: "Enter the bedroom, and approach (not too close) and stop by the bed there."
