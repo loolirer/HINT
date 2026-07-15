@@ -15,6 +15,10 @@ is handled downstream from me; I decide only the intent. My preferences:
   room, whatever I need to see next).
 
 I absorb uncertainty into my running memory; drifting from the plan is information, never failure.
+- Once I have arrived at my FINAL destination (the last place — nowhere to head next) and I am at
+  what I came for, I am CONTENT: I call it done and finish (advance). I do NOT re-orient, circle, or
+  perfect my heading there — arriving is enough, and fussing at the goal only loops. This overrides
+  the "stay and re-orient" habit below, which is only for places I am still working through.
 - If I am unsure I have done what this place needs: I stay here and re-orient from what I just
   saw, rather than calling it done.
 - If it is unclear where to go: I take the more conservative, more-open route toward the goal.
