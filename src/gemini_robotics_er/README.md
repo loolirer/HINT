@@ -14,6 +14,8 @@ ROS2 package of nodes powered by the Gemini Robotics-ER model for HINT.
 Shared plumbing (API-key loading + client, stamped camera ring buffer, timeout-guarded API call, single-goal action lifecycle, **prompt-template loading**) lives in `gemini_robotics_er/gemini_base.py` as `GeminiActionNode`; each executable subclasses it.
 
 > **Gemini best practices applied** (per the [image-understanding](https://ai.google.dev/gemini-api/docs/image-understanding) and [robotics](https://ai.google.dev/gemini-api/docs/robotics-overview) docs): the contents list is **text-first, then image(s)** — every node calls `_call_api([prompt, *frames])` (with multi-frame order preserved so the prompt can say "the first / second image"). Coordinates follow the ER convention, `[y, x]` normalized `0–1000`. The ER model is tuned to **sample** for spatial reasoning, so pointing/trajectory nodes (`trajectory_planner`, `description_detector`) run **`temperature 1.0`**, not `0.0`; the `visual_question` verdict and the `reasoner` structured-JSON director stay deterministic.
+>
+> **Structured output — two strengths.** `_call_api(contents, json_output=True)` is **JSON mode** (`response_mime_type=application/json`): it forbids invalid-JSON tokens (killing the degenerate `"<td>"`-style corruption on long replies) while leaving field structure to the model, so reasoning quality is largely preserved. `_call_api(contents, response_schema=…)` is the **stricter** constrained decoding to an exact schema — always valid *and* shaped, but the hard grammar can **cost spatial-reasoning quality**. So `trajectory_planner` defaults to **JSON mode** (see its `structured_output` param) and only uses the full schema on request; the `reasoner` director uses the schema for its narrative (enum-constrained `environment_action`). Plain `_call_api(contents)` stays fully unconstrained.
 
 **Prompt templates.** Each node's prompt is an external `.txt` file under `prompts/` (installed to the package share), loaded and filled via `GeminiActionNode._fill_prompt(name, **tokens)` — the same convention as `mission_planner`'s `compile.txt`: a `#` comment header (stripped), literal `{token}` substitution (not `str.format`, so the JSON braces in the body need no `{{ }}` escaping). Edit a prompt and restart the node (no rebuild, with `--symlink-install`). Point `prompts_dir` elsewhere to override.
 
@@ -148,7 +150,7 @@ Built as a sibling of `description_detector`: same inputs (a camera `stamp` + a 
 |---|---|---|
 | `~/plan_trajectory` | `hint_interfaces/action/PlanTrajectory` | Action server |
 | `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Sub — ring buffer of last 30 frames |
-| `~/debug` | `sensor_msgs/Image` | Pub — waypoints drawn as a heatmap-colored polyline (`COLORMAP_JET`: first/nearest hottest, last/farthest coldest) |
+| `~/debug` | `sensor_msgs/Image` | Pub — all sampled candidate paths in grey, the chosen medoid drawn on top in green (tracker style) with waypoint dots |
 
 **`plan_trajectory` action fields**
 
@@ -169,6 +171,10 @@ Same as `description_detector` (`api_key_path`, `model_id`, `temperature`, `api_
 | Parameter | Default | Effect |
 |---|---|---|
 | `min_row` | `400` | Farthest image row (of 1000) a waypoint may occupy — caps forward reach. `1000` = right in front, smaller = farther/higher in the frame. The prompt asks the model to keep points at `y ≥ min_row`, and the node **clamps** any that overshoot (far points are where ground grounding is least reliable). Live-adjustable; raise it for shorter, more conservative steps |
+| `n_candidates` | `1` | Consensus sampling in **one** call. `>1` asks the model for N candidate paths in a single reply — a `{"candidates": [...]}` list (this model **rejects** `candidate_count>1`, so N-sampling is done in-prompt, not via the API) — then keeps the **medoid**, the candidate whose arc-length-resampled path is closest to all the others. Robust to the model splitting between routes at `temperature > 0` (and drops spurious "no path" replies as long as one candidate finds a path). `1` = a single plan (today's behaviour). Live-adjustable |
+| `structured_output` | `json` | Output control (quality vs validity), live-adjustable. **`json`** = JSON mode (`response_mime_type=application/json`) — valid JSON without the degenerate-token corruption, while keeping most of the model's reasoning freedom (the recommended default). **`off`** = unconstrained — best free-form quality, but a reply can occasionally be unparseable → that cycle aborts. **`schema`** = full constrained decoding to the waypoint schema — always valid *and* exactly-shaped, but the hard grammar can **cost spatial-reasoning quality** (paths got noticeably worse), so use only when validity matters more than path quality |
+
+> **Why medoid, not average.** Two valid routes (left vs right of a table) *average* into a path straight through it. The medoid picks the most central *actual* candidate, so it snaps to the majority route instead of interpolating between conflicting ones. Candidates that return no waypoints (wall / already there) don't vote unless **all** of them decline, in which case the node aborts as before. Because the N are drawn in one autoregressive pass they're more **correlated** than independent API samples would be — the prompt asks for genuinely different routes only when the scene is ambiguous, so natural agreement still shows through.
 
 ### Test
 
@@ -225,7 +231,7 @@ Because the prompts belong to the caller, the mission planner keeps them as data
 | Field | Type | Description |
 |---|---|---|
 | **Goal** `prompt` | `string` | Assembled prompt / context to reason over |
-| **Goal** `schema` | `string` | Optional JSON shape the reply must match; empty = free-form text |
+| **Goal** `schema` | `string` | Optional. How it's enforced depends on the `structured_output` param (below). A **real JSON schema** (parses to a dict) *can* drive `response_schema` constrained decoding (mode `schema`); otherwise (or for a loose hint like `'{"x": bool}'`) the shape is appended to the prompt as a hint, gated by JSON mode. Empty → free-form text |
 | **Goal** `images` | `sensor_msgs/CompressedImage[]` | Optional frames to reason over (empty = text-only); order is meaningful (e.g. before, after) |
 | **Result** `success` | `bool` | `true` when the model returned a usable reply (valid JSON when a schema was requested) |
 | **Result** `response` | `string` | The reply — canonical JSON when a schema was requested, else raw text; the failure reason when `success` is `false` |
@@ -235,7 +241,12 @@ Because the prompts belong to the caller, the mission planner keeps them as data
 
 Parameters are the same as `description_detector` (`api_key_path`, `model_id`,
 `temperature`, `api_timeout`, `thinking_budget`, `prompts_dir`). For the reasoner's
-narrative-heavy compile you may want a non-zero `thinking_budget`.
+narrative-heavy compile you may want a non-zero `thinking_budget`. Plus, mirroring
+`trajectory_planner`:
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `structured_output` | `json` | Output control when a `schema` is requested, live-adjustable. **`json`** = JSON mode (valid JSON, shape hinted in the prompt, reasoning freedom kept — the default). **`off`** = unconstrained (best quality; a reply can be unparseable → the call fails). **`schema`** = constrained decoding to the schema when it's real JSON (enum-enforced `environment_action`), but the hard grammar can cost reasoning quality. Invalid `environment_action` values are clamped to `stay` by the node regardless, so `json` is safe |
 
 ### Test
 

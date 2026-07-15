@@ -39,6 +39,14 @@ class ReasonerNode(GeminiActionNode):
     def __init__(self):
         super().__init__("reasoner_node")
 
+        # Output control (quality vs validity) when a schema is requested, same
+        # knob as trajectory_planner, live-adjustable:
+        #   "json"   (default) JSON mode — valid JSON, keeps reasoning freedom;
+        #   "off"    unconstrained — best quality, but a reply can be unparseable;
+        #   "schema" constrained decoding to the schema (enum-enforced), but the
+        #            hard grammar can cost reasoning quality.
+        self.declare_parameter("structured_output", "json")
+
         self._action_server = ActionServer(
             self,
             Reason,
@@ -63,17 +71,25 @@ class ReasonerNode(GeminiActionNode):
             return self._fail(goal_handle, "Empty prompt.")
 
         want_json = bool(goal.schema.strip())
+        mode = str(self._p("structured_output")).lower()
         prompt = goal.prompt
-        # A real JSON schema -> constrained decoding (guaranteed well-formed JSON).
-        # A loose shape string (e.g. '{"x": bool}') isn't valid JSON, so fall back
-        # to appending it as a prompt hint, exactly as before.
-        response_schema = self._as_response_schema(goal.schema) if want_json else None
-        if want_json and response_schema is None:
-            prompt = (
-                f"{goal.prompt}\n\n"
-                "Respond with JSON only — no prose, no markdown fencing — "
-                f"matching this shape:\n{goal.schema}"
-            )
+        response_schema = None
+        json_output = False
+        if want_json:
+            # "schema": constrain to the schema (only when it's real JSON). Else
+            # ("json"/"off", or a loose shape string) the decoder can't enforce the
+            # shape, so hint it in the prompt — and gate validity with JSON mode.
+            schema_obj = (self._as_response_schema(goal.schema)
+                          if mode == "schema" else None)
+            if schema_obj is not None:
+                response_schema = schema_obj
+            else:
+                prompt = (
+                    f"{goal.prompt}\n\n"
+                    "Respond with JSON only — no prose, no markdown fencing — "
+                    f"matching this shape:\n{goal.schema}"
+                )
+                json_output = (mode == "json")
 
         # Optional grounding frames (e.g. the mission director's before/after
         # views). Empty list -> pure text reasoning, exactly as before. Order is
@@ -93,7 +109,8 @@ class ReasonerNode(GeminiActionNode):
             return self._cancel(goal_handle)
 
         try:
-            raw = self._call_api(contents, response_schema=response_schema)
+            raw = self._call_api(contents, response_schema=response_schema,
+                                 json_output=json_output)
         except TimeoutError as e:
             return self._fail(goal_handle, str(e))
         except Exception as e:  # noqa: BLE001 — surfaced to caller as FAILURE

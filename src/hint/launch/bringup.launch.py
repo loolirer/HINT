@@ -107,10 +107,12 @@ def generate_launch_description():
         parameters=[{
             "api_key_path": "/root/secrets/gemini_api_key.txt",
             "model_id": "gemini-robotics-er-1.6-preview",
-            "thinking_budget": -1,
+            "thinking_budget": 0,
             # Gemini Robotics-ER is tuned to SAMPLE for spatial reasoning — the docs
             # recommend temperature 1.0 for pointing/trajectory tasks (not 0.0).
             "temperature": 1.0,
+            "n_candidates": 5,
+            "structured_output": "off",
         }],
     )
 
@@ -122,6 +124,7 @@ def generate_launch_description():
             "api_key_path": "/root/secrets/gemini_api_key.txt",
             "model_id": "gemini-robotics-er-1.6-preview",
             "thinking_budget": -1,
+            "structured_output": "off",
         }],
     )
 

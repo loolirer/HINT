@@ -28,6 +28,13 @@ class TrajectoryPlannerNode(GeminiActionNode):
         # model splitting between routes at temperature > 0. 1 = a single plan.
         self.declare_parameter("n_candidates", 1)
 
+        # Output control (quality vs validity), live-adjustable:
+        #   "json"   (default) JSON mode — valid JSON, keeps reasoning freedom;
+        #   "off"    unconstrained — best quality, but can return unparseable text;
+        #   "schema" constrained to the schema — always valid+shaped, but the hard
+        #            grammar can cost spatial-reasoning quality.
+        self.declare_parameter("structured_output", "json")
+
         # Continuity (T1): the frame and instruction from my previous plan, so the
         # next plan is grounded in how the view changed rather than starting cold.
         self._prev_pil = None
@@ -88,8 +95,11 @@ class TrajectoryPlannerNode(GeminiActionNode):
         contents = [prompt] + frames
         self._prev_pil = pil_img
         self._prev_description = goal.description
+        mode = str(self._p("structured_output")).lower()
+        schema = self._response_schema(n) if mode == "schema" else None
         try:
-            raw = self._call_api(contents, response_schema=self._response_schema(n))
+            raw = self._call_api(contents, response_schema=schema,
+                                 json_output=(mode == "json"))
         except TimeoutError as e:
             return self._abort(goal_handle, str(e))
         except Exception as e:
@@ -299,51 +309,42 @@ class TrajectoryPlannerNode(GeminiActionNode):
             markers.append(marker)
         return markers
 
-    def _heatmap_color(self, t):
-        """BGR color for ``t`` in ``[0, 1]`` — 1.0 hottest, 0.0 coldest."""
-        val = np.uint8([[int(round(t * 255))]])
-        bgr = cv2.applyColorMap(val, cv2.COLORMAP_JET)[0, 0]
-        return int(bgr[0]), int(bgr[1]), int(bgr[2])
-
     def _publish_debug(self, cv_bgr, stamp, selected, candidates):
-        """Draw every candidate path faint, then the chosen medoid highlighted.
+        """All candidate paths in grey, the chosen medoid in green (tracker style).
 
-        ``selected`` is the medoid markers; ``candidates`` is the list of every
-        candidate's markers (medoid included). Non-selected paths render as thin
-        grey polylines; the medoid gets a bold white polyline + heatmap dots.
+        ``selected`` is the medoid markers; ``candidates`` is every candidate's
+        markers (medoid included). The medoid is drawn last so it sits on top.
         """
         try:
             frame = cv_bgr.copy()
             h, w = frame.shape[:2]
+            green = (0, 255, 0)
 
             def to_px(markers):
                 return [(int((m.x + 1.0) / 2.0 * w), int((m.y + 1.0) / 2.0 * h))
                         for m in markers]
 
-            # All the rejected candidates first, as faint grey polylines.
+            # Every candidate in grey.
             for markers in candidates:
                 if markers is selected:
                     continue
                 pts = to_px(markers)
                 if len(pts) >= 2:
                     cv2.polylines(frame, [np.array(pts, np.int32)], False,
-                                  (140, 140, 140), 1, cv2.LINE_AA)
+                                  (150, 150, 150), 2, cv2.LINE_AA)
 
-            # The chosen medoid, highlighted: bold white spine + heatmap dots
-            # (first point hottest, last coldest).
+            # The chosen medoid in green, on top: line + waypoint dots.
             px = to_px(selected)
             if len(px) >= 2:
                 cv2.polylines(frame, [np.array(px, np.int32)], False,
-                              (255, 255, 255), 2, cv2.LINE_AA)
-            n = len(px)
-            for i, (cx, cy) in enumerate(px):
-                color = self._heatmap_color(1.0 - (i / max(n - 1, 1)))
-                cv2.circle(frame, (cx, cy), 7, color, -1)
+                              green, 2, cv2.LINE_AA)
+            for cx, cy in px:
+                cv2.circle(frame, (cx, cy), 4, green, -1)
 
-            if len(candidates) > 1:
-                cv2.putText(frame, f"medoid of {len(candidates)}", (8, h - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1,
-                            cv2.LINE_AA)
+            label = (f"medoid of {len(candidates)}" if len(candidates) > 1
+                     else f"{len(px)} waypoints")
+            cv2.putText(frame, label, (8, h - 10), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5, green, 1, cv2.LINE_AA)
 
             out = self._bridge.cv2_to_imgmsg(frame, encoding="bgr8")
             out.header.stamp = stamp
