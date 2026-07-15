@@ -47,11 +47,31 @@ from rclpy.node import Node
 from hint_interfaces.action import MissionAdvance, Reason
 from sensor_msgs.msg import CompressedImage
 
-NARRATIVE_SCHEMA = (
-    '{"situation": string, "done": string, "next": string, '
-    '"environment_description": string, '
-    '"environment_action": "stay"|"advance"|"back"|"insert", '
-    '"new_environment": {"name": string, "description": string}}')
+# A real JSON schema (not a loose shape hint): the reasoner turns this into
+# response_schema for constrained decoding, so the compile reply is always
+# well-formed JSON with exactly these fields.
+NARRATIVE_SCHEMA = json.dumps({
+    "type": "object",
+    "properties": {
+        "situation": {"type": "string"},
+        "done": {"type": "string"},
+        "next": {"type": "string"},
+        "environment_description": {"type": "string"},
+        "environment_action": {
+            "type": "string",
+            "enum": ["stay", "advance", "back", "insert"],
+        },
+        "new_environment": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "description": {"type": "string"},
+            },
+        },
+    },
+    "required": ["situation", "done", "next", "environment_description",
+                 "environment_action"],
+})
 
 ACTIONS = ("stay", "advance", "back", "insert")
 

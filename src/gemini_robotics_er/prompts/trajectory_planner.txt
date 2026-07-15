@@ -4,8 +4,10 @@
 #   {description}   the navigation instruction to follow
 #   {min_row}       reach cap — every point must have y >= this (of 1000)
 #   {continuity}    context from my previous step (empty on my first plan)
+#   {return_spec}   the output-format block (single plan, or N candidate plans for medoid consensus)
 #
 # Returns JSON: {"reasoning": <what I did + why>, "waypoints": [{"point":[y,x],"label":<n>}, ...]}
+# (or a {"candidates": [...]} list when the node samples N — see {return_spec}).
 # My director sees the image itself, so "reasoning" is my PATH note (what I did), not a scene report.
 #
 #- When forward motion is restricted, I turn in place by keeping every point low (near row 1000) and
@@ -34,7 +36,7 @@ so the whole line arrives aligned:
    the middle, one just past. I line up with this straight run before I enter.
 
 Rules on the points:
-- At least 20 points, ONLY on traversable ground (never on walls, furniture, or obstacles), ordered
+- 10 points, ONLY on traversable ground (never on walls, furniture, or obstacles), ordered
   "0" nearest (bottom-center, me) to <n> last, honoring any preference in the instruction.
 - Clearance ALWAYS comes first: contour obstacles and narrow passages so the path ALIGNS me to pass
   cleanly. I am WIDE — through a doorway/gap I pass SQUARE and CENTERED (the final-run rule above),
@@ -55,5 +57,4 @@ constraint that forced it — e.g. "a soft curve left, then straight through the
 "lined up square to the gap before passing", "held short of the sofa, angled to see the lamp beside
 it". If I laid no path, say what blocked me. I do NOT re-describe the whole room — my director sees it.
 
-Return JSON only, no markdown fencing:
-{"reasoning": <what I did + why>, "waypoints": [{"point": [y, x], "label": <n>}, ...]}
+{return_spec}

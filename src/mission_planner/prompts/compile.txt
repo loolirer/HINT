@@ -4,7 +4,7 @@
 # move), and {vision} tells it how to read them. Structure: the STATIC block (brief + instructions)
 # comes first and the VARIABLE inputs (environment, situation, memory, vision, outcome) come last,
 # so the static prefix can be cached across cycles. The JSON shape is NOT written here — the
-# reasoner node appends it from the `schema` field, so it is sent exactly once.
+# reasoner node enforces it via response_schema (constrained decoding) from the `schema` field.
 #
 # Tokens (literal {name}, substring-substituted by the node — NOT str.format):
 #   {brief}        config/brief.md, verbatim (who I am + how I navigate)

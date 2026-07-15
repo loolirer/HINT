@@ -161,8 +161,10 @@ The single reasoner prompt (replacing the old judge/replan/compress). Placeholde
 > `images`), not substituted into the prompt text; `{vision}` is the caption that tells the model how
 > to read them.
 
-Reasoner `schema`:
-`{"situation": string, "done": string, "next": string, "environment_description": string, "environment_action": "stay"|"advance"|"back"|"insert", "new_environment": {"name": string, "description": string}}`
+Reasoner `schema` — a **real JSON schema** (`NARRATIVE_SCHEMA`) passed to the reasoner, which uses it
+as `response_schema` for **constrained decoding**, so the compile reply is always well-formed JSON
+with exactly these fields:
+`{situation, done, next, environment_description, environment_action ∈ {stay|advance|back|insert} (enum), new_environment: {name, description}}`
 — the model reports its current `situation` + progress + enriches the current description, and edits the queue only via
 `environment_action` (`new_environment` carries the room to splice on `insert`). It never names
 the current environment; that's the queue head, owned by the node.
