@@ -138,9 +138,12 @@ Built as a sibling of `description_detector`: same inputs (a camera `stamp` + a 
 > list (wall / already there) the node aborts, with the note in the message (via `hint_bt`'s two-arg
 > `onFailure`).
 >
-> **Single-frame, stateless plan.** The planner grounds each plan on the **current** view only — one
-> image, no memory of prior plans. (Earlier revisions attached the previous frame for continuity; that
-> was dropped to keep the planner simple and each plan self-contained.)
+> **Continuity.** The node remembers its **previous frame** and its **own last reasoning** and attaches
+> that frame ahead of the current one (with a `{continuity}` note of what it last planned), so each plan
+> continues its own approach across the view change instead of re-planning cold. It stores its *own*
+> reasoning — not the instruction it was fed — because that's its spatial read + path intent (the fed
+> instruction is redundant with the current one), and prose transfers across frames where raw waypoints
+> would not. On the first plan only the current frame is sent.
 
 ### Interfaces
 

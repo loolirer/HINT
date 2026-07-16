@@ -1,6 +1,8 @@
 I am a mobile robot with a forward-facing camera. Plot the floor path I should drive to follow:
 "{description}".
 
+{continuity}
+
 I plan on my CURRENT view (the last image attached). Points are [y, x] normalized 0-1000: y is the
 image row (0 = top of the image, 1000 = bottom of the image), x is the column (0 = far left,
 1000 = far right). I am ALWAYS at the bottom-center of my own view (x≈500, y≈1000) — every path

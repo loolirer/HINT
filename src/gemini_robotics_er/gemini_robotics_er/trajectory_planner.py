@@ -35,6 +35,13 @@ class TrajectoryPlannerNode(GeminiActionNode):
         #            grammar can cost spatial-reasoning quality.
         self.declare_parameter("structured_output", "json")
 
+        # Continuity: the frame and the plan REASONING from my previous step, so
+        # each plan builds on how the view changed instead of starting cold. I keep
+        # my OWN reasoning (my spatial read + path intent), not the instruction I was
+        # fed — that's what "continue smoothly" needs, and it transfers across frames.
+        self._prev_pil = None
+        self._prev_reasoning = ""
+
         self._debug_pub = self.create_publisher(Image, "~/debug", 10)
 
         self._action_server = ActionServer(
@@ -77,9 +84,12 @@ class TrajectoryPlannerNode(GeminiActionNode):
         n = max(1, int(self._p("n_candidates")))
         prompt = self._fill_prompt(
             "trajectory_planner.txt", description=goal.description,
-            min_row=int(self._p("min_row")), return_spec=self._return_spec(n))
-        # Text before images (Gemini best practice); the current view is the only frame.
-        contents = [prompt, pil_img]
+            min_row=int(self._p("min_row")), return_spec=self._return_spec(n),
+            continuity=self._continuity_text())
+        # Text first, then the previous frame (if any) before the current one, so
+        # "the last image attached" is my current view. Built from the OLD prev.
+        frames = [self._prev_pil, pil_img] if self._prev_pil is not None else [pil_img]
+        contents = [prompt] + frames
         mode = str(self._p("structured_output")).lower()
         schema = self._response_schema(n) if mode == "schema" else None
         try:
@@ -117,6 +127,10 @@ class TrajectoryPlannerNode(GeminiActionNode):
             self.get_logger().info(
                 f"Chose medoid of {len(cands)}/{len(cand_dicts)} candidate paths.")
 
+        # Latch this frame + the chosen reasoning as continuity for the next plan.
+        self._prev_pil = pil_img
+        self._prev_reasoning = reasoning
+
         self._publish_debug(cv_bgr, stamp, markers, [c[1] for c in cands])
 
         result = PlanTrajectory.Result()
@@ -130,6 +144,24 @@ class TrajectoryPlannerNode(GeminiActionNode):
 
     # ------------------------------------------------------------------
     # Helpers
+
+    def _continuity_text(self):
+        """The {continuity} token: my previous frame + my own last reasoning, or
+        empty on the first plan.
+
+        Empty -> only the current frame is attached (single image). Otherwise the
+        previous frame is attached FIRST and this names my last plan, so I continue
+        my own approach across the view change instead of re-planning cold.
+        """
+        if self._prev_pil is None:
+            return ""
+        prev = self._prev_reasoning.strip() or "(no note)"
+        return (
+            "Two images are attached: the FIRST is my PREVIOUS view, the SECOND is my CURRENT view. "
+            f'Last step I planned: "{prev}". Continue that approach given how the view has changed — '
+            "build on the progress between the two frames, do not re-plan from scratch. But the CURRENT "
+            "instruction WINS: if it now points somewhere different, I follow it and drop the old plan."
+        )
 
     @staticmethod
     def _response_schema(n):
