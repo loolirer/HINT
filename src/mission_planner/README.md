@@ -3,8 +3,8 @@
 The semantic mission planner — a **narrative director**. It starts from a static **Semantic
 Plan** (a prior: which environments to visit, in order, and a brief intent for each) and drives
 navigation by maintaining a rolling **Narrative State** that it **recompiles every cycle** with
-a single `reasoner` call: fold the last move's outcome (the trajectory planner's own VLM
-reasoning) into the narrative, and emit the next instruction.
+a single `reasoner` call: judge the last move from the before/after camera frames, fold that into
+the narrative, and emit the next instruction.
 
 There are **no discrete steps, statuses, retries or pass/fail judging**. The old model outlined
 a happy path and read every divergence as failure, forcing constant replanning; here divergence
@@ -72,14 +72,14 @@ redirect them anywhere else.)
 
 ## The loop, in one line
 
-Per cycle there are **two VLM calls** with a clean division of labour — **both now see**:
+Per cycle there are **two VLM calls** with a clean division of labour — **both see**:
 - **trajectory_planner (executor-with-eyes):** the narrative's `next` + the current frame →
-  waypoints **and** a reasoning `message` (what it intended / why). That message rides out as the
-  navigator's note.
+  waypoints **and** a short reasoning `message` (what it did / why). The BT logs that message, but it
+  is **not** fed to the director.
 - **reasoner (director-with-eyes):** one `compile.txt` call that reasons over the **before/after
   frames of the move just executed** (captured by this node and attached to the call) plus the
-  narrative — it judges the move against ground truth, folds it in, and emits the next instruction
-  + completion.
+  narrative — it judges the move from the images, folds it in, and emits the next instruction +
+  completion.
 
 The `reasoner` is the director (memory + intent, now grounded in what it *sees*); the trajectory
 planner is the actor-with-eyes. **Frame capture:** the mission planner subscribes to the camera and
@@ -163,9 +163,8 @@ The single reasoner prompt (replacing the old judge/replan/compress). Placeholde
 | `{brief}` | `prompts/brief.txt`, verbatim (permanent context) |
 | `{environment}` | the **current** environment (name/description/intent) + a one-line peek at the next — bounded regardless of queue length |
 | `{situation}` | last cycle's `situation` — my standing after the previous move (continuity for the fresh rewrite) |
-| `{narrative}` | the memory carried forward — `done` only (`next` is regenerated, its result already in `{outcome}`) |
+| `{narrative}` | the memory carried forward — `done` only (`next` is regenerated; its result is read from the before/after images) |
 | `{vision}` | how to read the attached camera image(s): two = before/after the last move, one = current view (first move), none |
-| `{outcome}` | the navigator's note — the move's success flag + the planner's VLM reasoning (empty on cycle 0); the images are the real evidence |
 
 > The before/after frames themselves are **attached to the reasoner call** (the `Reason` goal's
 > `images`), not substituted into the prompt text; `{vision}` is the caption that tells the model how

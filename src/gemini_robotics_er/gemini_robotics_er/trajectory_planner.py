@@ -35,11 +35,6 @@ class TrajectoryPlannerNode(GeminiActionNode):
         #            grammar can cost spatial-reasoning quality.
         self.declare_parameter("structured_output", "json")
 
-        # Continuity (T1): the frame and instruction from my previous plan, so the
-        # next plan is grounded in how the view changed rather than starting cold.
-        self._prev_pil = None
-        self._prev_description = ""
-
         self._debug_pub = self.create_publisher(Image, "~/debug", 10)
 
         self._action_server = ActionServer(
@@ -76,25 +71,15 @@ class TrajectoryPlannerNode(GeminiActionNode):
         if goal_handle.is_cancel_requested:
             return self._cancel(goal_handle)
 
-        # Continuity (T1): attach the previous frame ahead of the current one and
-        # tell the model what I was trying to do last step, so it builds on the
-        # visible progress instead of planning cold. Build contents from the OLD
-        # prev, then latch this frame/instruction as the prev for next time.
         # N-candidate sampling is done IN ONE call: this model rejects
         # candidate_count>1, so the prompt asks for N paths in a single response
         # (via {return_spec}) and we pick the medoid. n<=1 is the plain single plan.
         n = max(1, int(self._p("n_candidates")))
         prompt = self._fill_prompt(
             "trajectory_planner.txt", description=goal.description,
-            min_row=int(self._p("min_row")), continuity=self._continuity_text(),
-            return_spec=self._return_spec(n))
-        # Text before images (Gemini best practice), previous frame before current
-        # so "the last image attached" is my current view.
-        frames = ([self._prev_pil, pil_img] if self._prev_pil is not None
-                  else [pil_img])
-        contents = [prompt] + frames
-        self._prev_pil = pil_img
-        self._prev_description = goal.description
+            min_row=int(self._p("min_row")), return_spec=self._return_spec(n))
+        # Text before images (Gemini best practice); the current view is the only frame.
+        contents = [prompt, pil_img]
         mode = str(self._p("structured_output")).lower()
         schema = self._response_schema(n) if mode == "schema" else None
         try:
@@ -146,22 +131,6 @@ class TrajectoryPlannerNode(GeminiActionNode):
     # ------------------------------------------------------------------
     # Helpers
 
-    def _continuity_text(self):
-        """The {continuity} token: what my previous step was, or empty on the first.
-
-        Empty -> only the current frame is attached (single image). Otherwise the
-        previous frame is attached FIRST and this text names what it was for, so
-        the model reads the current view as the continuation of that attempt.
-        """
-        if self._prev_pil is None:
-            return ""
-        prev = self._prev_description.strip() or "(no stated goal)"
-        return (
-            "Two images are attached. The FIRST is what I saw at my previous step, when I was "
-            f'trying to: "{prev}". The SECOND is my current view. Build smoothly on the progress '
-            "visible between them — continue the approach, do not restart from scratch."
-        )
-
     @staticmethod
     def _response_schema(n):
         """Constrained-output schema: a single plan, or a candidates list.
@@ -203,7 +172,7 @@ class TrajectoryPlannerNode(GeminiActionNode):
         asking for N paths in a single response and taking the medoid.
         """
         single = ('Return JSON only, no markdown fencing:\n'
-                  '{"reasoning": <what I did + why>, '
+                  '{"reasoning": <plan the path in words, then draw it>,'
                   '"waypoints": [{"point": [y, x], "label": <n>}, ...]}')
         if n <= 1:
             return single
@@ -211,7 +180,7 @@ class TrajectoryPlannerNode(GeminiActionNode):
             f"Give my top {n} candidate paths for this. If the way is clear they will be similar; if "
             "the scene is ambiguous (two ways around something) let them differ so the real options "
             "show. Each is a COMPLETE plan by the rules above. Return JSON only, no markdown fencing:\n"
-            '{"candidates": [{"reasoning": <what I did + why>, '
+            '{"candidates": [{"reasoning": <plan the path in words, then draw it>,'
             '"waypoints": [{"point": [y, x], "label": <n>}, ...]}, ...]}')
 
     @staticmethod

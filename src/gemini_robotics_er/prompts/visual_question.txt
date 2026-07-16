@@ -1,9 +1,3 @@
-# visual_question.txt — a yes/no VLM check over one frame, first-person.
-#
-# Tokens: {question}  the yes/no question to answer
-# Returns JSON: {"answer": "yes"|"no", "rationale": "<one short sentence>"}
-# ---------------------------------------------------------------------------
-
 Looking through my camera, answer this yes/no question: "{question}".
 Answer only about what I can actually see right now.
 

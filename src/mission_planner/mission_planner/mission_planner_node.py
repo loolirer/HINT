@@ -49,10 +49,12 @@ from sensor_msgs.msg import CompressedImage
 
 # A real JSON schema (not a loose shape hint): the reasoner turns this into
 # response_schema for constrained decoding, so the compile reply is always
-# well-formed JSON with exactly these fields.
+# well-formed JSON with exactly these fields. "analysis" is FIRST so the model
+# reasons before the answer fields (chain-of-thought); the node ignores it.
 NARRATIVE_SCHEMA = json.dumps({
     "type": "object",
     "properties": {
+        "analysis": {"type": "string"},
         "situation": {"type": "string"},
         "done": {"type": "string"},
         "next": {"type": "string"},
@@ -69,7 +71,7 @@ NARRATIVE_SCHEMA = json.dumps({
             },
         },
     },
-    "required": ["situation", "done", "next", "environment_description",
+    "required": ["analysis", "situation", "done", "next", "environment_description",
                  "environment_action"],
 })
 
@@ -213,22 +215,21 @@ class MissionPlannerNode(Node):
             self._feedback(goal_handle, MissionAdvance, "RUNNING")
 
             trigger = None
-            outcome_text = "(nothing yet — this is the first cycle)"
             if self._served:
                 trigger = {"success": bool(req.success), "observation": req.observation}
-                outcome_text = self._outcome_text(req)
                 self._append_log("follow",
                                  result="success" if req.success else "failure",
                                  observation=req.observation)
 
             # Latch the before/after frames for the director-VLM. `after` = where
             # the last move ended (now); `before` = where it began (latched at the
-            # end of the previous advance).
+            # end of the previous advance). The director reads the move's outcome
+            # from these images — the planner's text note is no longer fed in.
             after = self._latest_frame
             before = self._before_frame
             images, vision = self._vision_inputs(before, after)
 
-            data = self._compile(outcome_text, vision, images, goal_handle)
+            data = self._compile(vision, images, goal_handle)
 
             if goal_handle.is_cancel_requested:
                 goal_handle.canceled()
@@ -341,29 +342,19 @@ class MissionPlannerNode(Node):
     # ------------------------------------------------------------------
     # Narrative recompile (the single reasoner call)
 
-    def _compile(self, outcome_text, vision, images, goal_handle=None):
+    def _compile(self, vision, images, goal_handle=None):
         prompt = self._fill("compile.txt", {
             "brief": self._brief,
             "environment": self._context_text(),
             "situation": self._narrative.get("situation", "") or "(nothing yet)",
             "narrative": self._narrative_text(),
             "vision": vision,
-            "outcome": outcome_text,
         })
         data = self._call_reasoner(prompt, NARRATIVE_SCHEMA, images, goal_handle)
         if not isinstance(data, dict):
             self.get_logger().warn("Narrative compile failed — keeping previous narrative.")
             return None
         return data
-
-    def _outcome_text(self, req):
-        base = ("I finished my last move" if req.success
-                else "My last move failed or was interrupted")
-        # The observation is my navigator's note (what it tried / any block), not a
-        # scene report — I judge the actual result from the before/after images.
-        if req.observation:
-            return f"{base}. My navigator's note: {req.observation}"
-        return base + "."
 
     def _context_text(self):
         """Only the current environment + a one-line peek — bounded regardless of
@@ -388,8 +379,8 @@ class MissionPlannerNode(Node):
 
     def _narrative_text(self):
         # Only the accumulated `done` carries forward; `next` is regenerated and its
-        # result is already in {outcome}, so it is not echoed back. The compile
-        # prompt frames this as "What I remember so far".
+        # result is read from the before/after images, so it is not echoed back. The
+        # compile prompt frames this as "What I remember so far".
         return self._narrative.get("done", "") or "(nothing yet)"
 
     # ------------------------------------------------------------------

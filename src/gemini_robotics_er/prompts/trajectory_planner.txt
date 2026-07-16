@@ -1,21 +1,5 @@
-# trajectory_planner.txt — plan a short ground path from my current view, first-person.
-#
-# Tokens (literal {name}, substring-substituted by _fill_prompt — NOT str.format):
-#   {description}   the navigation instruction to follow
-#   {min_row}       reach cap — every point must have y >= this (of 1000)
-#   {continuity}    context from my previous step (empty on my first plan)
-#   {return_spec}   the output-format block (single plan, or N candidate plans for medoid consensus)
-#
-# Returns JSON: {"reasoning": <what I did + why>, "waypoints": [{"point":[y,x],"label":<n>}, ...]}
-# (or a {"candidates": [...]} list when the node samples N — see {return_spec}).
-# My director sees the image itself, so "reasoning" is my PATH note (what I did), not a scene report.
-#
-# ---------------------------------------------------------------------------
-
 I am a mobile robot with a forward-facing camera. Plot the floor path I should drive to follow:
 "{description}".
-
-{continuity}
 
 I plan on my CURRENT view (the last image attached). Points are [y, x] normalized 0-1000: y is the
 image row (0 = top of the image, 1000 = bottom of the image), x is the column (0 = far left,
@@ -49,9 +33,8 @@ Rules on the points:
 Leave "waypoints" empty if there is no valid path — blocked by a wall/obstacle, or I am already
 there — and say why in "reasoning".
 
-In "reasoning" (1-2 sentences) say WHAT I DID and why: the SHAPE of the path I laid and any
-constraint that forced it — e.g. "a soft curve left, then straight through the doorway center",
-"lined up square to the gap before passing", "held short of the sofa, angled to see the lamp beside
-it". If I laid no path, say what blocked me. I do NOT re-describe the whole room — my director sees it.
+In "reasoning" I PLAN the path in words BEFORE drawing it: where the target, the obstacles and any
+gap are in the image, which side I pass, where the doorway center and my final heading sit — the
+waypoints then follow that plan. If there is no path, I say what blocks me. I do NOT catalog the room.
 
 {return_spec}

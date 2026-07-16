@@ -122,7 +122,7 @@ def generate_launch_description():
         output="screen",
         parameters=[{
             "api_key_path": "/root/secrets/gemini_api_key.txt",
-            "model_id": "gemini-robotics-er-1.6-preview",
+            "model_id": "gemini-3.1-flash-lite,
             "thinking_budget": -1,
             "structured_output": "off",
         }],

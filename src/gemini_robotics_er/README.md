@@ -130,19 +130,17 @@ Plans a **ground-restricted trajectory** from a natural-language instruction usi
 Built as a sibling of `description_detector`: same inputs (a camera `stamp` + a text field) and the same stamp-based ring buffer / API plumbing (both subclass `GeminiActionNode`). Instead of one bounding box it grounds an **ordered marker array in normalized image space** (`geometry_msgs/Point[]`, `x`/`y ∈ [-1, 1]` (center 0), `z` unused, `markers[0]` nearest → `markers[-1]` farthest) plus the frame `stamp`. The model is prompted to keep points on the traversable ground plane, ordered nearest→farthest, and to honor any semantic preference in the instruction.
 
 > **The `reasoning` field is a path note — what the model did and why (F2).** Since the
-> `mission_planner` director now sees the frames directly, `reasoning` is no longer the narrative's
-> only eyes, so the prompt (`prompts/trajectory_planner.txt`) asks for a short (1-2 sentence) note of
-> the **path shape** and any constraint that forced it (e.g. *"a soft curve left around the chair
-> toward the doorway"*), not a full scene report. It rides out on the result `message` → the
-> director's `{outcome}` as the "navigator's note" (its intent), while the images are the director's
-> evidence of the result. On an empty `waypoints` list (wall / already there) the node aborts, but the
-> note still reaches the caller (via `hint_bt`'s two-arg `onFailure`).
+> `mission_planner` director sees the frames directly, `reasoning` is not the narrative's eyes, so the
+> prompt (`prompts/trajectory_planner.txt`) asks for a short (1-2 sentence) note of the **path shape**
+> and any constraint that forced it (e.g. *"a soft curve left around the chair toward the doorway"*),
+> not a full scene report. It rides out on the result `message`; the mission BT logs it, but the
+> director judges the move from the before/after images, not from this note. On an empty `waypoints`
+> list (wall / already there) the node aborts, with the note in the message (via `hint_bt`'s two-arg
+> `onFailure`).
 >
-> **Continuity (T1).** The node remembers the frame and instruction from its **previous** plan and
-> attaches that frame ahead of the current one (with a `{continuity}` note of what it was trying to
-> do), so each plan builds on the visible progress between the two views instead of planning cold. The
-> model plans on the **current** (last-attached) view; on the first plan only that single frame is
-> sent.
+> **Single-frame, stateless plan.** The planner grounds each plan on the **current** view only — one
+> image, no memory of prior plans. (Earlier revisions attached the previous frame for continuity; that
+> was dropped to keep the planner simple and each plan self-contained.)
 
 ### Interfaces
 
