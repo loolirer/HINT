@@ -82,7 +82,7 @@ class MissionPlannerNode(Node):
 
         share = get_package_share_directory("mission_planner")
         self.declare_parameter("mission_path", "")   # empty = start idle; pick a mission per ~/advance call
-        self.declare_parameter("brief_path", os.path.join(share, "config", "brief.md"))
+        self.declare_parameter("brief_path", os.path.join(share, "prompts", "brief.txt"))
         self.declare_parameter("prompts_dir", os.path.join(share, "prompts"))
         self.declare_parameter("narrative_path", "")   # empty -> <mission>.narrative.jsonl
         self.declare_parameter("log_path", "")          # empty -> <mission>.log.jsonl

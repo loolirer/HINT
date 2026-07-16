@@ -34,7 +34,7 @@ mission_planner/
   mission_planner/mission_planner_node.py  # the narrative-director node
   missions/<name>/mission.yaml             # a Semantic Plan (one dir per mission)
   prompts/compile.txt                      # the single narrative-compile prompt
-  config/brief.md                          # permanent context: capabilities + rules + policy
+  prompts/brief.txt                        # permanent context: capabilities + rules + policy
   README.md                                # this file — single source of truth
 ```
 
@@ -160,7 +160,7 @@ The single reasoner prompt (replacing the old judge/replan/compress). Placeholde
 
 | Token | Filled with |
 |---|---|
-| `{brief}` | `config/brief.md`, verbatim (permanent context) |
+| `{brief}` | `prompts/brief.txt`, verbatim (permanent context) |
 | `{environment}` | the **current** environment (name/description/intent) + a one-line peek at the next — bounded regardless of queue length |
 | `{situation}` | last cycle's `situation` — my standing after the previous move (continuity for the fresh rewrite) |
 | `{narrative}` | the memory carried forward — `done` only (`next` is regenerated, its result already in `{outcome}`) |
@@ -179,12 +179,12 @@ with exactly these fields:
 `environment_action` (`new_environment` carries the room to splice on `insert`). It never names
 the current environment; that's the queue head, owned by the node.
 
-`config/brief.md` is the permanent-context prefix (capabilities, navigation preferences, ambiguity
+`prompts/brief.txt` is the permanent-context prefix (capabilities, navigation preferences, ambiguity
 policy) prepended on every call.
 
 ## Node
 
-`mission_planner_node` loads `brief.md` and `compile.txt` at startup and then **waits idle** for a
+`mission_planner_node` loads `brief.txt` and `compile.txt` at startup and then **waits idle** for a
 mission. It holds the current narrative in memory and exposes **one** action server, `~/advance`,
 called in an `advance → execute` loop. Each `advance` is one reasoner call. The first `~/advance`
 that carries a `mission_path` loads that mission (and later ones switch it); an `advance` with no
@@ -213,7 +213,7 @@ or the failure reason). On the first call nothing has executed (`success` defaul
 | Parameter | Default | Effect |
 |---|---|---|
 | `mission_path` | `""` | Optional mission to preload at startup; empty → start **idle**. A `~/advance` goal's `mission_path` selects/switches the mission per call (the node reloads on change, resuming that mission's narrative if it exists), so one running node serves any mission without a restart |
-| `brief_path` | share `config/brief.md` | Permanent-context brief |
+| `brief_path` | share `prompts/brief.txt` | Permanent-context brief |
 | `prompts_dir` | share `prompts/` | Directory holding `compile.txt` |
 | `narrative_path` | `""` | Narrative history; empty → sibling of the real mission file (`<mission>.narrative.jsonl`) |
 | `log_path` | `""` | Raw log; empty → sibling of the real mission file (`<mission>.log.jsonl`) |
