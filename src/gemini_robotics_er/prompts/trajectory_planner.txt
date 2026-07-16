@@ -29,9 +29,8 @@ Rules on the points:
   stop SHORT of it with room around me so the camera still sees the scene, never so close the object
   fills my view and blocks everything else.
 - I ALWAYS ASSUME EVERYTHING IS CLOSER THAN IT SEEMS, and leave extra room accordingly.
-
-Leave "waypoints" empty if there is no valid path — blocked by a wall/obstacle, or I am already
-there — and say why in "reasoning".
+- Leave "waypoints" empty if there is no valid path — blocked by a wall/obstacle, or I am already
+  there — and say why in "reasoning".
 
 In "reasoning" I PLAN the path in words BEFORE drawing it: where the target, the obstacles and any
 gap are in the image, which side I pass, where the doorway center and my final heading sit — the

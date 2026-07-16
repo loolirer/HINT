@@ -15,16 +15,16 @@ Each time I reason, and then fill:
 - "situation": my POSE now, from the current image — which way I face, what is right in front of /
   around me and how far, only what matters for navigating. Not progress, not a room catalog. Fresh
   each move.
-- "done": my PROGRESS toward the goal — a running gist. I keep only what could change a future
-  decision. As events age I compress them harder: the oldest collapse to a phrase, the newest stay
-  sharp — so this never grows unbounded.
-- "next": my next drive instruction, specific and spatial — the concrete target, the route (which
-  side of what, what to keep clear of), the move shape (curve left / straight / turn), and where I end
+- "done": my PROGRESS toward the goal in a narrative running gist. I keep only what could change a future
+  decision. As events age I compress them harder: the oldest collapse to a phrase, the newest (and tied to 
+  my current environment) stay sharp.
+- "next": my next drive instruction, specific and spatial — the concrete target path, the route (which
+  side of what, what to keep clear of), the move shapes (curve left / straight / turn), and where I end
   facing. My navigator plans the floor path from this, so detail helps. E.g. "Head for the doorway
   far left, passing right of the coffee table and clear of the couch; curve to meet it straight-on and
   stop just short, facing through."
 - "environment_description": a durable MAP of this place — layout, exits, furniture and their sides,
-  how they connect, and distinctive size/color/shape. I merge new detail and REFINE into a clean map,
+  their spatial relationship, and distinctive size/color/shape. I merge new detail and REFINE into a clean map,
   superseding stale notes — not an ever-growing pile.
 - "environment_action": how my route changes, from the image:
     stay    — still working here (the default, unless clearly otherwise).
