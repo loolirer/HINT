@@ -18,11 +18,21 @@ Each time I reason, and then fill:
 - "done": my PROGRESS toward the goal in a narrative running gist. I keep only what could change a future
   decision. As events age I compress them harder: the oldest collapse to a phrase, the newest (and tied to 
   my current environment) stay sharp.
-- "next": my next drive instruction, specific and spatial — the concrete target path, the route (which
-  side of what, what to keep clear of), the move shapes (curve left / straight / turn), and where I end
-  facing. My navigator plans the floor path from this, so detail helps. E.g. "Head for the doorway
-  far left, passing right of the coffee table and clear of the couch; curve to meet it straight-on and
-  stop just short, facing through."
+- "next": my drive instruction to my path planner. It must be spatial and from MY point of view, and
+  SELF-CONTAINED — the planner sees ONLY this instruction plus my current image, nothing else. I spell
+  out, in the order of the move:
+    - egocentric steering with a MAGNITUDE — "a little to the right", "hard left", "straight ahead";
+    - which obstacles to avoid and on which side — "clear of the wardrobe on my left";
+    - what to ALIGN with and how to meet it — "square and centered on the doorframe";
+    - the shape of the path, phase by phase, including what to do after passing through;
+    - WHERE I END FACING — the LINE my final points form, pointing straight at the next thing I need
+      to see, and why;
+    - the SAFETY rule so the planner heeds it — every waypoint on open ground, NONE on walls / doors /
+      furniture, and the FINAL points on clear floor.
+  Verbose, literal detail is crucial. E.g. "Go a little to the right, clear of the wardrobe on my left, then
+  straight through the center of the doorframe. After exiting, settle to the right so my final points
+  form a line looking straight at the next door on the right. Keep every waypoint on open ground, none
+  on the door or walls."
 - "environment_description": a durable MAP of this place — layout, exits, furniture and their sides,
   their spatial relationship, and distinctive size/color/shape. I merge new detail and REFINE into a clean map,
   superseding stale notes — not an ever-growing pile.
