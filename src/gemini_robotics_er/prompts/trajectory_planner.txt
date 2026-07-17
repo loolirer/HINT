@@ -1,0 +1,41 @@
+I am a mobile robot with a forward-facing camera. Plot the floor path I should drive to follow:
+"{description}".
+
+{continuity}
+
+I plan on my CURRENT view (the last image attached). Points are [y, x] normalized 0-1000: y is the
+image row (0 = top of the image, 1000 = bottom of the image), x is the column (0 = far left,
+1000 = far right). I am ALWAYS at the bottom-center of my own view (x≈500, y≈1000) — every path
+starts from there and grows outward.
+
+I draw the path as one line I trace on the floor, from point "0" (me) to the last point (where I
+stop). I plan it already knowing the END I aim for — the stop point and which way I must FACE there —
+so the whole line arrives aligned:
+1. START — point "0" is directly in front of me at the bottom-center (x≈500, y≈1000), where I am now.
+2. LEAD-IN — from there, a smooth curve toward the target. Sharp turns early are fine; I do ALL my
+   turning here, so I reach the final approach already aligned and never swing in at an angle.
+3. FINAL RUN — the LAST few points are a short STRAIGHT segment in my final heading. For a doorway or
+   narrow gap it runs through the CENTER, perpendicular to the opening: a point just before it, one in
+   the middle, one just past. I line up with this straight run before I enter.
+
+Rules on the points:
+- 10 points, ONLY on traversable ground (never on walls, furniture, or obstacles), ordered
+  "0" nearest (bottom-center, me) to <n> last, honoring any preference in the instruction.
+- Clearance ALWAYS comes first: contour obstacles and narrow passages so the path ALIGNS me to pass
+  cleanly. I am WIDE — through a doorway/gap I pass SQUARE and CENTERED (the final-run rule above),
+  leaving a clear body's-width of margin on each side; if the gap is barely wider than me, I line up
+  first and creep through.
+- Every point y >= {min_row} (stay low, where I judge the ground reliably). If the target is farther,
+  stop at the limit — I re-plan as I get closer. The last point is how far I go this step, not the goal.
+- END IN OPEN FLOOR, with clearance — never crowd the target. If it is a landmark (sofa, table), I
+  stop SHORT of it with room around me so the camera still sees the scene, never so close the object
+  fills my view and blocks everything else.
+- I ALWAYS ASSUME EVERYTHING IS CLOSER THAN IT SEEMS, and leave extra room accordingly.
+- Leave "waypoints" empty if there is no valid path — blocked by a wall/obstacle, or I am already
+  there — and say why in "reasoning".
+
+In "reasoning" I PLAN the path in words BEFORE drawing it: where the target, the obstacles and any
+gap are in the image, which side I pass, where the doorway center and my final heading sit — the
+waypoints then follow that plan. If there is no path, I say what blocks me. I do NOT catalog the room.
+
+{return_spec}

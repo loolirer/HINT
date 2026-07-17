@@ -11,16 +11,15 @@ from gemini_robotics_er.gemini_base import GeminiActionNode
 
 
 class ReasonerNode(GeminiActionNode):
-    """A generic text-in / JSON-out LLM reasoner.
+    """A generic text-(and-optional-image)-in / JSON-out LLM reasoner.
 
-    Unlike its siblings (``description_detector``, ``visual_question``,
-    ``trajectory_planner``) this node does **not** look at the camera: it
-    reasons purely over the text it is handed. It is the model call the
-    semantic mission planner leans on for the parts a single-frame VLM check
-    can't answer — judging from a run log whether a task was completed,
-    revising a trajectory-planner prompt after a failure, and rolling an area's
-    log up into a summary. Perception stays in the VLM nodes (whose grounded
-    outputs land in the log); this node reasons *over* that log.
+    It reasons over the text it is handed and, when the goal carries ``images``,
+    over those frames too. It is the model call the semantic mission planner
+    leans on as its **director**: each cycle the planner hands it the before/after
+    frames of the move just executed plus the running narrative, and it assesses
+    the move against what it actually sees and emits the next instruction. With
+    an empty ``images`` list it degrades to pure text reasoning, so any text-only
+    caller still works unchanged.
 
     It inherits ``GeminiActionNode``'s API client, timeout-guarded call and
     single-goal lifecycle. The inherited camera ring buffer is simply unused.
@@ -39,6 +38,14 @@ class ReasonerNode(GeminiActionNode):
 
     def __init__(self):
         super().__init__("reasoner_node")
+
+        # Output control (quality vs validity) when a schema is requested, same
+        # knob as trajectory_planner, live-adjustable:
+        #   "json"   (default) JSON mode — valid JSON, keeps reasoning freedom;
+        #   "off"    unconstrained — best quality, but a reply can be unparseable;
+        #   "schema" constrained decoding to the schema (enum-enforced), but the
+        #            hard grammar can cost reasoning quality.
+        self.declare_parameter("structured_output", "json")
 
         self._action_server = ActionServer(
             self,
@@ -64,19 +71,46 @@ class ReasonerNode(GeminiActionNode):
             return self._fail(goal_handle, "Empty prompt.")
 
         want_json = bool(goal.schema.strip())
+        mode = str(self._p("structured_output")).lower()
         prompt = goal.prompt
+        response_schema = None
+        json_output = False
         if want_json:
-            prompt = (
-                f"{goal.prompt}\n\n"
-                "Respond with JSON only — no prose, no markdown fencing — "
-                f"matching this shape:\n{goal.schema}"
-            )
+            # "schema": constrain to the schema (only when it's real JSON). Else
+            # ("json"/"off", or a loose shape string) the decoder can't enforce the
+            # shape, so hint it in the prompt — and gate validity with JSON mode.
+            schema_obj = (self._as_response_schema(goal.schema)
+                          if mode == "schema" else None)
+            if schema_obj is not None:
+                response_schema = schema_obj
+            else:
+                prompt = (
+                    f"{goal.prompt}\n\n"
+                    "Respond with JSON only — no prose, no markdown fencing — "
+                    f"matching this shape:\n{goal.schema}"
+                )
+                json_output = (mode == "json")
+
+        # Optional grounding frames (e.g. the mission director's before/after
+        # views). Empty list -> pure text reasoning, exactly as before. Order is
+        # preserved so the prompt can refer to "the first / second image".
+        pil_frames = []
+        for img in goal.images:
+            try:
+                _, pil_img = self._frame_to_pil(img)
+                pil_frames.append(pil_img)
+            except Exception as e:  # noqa: BLE001 — skip an unreadable frame
+                self.get_logger().warn(f"Skipping an unreadable image: {e}")
+        # Text before images (Gemini best practice); image order preserved so the
+        # prompt can refer to "the first / second image".
+        contents = [prompt] + pil_frames
 
         if goal_handle.is_cancel_requested:
             return self._cancel(goal_handle)
 
         try:
-            raw = self._call_api([prompt])
+            raw = self._call_api(contents, response_schema=response_schema,
+                                 json_output=json_output)
         except TimeoutError as e:
             return self._fail(goal_handle, str(e))
         except Exception as e:  # noqa: BLE001 — surfaced to caller as FAILURE
@@ -108,6 +142,17 @@ class ReasonerNode(GeminiActionNode):
 
     # ------------------------------------------------------------------
     # Helpers
+
+    @staticmethod
+    def _as_response_schema(schema_str):
+        """Return a JSON-schema dict for constrained decoding when the goal's
+        ``schema`` is real JSON (a dict), else ``None`` — loose shape strings like
+        ``'{"x": bool}'`` aren't valid JSON and stay as a prompt hint."""
+        try:
+            obj = json.loads(schema_str)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return obj if isinstance(obj, dict) else None
 
     def _publish_feedback(self, goal_handle, state):
         fb = Reason.Feedback()

@@ -50,25 +50,10 @@ def generate_launch_description():
         arguments=["-resolution", "0.05", "-publish_period_sec", "1.0"],
     )
 
-    lk_tracker = Node(
-        package="visual_tracker",
-        executable="lk_tracker",
-        output="screen",
-    )
-
-    # Odometry-driven ground-plane re-projection tracker. Drop-in for the DIS
-    # waypoint_tracker (same /waypoint_tracking topics); remapped to the
-    # waypoint_tracker_node name so pursuit_servo's service clients still resolve.
     waypoint_tracker = Node(
         package="visual_tracker",
         executable="odom_waypoint_tracker",
         name="waypoint_tracker_node",
-        output="screen",
-    )
-
-    visual_servo = Node(
-        package="visual_servoing",
-        executable="visual_servo",
         output="screen",
     )
 
@@ -78,32 +63,36 @@ def generate_launch_description():
         output="screen",
     )
 
-    description_detector = Node(
+    reasoner = Node(
         package="gemini_robotics_er",
-        executable="description_detector",
+        executable="reasoner",
         output="screen",
-        parameters=[{"api_key_path": "/root/secrets/gemini_api_key.txt"}],
-    )
-
-    visual_question = Node(
-        package="gemini_robotics_er",
-        executable="visual_question",
-        output="screen",
-        parameters=[{"api_key_path": "/root/secrets/gemini_api_key.txt"}],
+        parameters=[
+            {
+                "api_key_path": "/root/secrets/gemini_api_key.txt",
+                "model_id": "gemini-3.1-flash-lite",
+                "thinking_budget": -1,
+                "history_frames": 1,
+                "structured_output": "off",
+            }
+        ],
     )
 
     trajectory_planner = Node(
         package="gemini_robotics_er",
         executable="trajectory_planner",
         output="screen",
-        parameters=[{"api_key_path": "/root/secrets/gemini_api_key.txt"}],
-    )
-
-    reasoner = Node(
-        package="gemini_robotics_er",
-        executable="reasoner",
-        output="screen",
-        parameters=[{"api_key_path": "/root/secrets/gemini_api_key.txt"}],
+        parameters=[
+            {
+                "api_key_path": "/root/secrets/gemini_api_key.txt",
+                "model_id": "gemini-robotics-er-1.6-preview",
+                "thinking_budget": 0,
+                "temperature": 1.0,
+                "n_candidates": 5,
+                "history_frames": 0,
+                "structured_output": "off",
+            }
+        ],
     )
 
     mission_planner = Node(
@@ -141,14 +130,10 @@ def generate_launch_description():
     return LaunchDescription(
         [
             teleop,
-            #cartographer,
-            #occupancy_grid,
-            #lk_tracker,
+            # cartographer,
+            # occupancy_grid,
             waypoint_tracker,
-            #visual_servo,
             pursuit_servo,
-            #description_detector,
-            #visual_question,
             trajectory_planner,
             reasoner,
             mission_planner,

@@ -3,8 +3,8 @@
 The semantic mission planner — a **narrative director**. It starts from a static **Semantic
 Plan** (a prior: which environments to visit, in order, and a brief intent for each) and drives
 navigation by maintaining a rolling **Narrative State** that it **recompiles every cycle** with
-a single `reasoner` call: fold the last move's outcome (the trajectory planner's own VLM
-reasoning) into the narrative, and emit the next instruction.
+a single `reasoner` call: judge the last move from the before/after camera frames, fold that into
+the narrative, and emit the next instruction.
 
 There are **no discrete steps, statuses, retries or pass/fail judging**. The old model outlined
 a happy path and read every divergence as failure, forcing constant replanning; here divergence
@@ -32,9 +32,9 @@ on forever.
 ```
 mission_planner/
   mission_planner/mission_planner_node.py  # the narrative-director node
-  missions/apartment_tidy.yaml             # a Semantic Plan (the static prior)
-  templates/compile.txt                    # the single narrative-compile prompt
-  config/brief.md                          # permanent context: capabilities + rules + policy
+  missions/<name>/mission.yaml             # a Semantic Plan (one dir per mission)
+  prompts/compile.txt                      # the single narrative-compile prompt
+  prompts/brief.txt                        # permanent context: capabilities + rules + policy
   README.md                                # this file — single source of truth
 ```
 
@@ -43,21 +43,53 @@ colcon build --symlink-install --packages-select hint_interfaces mission_planner
 source install/setup.bash
 ```
 
-At runtime the node writes two append-only siblings next to the mission YAML:
-`<mission>.narrative.jsonl` (the versioned narrative history) and `<mission>.log.jsonl` (the raw
-action log). On startup it **resumes** from the tail of `<mission>.narrative.jsonl` if it exists;
-delete that file to start the mission fresh.
+**There is no default mission.** The node starts **idle** and runs whichever mission a `~/advance`
+goal points it at (`mission_path`) — one running node serves any mission without a restart. (You
+*can* preload one with the `mission_path` param, but that's optional.) Author missions with the
+`/author-mission` command.
+
+Each mission lives in its **own directory** (`missions/<name>/mission.yaml`) so its runtime
+artifacts stay grouped with it. The node writes two append-only siblings next to the mission
+YAML: `mission.narrative.jsonl` (the versioned narrative history) and `mission.log.jsonl` (the raw
+action log). When it loads a mission it **resumes** from the tail of that mission's narrative if it
+exists; delete that file to start fresh.
+
+**Missions never resume across runs.** Every new tree run starts clean. The **first** `~/advance` of
+a run reports no outcome (nothing has executed yet, so `observation` is empty — the BT's
+`{plan_message}` is unset in a fresh blackboard), which the node treats as "the tree was called
+again": it **deletes** any existing `.narrative.jsonl` + `.log.jsonl` and reseeds from the plan. This
+holds no matter how the previous run ended — clean completion, failure, or a premature **Ctrl+C**
+mid-run — because the detector keys on the fresh run's first tick, not on the old run's ending. The
+previous run's files persist *until* you launch the next run, so they stay there for debugging in
+between; they're wiped only when a new run actually begins. (Every mid-run advance carries the
+planner's reasoning in `observation`, so this only fires on a run's first tick, never mid-mission.)
+
+The siblings are written next to the **real** mission file: `os.path.realpath` resolves the
+`--symlink-install` symlink back to the source tree, so in a dev workspace they appear in
+`src/mission_planner/missions/<name>/` (editor-visible); on a plain copied install they sit
+beside the installed mission. They are `.gitignore`d. (Set `narrative_path`/`log_path` to
+redirect them anywhere else.)
 
 ## The loop, in one line
 
-Per cycle there are **two** model calls with a clean division of labour:
-- **trajectory_planner (vision):** the narrative's `next` + the image → waypoints **and** a
-  reasoning `message` (what it saw / why it went there). That VLM reasoning *is* the grounding —
-  no separate verify call.
-- **reasoner (text):** one `compile.txt` call folds that reasoning into the narrative and emits
-  the next instruction + completion.
+Per cycle there are **two VLM calls** with a clean division of labour — **both see**:
+- **trajectory_planner (executor-with-eyes):** the narrative's `next` + the current frame →
+  waypoints **and** a short reasoning `message` (what it did / why). The BT logs that message, but it
+  is **not** fed to the director.
+- **reasoner (director-with-eyes):** one `compile.txt` call that reasons over the **before/after
+  frames of the move just executed** (captured by this node and attached to the call) plus the
+  narrative — it judges the move from the images, folds it in, and emits the next instruction +
+  completion.
 
-The `reasoner` is the director (memory + intent); the trajectory planner is the actor-with-eyes.
+The `reasoner` is the director (memory + intent, now grounded in what it *sees*); the trajectory
+planner is the actor-with-eyes. **Frame buffer (`history_frames` = N):** the mission planner subscribes
+to the camera and latches the current view each time it hands out an instruction (a *move-start*
+frame), keeping a rolling buffer of the last **N**. Each `advance` passes those N past frames + the
+current view (oldest → current) to the reasoner via the `Reason` goal's `images`, so the director sees
+the *sequence* of its recent views and judges its moves against ground truth — closing the old
+**one-action-behind lag**. `N=1` is the before/after pair (default), `N=0` is current-view-only (no
+move comparison), `N=3–4` is deeper history (more image tokens = more latency/cost). Only *images* are
+buffered — the director's text memory (`done`) already carries the narrative history.
 
 ## Data contract 1 — Semantic Plan (`missions/*.yaml`)
 
@@ -103,11 +135,12 @@ the history is self-explaining.
 | `trigger` | `{success, observation}` that caused this recompile (`null` on version 0) |
 | `queue` | remaining environments `[{name, description, intent}, …]` — order shows any `insert`s |
 | `visited` | completed environments (their **enriched** descriptions — the learned map) |
+| `narrative.situation` | my current standing — where I am / what I face **right now**, rewritten fresh each cycle (the present moment, not history) |
 | `narrative.done` | recency-weighted history; older info abstracted, newer sharp |
 | `narrative.next` | the immediate next instruction — fed to `trajectory_planner` |
 
 ```jsonl
-{"version":1,"ts":"…","current_environment":"bedroom","mission_complete":false,"action":"insert","trigger":{"success":true,"observation":"planner: the only door leads to a hallway, not the living room"},"queue":[{"name":"bedroom","description":"a bedroom; door on the far wall opens to a hallway","intent":"pass through to the living room"},{"name":"corridor","description":"a hallway linking the rooms","intent":""},{"name":"living_room","description":"A regular living room","intent":"stop in front of the couch"}],"visited":[],"narrative":{"done":"Found the bedroom's only exit is a hallway.","next":"Drive to the doorway on the far wall."}}
+{"version":1,"ts":"…","current_environment":"bedroom","mission_complete":false,"action":"insert","trigger":{"success":true,"observation":"planner: the only door leads to a hallway, not the living room"},"queue":[{"name":"bedroom","description":"a bedroom; door on the far wall opens to a hallway","intent":"pass through to the living room"},{"name":"corridor","description":"a hallway linking the rooms","intent":""},{"name":"living_room","description":"A regular living room","intent":"stop in front of the couch"}],"visited":[],"narrative":{"situation":"I am in the bedroom, facing the far wall; a door to a hallway is directly ahead.","done":"Found the bedroom's only exit is a hallway.","next":"Drive to the doorway on the far wall."}}
 ```
 
 - **Current state** = the last record. **Resume** = read the tail (`queue` + `visited` restore the
@@ -122,43 +155,55 @@ Every move's raw outcome, append-only, one JSON object per line
 into the narrative. Kept distinct from the narrative history: this is the *raw actions*, that is
 the *compiled belief*.
 
-## Prompt template (`templates/compile.txt`)
+## Prompt template (`prompts/compile.txt`)
 
 The single reasoner prompt (replacing the old judge/replan/compress). Placeholders are literal
 `{name}` tokens the node substitutes (not `str.format` — the body has JSON braces):
 
 | Token | Filled with |
 |---|---|
-| `{brief}` | `config/brief.md`, verbatim (permanent context) |
+| `{brief}` | `prompts/brief.txt`, verbatim (permanent context) |
 | `{environment}` | the **current** environment (name/description/intent) + a one-line peek at the next — bounded regardless of queue length |
-| `{narrative}` | the memory carried forward — `done` only (`next` is regenerated, its result already in `{outcome}`) |
-| `{outcome}` | this cycle's move outcome + the planner's VLM reasoning (empty on cycle 0) |
+| `{situation}` | last cycle's `situation` — my standing after the previous move (continuity for the fresh rewrite) |
+| `{narrative}` | the memory carried forward — `done` only (`next` is regenerated; its result is read from the before/after images) |
+| `{vision}` | how to read the attached camera image(s): the last is the current view, earlier ones are recent past views (buffer depth `history_frames`); one = current-only, none = no frame |
 
-Reasoner `schema`:
-`{"done": string, "next": string, "environment_description": string, "environment_action": "stay"|"advance"|"back"|"insert", "new_environment": {"name": string, "description": string}}`
-— the model reports progress + enriches the current description, and edits the queue only via
+> The before/after frames themselves are **attached to the reasoner call** (the `Reason` goal's
+> `images`), not substituted into the prompt text; `{vision}` is the caption that tells the model how
+> to read them.
+
+Reasoner `schema` — a **real JSON schema** (`NARRATIVE_SCHEMA`) passed to the reasoner, which uses it
+as `response_schema` for **constrained decoding**, so the compile reply is always well-formed JSON
+with exactly these fields:
+`{situation, done, next, environment_description, environment_action ∈ {stay|advance|back|insert} (enum), new_environment: {name, description}}`
+— the model reports its current `situation` + progress + enriches the current description, and edits the queue only via
 `environment_action` (`new_environment` carries the room to splice on `insert`). It never names
 the current environment; that's the queue head, owned by the node.
 
-`config/brief.md` is the permanent-context prefix (capabilities, navigation preferences, ambiguity
+`prompts/brief.txt` is the permanent-context prefix (capabilities, navigation preferences, ambiguity
 policy) prepended on every call.
 
 ## Node
 
-`mission_planner_node` loads the Semantic Plan, `brief.md`, and `compile.txt`; holds the current
-narrative in memory; and exposes **one** action server, `~/advance`, called in an
-`advance → execute` loop. Each `advance` is one reasoner call.
+`mission_planner_node` loads `brief.txt` and `compile.txt` at startup and then **waits idle** for a
+mission. It holds the current narrative in memory and exposes **one** action server, `~/advance`,
+called in an `advance → execute` loop. Each `advance` is one reasoner call. The first `~/advance`
+that carries a `mission_path` loads that mission (and later ones switch it); an `advance` with no
+mission loaded and none provided fails cleanly (`mission_failed`).
 
 ### Interfaces
 
 | Interface | Type | Direction |
 |---|---|---|
 | `~/advance` | `hint_interfaces/action/MissionAdvance` | Action server |
-| `/reasoner_node/reason` (see `reasoner_action`) | `hint_interfaces/action/Reason` | Action client — the narrative recompile |
+| `/reasoner_node/reason` (see `reasoner_action`) | `hint_interfaces/action/Reason` | Action client — the narrative recompile (with before/after frames) |
+| `/camera/image_raw/compressed` (see `camera_topic`) | `sensor_msgs/CompressedImage` | Sub — latest frame; latched into the director's rolling image buffer (`history_frames`) |
 
-**`advance`** — Goal: `success` (did the last move execute?) + `observation` (the planner's VLM
-reasoning, verbatim). The node appends the outcome to the pure log, applies the queue edit +
-recompiles the narrative (`compile.txt` → reasoner), appends the new snapshot, and returns Result:
+**`advance`** — Goal: `success` (did the last move execute?), `observation` (the planner's VLM
+reasoning, verbatim), and `mission_path` (optional — the mission to run; loads/switches it when it
+changes, else keeps the current one). The node appends the outcome to the pure log, applies the
+queue edit + recompiles the narrative (`compile.txt` → reasoner), appends the new snapshot, and
+returns Result:
 `mission_done` (queue empty **or** failed), `mission_failed` (stuck past the cap), `description`
 (= the narrative's `next`), `area` (= the current queue head), `message` (= the narrative's `done`,
 or the failure reason). On the first call nothing has executed (`success` defaults true,
@@ -168,14 +213,16 @@ or the failure reason). On the first call nothing has executed (`success` defaul
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `mission_path` | share `missions/apartment_tidy.yaml` | Semantic Plan to run |
-| `brief_path` | share `config/brief.md` | Permanent-context brief |
-| `templates_dir` | share `templates/` | Directory holding `compile.txt` |
-| `narrative_path` | `""` | Narrative history; empty → `<mission>.narrative.jsonl` sibling |
-| `log_path` | `""` | Raw log; empty → `<mission>.log.jsonl` sibling |
+| `mission_path` | `""` | Optional mission to preload at startup; empty → start **idle**. A `~/advance` goal's `mission_path` selects/switches the mission per call (the node reloads on change, resuming that mission's narrative if it exists), so one running node serves any mission without a restart |
+| `brief_path` | share `prompts/brief.txt` | Permanent-context brief |
+| `prompts_dir` | share `prompts/` | Directory holding `compile.txt` |
+| `narrative_path` | `""` | Narrative history; empty → sibling of the real mission file (`<mission>.narrative.jsonl`) |
+| `log_path` | `""` | Raw log; empty → sibling of the real mission file (`<mission>.log.jsonl`) |
 | `reasoner_action` | `/reasoner_node/reason` | Reasoner action name |
 | `reasoner_timeout` | `30.0` | Seconds to wait on the reasoner call |
 | `max_env_cycles` | `8` | Cycles on one environment before the mission fails (stuck backstop) |
+| `camera_topic` | `/camera/image_raw/compressed` | Frame source for the director's image history |
+| `history_frames` | `1` | Director vision-buffer depth N — how many past move-start frames to attach ahead of the current view. `0` = current view only (no move comparison), `1` = before/after of the last move, `3–4` = deeper history. Each extra frame adds image tokens → more latency/cost. Live-adjustable. Only images are buffered; the narrative (`done`) carries the text history |
 
 ### Test
 
@@ -190,11 +237,12 @@ each subsequent call reports the previous move's outcome (with the planner's rea
 returns the next:
 
 ```bash
-# cycle 0 — nothing executed yet
+# cycle 0 — load a mission (via mission_path) and get the opening instruction
 ros2 action send_goal /mission_planner_node/advance hint_interfaces/action/MissionAdvance \
-  "{success: true, observation: ''}" --feedback
+  "{success: true, observation: '', mission_path: '/root/turtlebot3_ws/src/mission_planner/missions/bedroom_to_living_room/mission.yaml'}" \
+  --feedback
 
-# report the move + get the next
+# report the move + get the next (mission_path can be omitted once loaded)
 ros2 action send_goal /mission_planner_node/advance hint_interfaces/action/MissionAdvance \
   "{success: true, observation: 'planner: routed to the far wall, a doorway is now visible ahead'}" \
   --feedback
@@ -203,7 +251,7 @@ ros2 action send_goal /mission_planner_node/advance hint_interfaces/action/Missi
 Watch the narrative evolve — every call appends one snapshot:
 
 ```bash
-tail -f missions/apartment_tidy.narrative.jsonl | jq .
+tail -f src/mission_planner/missions/bedroom_to_living_room/mission.narrative.jsonl | jq .
 ```
 
 Delete the `.narrative.jsonl` to restart the mission from scratch.

@@ -9,14 +9,6 @@ from sensor_msgs.msg import Image, RegionOfInterest
 
 from gemini_robotics_er.gemini_base import GeminiActionNode
 
-_BBOX_PROMPT = (
-    'Return a single bounding box for: "{description}". '
-    "Return [] if the described region is not visible. "
-    "JSON only — no markdown fencing: "
-    '[{{"box_2d": [ymin, xmin, ymax, xmax], "label": "<label>"}}] '
-    "normalized to 0-1000, integer values only."
-)
-
 
 class DescriptionDetectorNode(GeminiActionNode):
     def __init__(self):
@@ -58,9 +50,9 @@ class DescriptionDetectorNode(GeminiActionNode):
         if goal_handle.is_cancel_requested:
             return self._cancel(goal_handle)
 
-        prompt = _BBOX_PROMPT.format(description=goal.description)
+        prompt = self._fill_prompt("description_detector.txt", description=goal.description)
         try:
-            raw = self._call_api([pil_img, prompt])
+            raw = self._call_api([prompt, pil_img])
         except TimeoutError as e:
             return self._abort(goal_handle, str(e))
         except Exception as e:

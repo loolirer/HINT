@@ -1,6 +1,7 @@
 # Goal
-string prompt   # assembled prompt / context to reason over (text only, no frame)
+string prompt   # assembled prompt / context to reason over
 string schema   # optional JSON shape/schema hint the reply must match; empty = free-form text
+sensor_msgs/CompressedImage[] images   # optional frames to reason over (empty = text-only); order is meaningful (e.g. before, after)
 ---
 # Result
 bool success    # true when the model returned a usable reply (valid JSON when a schema was requested)

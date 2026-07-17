@@ -1,0 +1,5 @@
+Looking through my camera, answer this yes/no question: "{question}".
+Answer only about what I can actually see right now.
+
+Respond with JSON only, no markdown fencing:
+{"answer": "yes" or "no", "rationale": "<one short sentence>"}

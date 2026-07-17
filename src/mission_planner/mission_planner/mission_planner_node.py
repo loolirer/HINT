@@ -19,7 +19,8 @@ never names or reorders environments — each cycle it emits `environment_action
 This enforces the plan order while letting reality refine it, keeps the model's prompt
 bounded (only the head + a one-line peek are shown, regardless of queue length), and
 makes `mission_complete` code-derived (the queue empties). A per-environment cycle cap
-force-advances a head the model never leaves, as a stuck backstop.
+(`max_env_cycles`) is the one failure path: if the model never leaves a head, the mission
+fails rather than dragging on.
 
 Persistence (siblings of the mission YAML), both append-only:
 - ``*.narrative.jsonl`` — one full snapshot per recompile (queue + visited + narrative
@@ -44,11 +45,35 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
 from hint_interfaces.action import MissionAdvance, Reason
+from sensor_msgs.msg import CompressedImage
 
-NARRATIVE_SCHEMA = (
-    '{"done": string, "next": string, "environment_description": string, '
-    '"environment_action": "stay"|"advance"|"back"|"insert", '
-    '"new_environment": {"name": string, "description": string}}')
+# A real JSON schema (not a loose shape hint): the reasoner turns this into
+# response_schema for constrained decoding, so the compile reply is always
+# well-formed JSON with exactly these fields. "analysis" is FIRST so the model
+# reasons before the answer fields (chain-of-thought); the node ignores it.
+NARRATIVE_SCHEMA = json.dumps({
+    "type": "object",
+    "properties": {
+        "analysis": {"type": "string"},
+        "situation": {"type": "string"},
+        "done": {"type": "string"},
+        "next": {"type": "string"},
+        "environment_description": {"type": "string"},
+        "environment_action": {
+            "type": "string",
+            "enum": ["stay", "advance", "back", "insert"],
+        },
+        "new_environment": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "description": {"type": "string"},
+            },
+        },
+    },
+    "required": ["analysis", "situation", "done", "next", "environment_description",
+                 "environment_action"],
+})
 
 ACTIONS = ("stay", "advance", "back", "insert")
 
@@ -58,29 +83,41 @@ class MissionPlannerNode(Node):
         super().__init__("mission_planner_node")
 
         share = get_package_share_directory("mission_planner")
-        self.declare_parameter(
-            "mission_path", os.path.join(share, "missions", "apartment_tidy.yaml"))
-        self.declare_parameter("brief_path", os.path.join(share, "config", "brief.md"))
-        self.declare_parameter("templates_dir", os.path.join(share, "templates"))
+        self.declare_parameter("mission_path", "")   # empty = start idle; pick a mission per ~/advance call
+        self.declare_parameter("brief_path", os.path.join(share, "prompts", "brief.txt"))
+        self.declare_parameter("prompts_dir", os.path.join(share, "prompts"))
         self.declare_parameter("narrative_path", "")   # empty -> <mission>.narrative.jsonl
         self.declare_parameter("log_path", "")          # empty -> <mission>.log.jsonl
         self.declare_parameter("reasoner_action", "/reasoner_node/reason")
         self.declare_parameter("reasoner_timeout", 30.0)
         self.declare_parameter("max_env_cycles", 10)     # stuck backstop per environment
+        self.declare_parameter("camera_topic", "/camera/image_raw/compressed")
+        # Director vision buffer depth N: how many PAST move-start frames to attach
+        # ahead of the current view. 0 = current view only (no move comparison);
+        # 1 = before/after of the last move (the default); 3-4 = deeper history. Each
+        # extra frame is more image tokens = more latency/cost. Live-adjustable.
+        self.declare_parameter("history_frames", 1)
 
         self._lock = threading.Lock()
-        self._plan = None                       # the semantic plan dict (mission line)
+        _mp = self._p("mission_path")
+        self._mission_path = os.path.abspath(_mp) if _mp else ""   # runtime, switchable
+        self._plan = None                       # loaded mission (None = idle, no mission)
         self._queue = []                        # remaining environments (head = current)
         self._visited = []                      # completed environments (for `back`)
-        self._narrative = {"done": "", "next": ""}
+        self._narrative = {"situation": "", "done": "", "next": ""}
         self._env_cycles = 0                    # cycles spent on the current head
         self._failed = False                    # mission stuck past the cycle cap
         self._version = -1
         self._served = False
+        # Director vision: the latest camera frame, and a rolling buffer of the last
+        # N frames latched at move boundaries (= the starts of recent moves). Those
+        # past frames + the current one are the image history handed to the director.
+        self._latest_frame = None
+        self._frame_history = []          # move-start frames, oldest first, trimmed to N
 
         self._brief = self._read(self._p("brief_path"))
-        self._load_plan()
-        self._load_or_seed()
+        if self._mission_path:
+            self._load_mission(self._mission_path)
 
         cbg = ReentrantCallbackGroup()
         self._reasoner = ActionClient(
@@ -89,10 +126,19 @@ class MissionPlannerNode(Node):
             self, MissionAdvance, "~/advance",
             execute_callback=self._advance_cb,
             cancel_callback=self._cancel_cb, callback_group=cbg)
+        # Camera on the same reentrant group so frames keep arriving while an
+        # advance blocks on the reasoner call.
+        self.create_subscription(
+            CompressedImage, self._p("camera_topic"), self._camera_cb, 1,
+            callback_group=cbg)
 
-        self.get_logger().info(
-            f"Mission planner ready — '{self._plan.get('mission', '')}' "
-            f"(queue: {[e['name'] for e in self._queue]}), narrative v{self._version}.")
+        if self._plan is not None:
+            self.get_logger().info(
+                f"Mission planner ready — '{self._plan.get('mission', '')}' "
+                f"(queue: {[e['name'] for e in self._queue]}), narrative v{self._version}.")
+        else:
+            self.get_logger().info(
+                "Mission planner ready — no mission loaded; waiting for a mission_path.")
 
     # ------------------------------------------------------------------
     # Derived state (the queue is the source of truth)
@@ -107,23 +153,105 @@ class MissionPlannerNode(Node):
         return not self._queue
 
     # ------------------------------------------------------------------
+    # Director vision (before/after frames for the reasoner call)
+
+    def _camera_cb(self, msg):
+        self._latest_frame = msg
+
+    def _history_window(self):
+        """The last N past move-start frames (N = history_frames; empty when 0)."""
+        k = max(0, int(self._p("history_frames")))
+        return self._frame_history[-k:] if k else []
+
+    def _push_frame(self):
+        """Latch the current view as a move-start frame, trimmed to buffer depth N."""
+        if self._latest_frame is not None:
+            self._frame_history.append(self._latest_frame)
+        k = max(0, int(self._p("history_frames")))
+        self._frame_history = self._frame_history[-k:] if k else []
+
+    def _vision_inputs(self, history, after):
+        """Build the ``(images, description)`` pair handed to the reasoner-director.
+
+        ``history`` is the buffer of past move-start frames (oldest first); ``after``
+        is the current view. They are attached oldest → current so the director can
+        judge its recent moves against ground truth. Depth is set by ``history_frames``.
+        """
+        imgs = [f for f in history if f is not None]
+        if after is not None:
+            imgs.append(after)
+        if not imgs:
+            return [], "(No camera image is available this cycle.)"
+        if len(imgs) == 1:
+            return imgs, (
+                "One camera image is attached: my current view. (Nothing yet to "
+                "compare it against.)")
+        k = len(imgs) - 1
+        return imgs, (
+            f"{len(imgs)} camera images are attached, oldest first; the LAST is my "
+            f"CURRENT view, the earlier {k} are what I saw before my recent move(s). "
+            "I compare them to judge what my moves actually did — got closer, turned, "
+            "or barely moved.")
+
+    # ------------------------------------------------------------------
     # Action server — report-and-advance (one narrative recompile per cycle)
 
     def _advance_cb(self, goal_handle):
         with self._lock:
             req = goal_handle.request
+            # Per-call mission selection: switch missions if the goal points at a
+            # different YAML (resumes that mission's narrative if it already exists).
+            if req.mission_path and os.path.abspath(req.mission_path) != self._mission_path:
+                self.get_logger().info(f"Switching mission -> {req.mission_path}")
+                self._load_mission(req.mission_path)
+
+            # No mission loaded and none provided — nothing to do; fail cleanly so
+            # the tree ends (FAILURE) rather than driving on an empty instruction.
+            if self._plan is None:
+                result = MissionAdvance.Result()
+                result.mission_done = True
+                result.mission_failed = True
+                result.message = "No mission loaded — pass mission_path in the advance goal."
+                goal_handle.succeed()
+                self.get_logger().warn(result.message)
+                return result
+
+            if self._version >= 0 and not os.path.exists(self._narrative_path()):
+                self.get_logger().info(
+                    "Narrative file missing — restarting the mission from scratch.")
+                self._load_mission(self._mission_path)
+
+            # A NEW tree run's FIRST advance reports no outcome — the BT's
+            # {plan_message} is unset in a fresh blackboard, so `observation` is
+            # empty; every mid-run advance carries the planner's reasoning. So
+            # "already served before AND a no-outcome tick" = the tree was called
+            # again → wipe any existing narrative/log and reseed. Missions never
+            # resume across runs, no matter how the last one ended (finish, fail, or
+            # a premature Ctrl+C mid-run). The finished run's files persist until
+            # this next call, so they stay debuggable in between.
+            if self._served and not req.observation.strip():
+                self.get_logger().info(
+                    "New tree run (no outcome reported) — wiping old logs, starting fresh.")
+                self._reset_mission()
+
             self._feedback(goal_handle, MissionAdvance, "RUNNING")
 
             trigger = None
-            outcome_text = "(nothing yet — this is the first cycle)"
             if self._served:
                 trigger = {"success": bool(req.success), "observation": req.observation}
-                outcome_text = self._outcome_text(req)
                 self._append_log("follow",
                                  result="success" if req.success else "failure",
                                  observation=req.observation)
 
-            data = self._compile(outcome_text, goal_handle)
+            # Image history for the director-VLM. `after` = the current view (where
+            # the last move ended); the buffer holds the starts of recent moves. The
+            # director reads the move outcomes from these frames — the planner's text
+            # note is no longer fed in. Depth is `history_frames`.
+            after = self._latest_frame
+            history = self._history_window()
+            images, vision = self._vision_inputs(history, after)
+
+            data = self._compile(vision, images, goal_handle)
 
             if goal_handle.is_cancel_requested:
                 goal_handle.canceled()
@@ -141,13 +269,15 @@ class MissionPlannerNode(Node):
                 result.area = cur["name"] if cur else ""
                 result.description = self._narrative.get("next", "")
                 result.message = "Compile failed — re-serving previous instruction."
+                self._push_frame()
                 self._served = True
                 goal_handle.succeed()
                 self.get_logger().warn(result.message)
                 return result
 
             action = self._apply(data)
-            self._narrative = {"done": str(data.get("done", "")),
+            self._narrative = {"situation": str(data.get("situation", "")),
+                               "done": str(data.get("done", "")),
                                "next": str(data.get("next", ""))}
             self._append_snapshot(trigger, action)
 
@@ -175,6 +305,9 @@ class MissionPlannerNode(Node):
             result.mission_failed = False
             result.description = self._narrative.get("next", "")
             result.message = self._narrative.get("done", "")
+            # This instruction will now be executed — push the current view into the
+            # frame buffer as a move-start frame for the director's next comparison.
+            self._push_frame()
             self._served = True
             goal_handle.succeed()
             self.get_logger().info(
@@ -231,56 +364,51 @@ class MissionPlannerNode(Node):
     # ------------------------------------------------------------------
     # Narrative recompile (the single reasoner call)
 
-    def _compile(self, outcome_text, goal_handle=None):
+    def _compile(self, vision, images, goal_handle=None):
         prompt = self._fill("compile.txt", {
             "brief": self._brief,
             "environment": self._context_text(),
+            "situation": self._narrative.get("situation", "") or "(nothing yet)",
             "narrative": self._narrative_text(),
-            "outcome": outcome_text,
+            "vision": vision,
         })
-        data = self._call_reasoner(prompt, NARRATIVE_SCHEMA, goal_handle)
+        data = self._call_reasoner(prompt, NARRATIVE_SCHEMA, images, goal_handle)
         if not isinstance(data, dict):
             self.get_logger().warn("Narrative compile failed — keeping previous narrative.")
             return None
         return data
 
-    def _outcome_text(self, req):
-        base = ("The last move executed successfully" if req.success
-                else "The last move failed or was interrupted")
-        if req.observation:
-            return f"{base}. Planner reasoning: {req.observation}"
-        return base + "."
-
     def _context_text(self):
         """Only the current environment + a one-line peek — bounded regardless of
         how long or refined the queue is."""
-        lines = [f"Mission: {self._plan.get('mission', '')}"]
+        lines = [f"My mission: {self._plan.get('mission', '')}"]
         cur = self._current()
         if cur is None:
-            lines.append("All planned environments have been visited.")
+            lines.append("I have been through all my planned places.")
             return "\n".join(lines)
         desc = cur.get("description", "")
-        lines.append(f"Current environment: {cur['name']}"
+        lines.append(f"Where I am now: {cur['name']}"
                      + (f" — {desc}" if desc else ""))
         if cur.get("intent"):
-            lines.append(f"  Intent: {cur['intent']}")
+            lines.append(f"  What I need to do here: {cur['intent']}")
         peek = self._peek()
         if peek is not None:
-            lines.append(f"Next environment: {peek['name']}"
+            lines.append(f"Where I head next: {peek['name']}"
                          + (f" — {peek['intent']}" if peek.get("intent") else ""))
         else:
-            lines.append("Next environment: (none — the mission ends when this one is done)")
+            lines.append("Where I head next: (nowhere — I finish once I am done here)")
         return "\n".join(lines)
 
     def _narrative_text(self):
         # Only the accumulated `done` carries forward; `next` is regenerated and its
-        # result is already in {outcome}, so it is not echoed back.
-        return "done: {}".format(self._narrative.get("done", "") or "(nothing yet)")
+        # result is read from the before/after images, so it is not echoed back. The
+        # compile prompt frames this as "What I remember so far".
+        return self._narrative.get("done", "") or "(nothing yet)"
 
     # ------------------------------------------------------------------
     # Reasoner client
 
-    def _call_reasoner(self, prompt, schema, goal_handle=None):
+    def _call_reasoner(self, prompt, schema, images=None, goal_handle=None):
         timeout = float(self._p("reasoner_timeout"))
         if not self._reasoner.wait_for_server(timeout_sec=timeout):
             self.get_logger().warn("Reasoner action server unavailable.")
@@ -288,6 +416,7 @@ class MissionPlannerNode(Node):
         goal = Reason.Goal()
         goal.prompt = prompt
         goal.schema = schema
+        goal.images = images or []
         handle = self._await(self._reasoner.send_goal_async(goal), timeout, goal_handle)
         if handle is None or not handle.accepted:
             self.get_logger().warn("Reasoner rejected the goal or timed out.")
@@ -328,7 +457,7 @@ class MissionPlannerNode(Node):
         return future.result()
 
     def _fill(self, template_name, tokens):
-        text = self._read(os.path.join(self._p("templates_dir"), template_name))
+        text = self._read(os.path.join(self._p("prompts_dir"), template_name))
         # Drop the leading '#' comment header so it isn't sent to the model, then
         # substitute literal {name} tokens (NOT str.format — the body has JSON braces).
         body = "\n".join(ln for ln in text.splitlines()
@@ -340,10 +469,33 @@ class MissionPlannerNode(Node):
     # ------------------------------------------------------------------
     # Persistence / IO
 
+    def _load_mission(self, path):
+        """(Re)load the mission at ``path`` and reset runtime state — or resume it
+        if that mission's narrative already exists. Switchable per ~/advance call."""
+        self._mission_path = os.path.abspath(path)
+        self._load_plan()
+        self._load_or_seed()
+        self._env_cycles = 0
+
+    def _reset_mission(self):
+        """Delete this mission's narrative + log and reseed from the plan — the
+        clean restart used when the tree is run again on a finished mission. The
+        finished artifacts are kept until this point (for debugging); the fresh run
+        recreates them as it appends."""
+        for path in (self._narrative_path(), self._log_path()):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError as e:
+                self.get_logger().warn(f"Could not delete {path}: {e}")
+        self._load_or_seed()          # narrative now absent -> seeds a fresh plan
+        self._env_cycles = 0
+        self._frame_history = []
+
     def _load_plan(self):
-        with open(self._p("mission_path"), "r") as f:
+        with open(self._mission_path, "r") as f:
             self._plan = yaml.safe_load(f)
-        self.get_logger().info(f"Loaded semantic plan from {self._p('mission_path')}.")
+        self.get_logger().info(f"Loaded semantic plan from {self._mission_path}.")
 
     def _seed_queue(self):
         return [{"name": e.get("name", ""),
@@ -368,16 +520,18 @@ class MissionPlannerNode(Node):
             self._queue = last.get("queue") or []
             self._visited = last.get("visited") or []
             nar = last.get("narrative", {})
-            self._narrative = {"done": nar.get("done", ""), "next": nar.get("next", "")}
+            self._narrative = {"situation": nar.get("situation", ""),
+                               "done": nar.get("done", ""), "next": nar.get("next", "")}
             self._failed = bool(last.get("mission_failed", False))
             self._served = True   # resuming mid-mission
             self.get_logger().info(f"Resumed from {path} at v{self._version}.")
         else:
             self._queue = self._seed_queue()
             self._visited = []
-            self._narrative = {"done": "", "next": ""}
+            self._narrative = {"situation": "", "done": "", "next": ""}
             self._version = -1
             self._served = False
+            self._failed = False
 
     def _append_snapshot(self, trigger, action):
         """Append a full snapshot — the versioned, git-like history (queue included)."""
@@ -393,7 +547,8 @@ class MissionPlannerNode(Node):
             "trigger": trigger,
             "queue": self._queue,       # remaining environments (order shows inserts)
             "visited": self._visited,   # completed environments (enriched descriptions)
-            "narrative": {"done": self._narrative.get("done", ""),
+            "narrative": {"situation": self._narrative.get("situation", ""),
+                          "done": self._narrative.get("done", ""),
                           "next": self._narrative.get("next", "")},
         }
         with open(self._narrative_path(), "a") as f:
@@ -414,7 +569,11 @@ class MissionPlannerNode(Node):
         return self._p("log_path") or self._sibling(".log.jsonl")
 
     def _sibling(self, suffix):
-        base, _ = os.path.splitext(self._p("mission_path"))
+        # Artifacts live next to the *real* mission file. os.path.realpath resolves
+        # the --symlink-install symlink back to the source tree (editor-visible in a
+        # dev workspace); on a plain copied install it is a no-op and they sit beside
+        # the installed mission. Explicit narrative_path/log_path still override.
+        base, _ = os.path.splitext(os.path.realpath(self._mission_path))
         return base + suffix
 
     # ------------------------------------------------------------------
