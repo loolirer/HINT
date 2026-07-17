@@ -92,6 +92,11 @@ class MissionPlannerNode(Node):
         self.declare_parameter("reasoner_timeout", 30.0)
         self.declare_parameter("max_env_cycles", 10)     # stuck backstop per environment
         self.declare_parameter("camera_topic", "/camera/image_raw/compressed")
+        # Director vision buffer depth N: how many PAST move-start frames to attach
+        # ahead of the current view. 0 = current view only (no move comparison);
+        # 1 = before/after of the last move (the default); 3-4 = deeper history. Each
+        # extra frame is more image tokens = more latency/cost. Live-adjustable.
+        self.declare_parameter("history_frames", 1)
 
         self._lock = threading.Lock()
         _mp = self._p("mission_path")
@@ -104,11 +109,11 @@ class MissionPlannerNode(Node):
         self._failed = False                    # mission stuck past the cycle cap
         self._version = -1
         self._served = False
-        # Director vision: the latest camera frame, and the frame latched at the
-        # end of the previous advance (= the start of the move just executed).
-        # Together they are the before/after pair handed to the reasoner-director.
+        # Director vision: the latest camera frame, and a rolling buffer of the last
+        # N frames latched at move boundaries (= the starts of recent moves). Those
+        # past frames + the current one are the image history handed to the director.
         self._latest_frame = None
-        self._before_frame = None
+        self._frame_history = []          # move-start frames, oldest first, trimmed to N
 
         self._brief = self._read(self._p("brief_path"))
         if self._mission_path:
@@ -153,23 +158,40 @@ class MissionPlannerNode(Node):
     def _camera_cb(self, msg):
         self._latest_frame = msg
 
-    def _vision_inputs(self, before, after):
+    def _history_window(self):
+        """The last N past move-start frames (N = history_frames; empty when 0)."""
+        k = max(0, int(self._p("history_frames")))
+        return self._frame_history[-k:] if k else []
+
+    def _push_frame(self):
+        """Latch the current view as a move-start frame, trimmed to buffer depth N."""
+        if self._latest_frame is not None:
+            self._frame_history.append(self._latest_frame)
+        k = max(0, int(self._p("history_frames")))
+        self._frame_history = self._frame_history[-k:] if k else []
+
+    def _vision_inputs(self, history, after):
         """Build the ``(images, description)`` pair handed to the reasoner-director.
 
-        Two frames when we have a before/after pair (so it can judge the move
-        against ground truth), one when only the current view exists (the first
-        move), none before any frame has arrived.
+        ``history`` is the buffer of past move-start frames (oldest first); ``after``
+        is the current view. They are attached oldest → current so the director can
+        judge its recent moves against ground truth. Depth is set by ``history_frames``.
         """
-        if before is not None and after is not None:
-            return [before, after], (
-                "Two camera images are attached. The FIRST is what I saw just before "
-                "my last move; the SECOND is what I see now, after it — compare them "
-                "to judge what my move actually did.")
+        imgs = [f for f in history if f is not None]
         if after is not None:
-            return [after], (
-                "One camera image is attached: my current view. (This is my first "
-                "move — there is nothing yet to compare it against.)")
-        return [], "(No camera image is available this cycle.)"
+            imgs.append(after)
+        if not imgs:
+            return [], "(No camera image is available this cycle.)"
+        if len(imgs) == 1:
+            return imgs, (
+                "One camera image is attached: my current view. (Nothing yet to "
+                "compare it against.)")
+        k = len(imgs) - 1
+        return imgs, (
+            f"{len(imgs)} camera images are attached, oldest first; the LAST is my "
+            f"CURRENT view, the earlier {k} are what I saw before my recent move(s). "
+            "I compare them to judge what my moves actually did — got closer, turned, "
+            "or barely moved.")
 
     # ------------------------------------------------------------------
     # Action server — report-and-advance (one narrative recompile per cycle)
@@ -221,13 +243,13 @@ class MissionPlannerNode(Node):
                                  result="success" if req.success else "failure",
                                  observation=req.observation)
 
-            # Latch the before/after frames for the director-VLM. `after` = where
-            # the last move ended (now); `before` = where it began (latched at the
-            # end of the previous advance). The director reads the move's outcome
-            # from these images — the planner's text note is no longer fed in.
+            # Image history for the director-VLM. `after` = the current view (where
+            # the last move ended); the buffer holds the starts of recent moves. The
+            # director reads the move outcomes from these frames — the planner's text
+            # note is no longer fed in. Depth is `history_frames`.
             after = self._latest_frame
-            before = self._before_frame
-            images, vision = self._vision_inputs(before, after)
+            history = self._history_window()
+            images, vision = self._vision_inputs(history, after)
 
             data = self._compile(vision, images, goal_handle)
 
@@ -247,7 +269,7 @@ class MissionPlannerNode(Node):
                 result.area = cur["name"] if cur else ""
                 result.description = self._narrative.get("next", "")
                 result.message = "Compile failed — re-serving previous instruction."
-                self._before_frame = self._latest_frame
+                self._push_frame()
                 self._served = True
                 goal_handle.succeed()
                 self.get_logger().warn(result.message)
@@ -283,9 +305,9 @@ class MissionPlannerNode(Node):
             result.mission_failed = False
             result.description = self._narrative.get("next", "")
             result.message = self._narrative.get("done", "")
-            # This instruction will now be executed — latch the current view as the
-            # "before" frame of that move, to pair with next cycle's "after".
-            self._before_frame = self._latest_frame
+            # This instruction will now be executed — push the current view into the
+            # frame buffer as a move-start frame for the director's next comparison.
+            self._push_frame()
             self._served = True
             goal_handle.succeed()
             self.get_logger().info(
@@ -468,7 +490,7 @@ class MissionPlannerNode(Node):
                 self.get_logger().warn(f"Could not delete {path}: {e}")
         self._load_or_seed()          # narrative now absent -> seeds a fresh plan
         self._env_cycles = 0
-        self._before_frame = None
+        self._frame_history = []
 
     def _load_plan(self):
         with open(self._mission_path, "r") as f:

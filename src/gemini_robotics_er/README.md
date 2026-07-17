@@ -138,12 +138,15 @@ Built as a sibling of `description_detector`: same inputs (a camera `stamp` + a 
 > list (wall / already there) the node aborts, with the note in the message (via `hint_bt`'s two-arg
 > `onFailure`).
 >
-> **Continuity.** The node remembers its **previous frame** and its **own last reasoning** and attaches
-> that frame ahead of the current one (with a `{continuity}` note of what it last planned), so each plan
-> continues its own approach across the view change instead of re-planning cold. It stores its *own*
-> reasoning — not the instruction it was fed — because that's its spatial read + path intent (the fed
-> instruction is redundant with the current one), and prose transfers across frames where raw waypoints
-> would not. On the first plan only the current frame is sent.
+> **Continuity buffer (`history_frames` = N).** The node keeps a rolling buffer of the last **N**
+> `(frame, its-own-reasoning)` pairs and attaches those frames (oldest first) ahead of the current one,
+> with a `{continuity}` note listing what it planned at each — so each plan continues its own approach
+> across the view change instead of re-planning cold. It stores its *own* reasoning (spatial read + path
+> intent), not the instruction it was fed — that's redundant with the current one, and prose transfers
+> across frames where raw waypoints would not. **One knob spans the whole spectrum:** `N=0` = stateless
+> (current frame only), `N=1` = last step, `N=3–4` = deeper history — each extra frame is more image
+> tokens, so latency/cost rise with N. The `{continuity}` note also states that the **current
+> instruction wins** if it redirects, so a stale plan can't trap the planner.
 
 ### Interfaces
 
@@ -174,6 +177,7 @@ Same as `description_detector` (`api_key_path`, `model_id`, `temperature`, `api_
 | `min_row` | `400` | Farthest image row (of 1000) a waypoint may occupy — caps forward reach. `1000` = right in front, smaller = farther/higher in the frame. The prompt asks the model to keep points at `y ≥ min_row`, and the node **clamps** any that overshoot (far points are where ground grounding is least reliable). Live-adjustable; raise it for shorter, more conservative steps |
 | `n_candidates` | `1` | Consensus sampling in **one** call. `>1` asks the model for N candidate paths in a single reply — a `{"candidates": [...]}` list (this model **rejects** `candidate_count>1`, so N-sampling is done in-prompt, not via the API) — then keeps the **medoid**, the candidate whose arc-length-resampled path is closest to all the others. Robust to the model splitting between routes at `temperature > 0` (and drops spurious "no path" replies as long as one candidate finds a path). `1` = a single plan (today's behaviour). Live-adjustable |
 | `structured_output` | `json` | Output control (quality vs validity), live-adjustable. **`json`** = JSON mode (`response_mime_type=application/json`) — valid JSON without the degenerate-token corruption, while keeping most of the model's reasoning freedom (the recommended default). **`off`** = unconstrained — best free-form quality, but a reply can occasionally be unparseable → that cycle aborts. **`schema`** = full constrained decoding to the waypoint schema — always valid *and* exactly-shaped, but the hard grammar can **cost spatial-reasoning quality** (paths got noticeably worse), so use only when validity matters more than path quality |
+| `history_frames` | `1` | Continuity buffer depth N — how many past `(frame, own-reasoning)` pairs to attach ahead of the current view (see **Continuity buffer** above). `0` = stateless, `1` = last step, `3–4` = deeper history. Each extra frame adds image tokens → more latency/cost. Live-adjustable |
 
 > **Why medoid, not average.** Two valid routes (left vs right of a table) *average* into a path straight through it. The medoid picks the most central *actual* candidate, so it snaps to the majority route instead of interpolating between conflicting ones. Candidates that return no waypoints (wall / already there) don't vote unless **all** of them decline, in which case the node aborts as before. Because the N are drawn in one autoregressive pass they're more **correlated** than independent API samples would be — the prompt asks for genuinely different routes only when the scene is ambiguous, so natural agreement still shows through.
 

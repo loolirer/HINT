@@ -82,12 +82,14 @@ Per cycle there are **two VLM calls** with a clean division of labour — **both
   completion.
 
 The `reasoner` is the director (memory + intent, now grounded in what it *sees*); the trajectory
-planner is the actor-with-eyes. **Frame capture:** the mission planner subscribes to the camera and
-latches the current view each time it hands out an instruction (the move's **before**); the frame at
-the next `advance` is the **after**. The pair (or just the current view on the first move) is passed
-to the reasoner via the `Reason` goal's `images`. This is what closes the old **one-action-behind
-lag** — the director no longer reasons over a stale pre-move report, it looks at where the robot
-actually ended up.
+planner is the actor-with-eyes. **Frame buffer (`history_frames` = N):** the mission planner subscribes
+to the camera and latches the current view each time it hands out an instruction (a *move-start*
+frame), keeping a rolling buffer of the last **N**. Each `advance` passes those N past frames + the
+current view (oldest → current) to the reasoner via the `Reason` goal's `images`, so the director sees
+the *sequence* of its recent views and judges its moves against ground truth — closing the old
+**one-action-behind lag**. `N=1` is the before/after pair (default), `N=0` is current-view-only (no
+move comparison), `N=3–4` is deeper history (more image tokens = more latency/cost). Only *images* are
+buffered — the director's text memory (`done`) already carries the narrative history.
 
 ## Data contract 1 — Semantic Plan (`missions/*.yaml`)
 
@@ -164,7 +166,7 @@ The single reasoner prompt (replacing the old judge/replan/compress). Placeholde
 | `{environment}` | the **current** environment (name/description/intent) + a one-line peek at the next — bounded regardless of queue length |
 | `{situation}` | last cycle's `situation` — my standing after the previous move (continuity for the fresh rewrite) |
 | `{narrative}` | the memory carried forward — `done` only (`next` is regenerated; its result is read from the before/after images) |
-| `{vision}` | how to read the attached camera image(s): two = before/after the last move, one = current view (first move), none |
+| `{vision}` | how to read the attached camera image(s): the last is the current view, earlier ones are recent past views (buffer depth `history_frames`); one = current-only, none = no frame |
 
 > The before/after frames themselves are **attached to the reasoner call** (the `Reason` goal's
 > `images`), not substituted into the prompt text; `{vision}` is the caption that tells the model how
@@ -195,7 +197,7 @@ mission loaded and none provided fails cleanly (`mission_failed`).
 |---|---|---|
 | `~/advance` | `hint_interfaces/action/MissionAdvance` | Action server |
 | `/reasoner_node/reason` (see `reasoner_action`) | `hint_interfaces/action/Reason` | Action client — the narrative recompile (with before/after frames) |
-| `/camera/image_raw/compressed` (see `camera_topic`) | `sensor_msgs/CompressedImage` | Sub — latest frame; latched into the director's before/after pair |
+| `/camera/image_raw/compressed` (see `camera_topic`) | `sensor_msgs/CompressedImage` | Sub — latest frame; latched into the director's rolling image buffer (`history_frames`) |
 
 **`advance`** — Goal: `success` (did the last move execute?), `observation` (the planner's VLM
 reasoning, verbatim), and `mission_path` (optional — the mission to run; loads/switches it when it
@@ -219,7 +221,8 @@ or the failure reason). On the first call nothing has executed (`success` defaul
 | `reasoner_action` | `/reasoner_node/reason` | Reasoner action name |
 | `reasoner_timeout` | `30.0` | Seconds to wait on the reasoner call |
 | `max_env_cycles` | `8` | Cycles on one environment before the mission fails (stuck backstop) |
-| `camera_topic` | `/camera/image_raw/compressed` | Frame source for the director's before/after views |
+| `camera_topic` | `/camera/image_raw/compressed` | Frame source for the director's image history |
+| `history_frames` | `1` | Director vision-buffer depth N — how many past move-start frames to attach ahead of the current view. `0` = current view only (no move comparison), `1` = before/after of the last move, `3–4` = deeper history. Each extra frame adds image tokens → more latency/cost. Live-adjustable. Only images are buffered; the narrative (`done`) carries the text history |
 
 ### Test
 

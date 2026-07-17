@@ -35,12 +35,15 @@ class TrajectoryPlannerNode(GeminiActionNode):
         #            grammar can cost spatial-reasoning quality.
         self.declare_parameter("structured_output", "json")
 
-        # Continuity: the frame and the plan REASONING from my previous step, so
-        # each plan builds on how the view changed instead of starting cold. I keep
-        # my OWN reasoning (my spatial read + path intent), not the instruction I was
-        # fed — that's what "continue smoothly" needs, and it transfers across frames.
-        self._prev_pil = None
-        self._prev_reasoning = ""
+        # Continuity buffer: the last N (frame, my-own-reasoning) pairs are attached
+        # ahead of the current frame, so each plan continues my own approach across
+        # the view change instead of starting cold. I store my OWN reasoning (spatial
+        # read + path intent), not the instruction I was fed. N = history_frames,
+        # live-adjustable:
+        #   0 -> stateless (current frame only); 1 -> last step; 3-4 -> deeper history
+        #   (each extra frame is more image tokens = more latency/cost).
+        self.declare_parameter("history_frames", 1)
+        self._history = []   # list of (pil_img, reasoning), oldest first
 
         self._debug_pub = self.create_publisher(Image, "~/debug", 10)
 
@@ -82,14 +85,14 @@ class TrajectoryPlannerNode(GeminiActionNode):
         # candidate_count>1, so the prompt asks for N paths in a single response
         # (via {return_spec}) and we pick the medoid. n<=1 is the plain single plan.
         n = max(1, int(self._p("n_candidates")))
+        # Continuity buffer: the last N past frames (oldest first) go before the
+        # current one, so "the last image attached" is my current view.
+        hist = self._history_window()
         prompt = self._fill_prompt(
             "trajectory_planner.txt", description=goal.description,
             min_row=int(self._p("min_row")), return_spec=self._return_spec(n),
-            continuity=self._continuity_text())
-        # Text first, then the previous frame (if any) before the current one, so
-        # "the last image attached" is my current view. Built from the OLD prev.
-        frames = [self._prev_pil, pil_img] if self._prev_pil is not None else [pil_img]
-        contents = [prompt] + frames
+            continuity=self._continuity_text(hist))
+        contents = [prompt] + [img for img, _ in hist] + [pil_img]
         mode = str(self._p("structured_output")).lower()
         schema = self._response_schema(n) if mode == "schema" else None
         try:
@@ -127,9 +130,10 @@ class TrajectoryPlannerNode(GeminiActionNode):
             self.get_logger().info(
                 f"Chose medoid of {len(cands)}/{len(cand_dicts)} candidate paths.")
 
-        # Latch this frame + the chosen reasoning as continuity for the next plan.
-        self._prev_pil = pil_img
-        self._prev_reasoning = reasoning
+        # Push this frame + the chosen reasoning into the buffer, trimmed to N.
+        self._history.append((pil_img, reasoning))
+        k = max(0, int(self._p("history_frames")))
+        self._history = self._history[-k:] if k else []
 
         self._publish_debug(cv_bgr, stamp, markers, [c[1] for c in cands])
 
@@ -145,23 +149,33 @@ class TrajectoryPlannerNode(GeminiActionNode):
     # ------------------------------------------------------------------
     # Helpers
 
-    def _continuity_text(self):
-        """The {continuity} token: my previous frame + my own last reasoning, or
-        empty on the first plan.
+    def _history_window(self):
+        """The last N (frame, reasoning) pairs to attach as continuity (N =
+        history_frames; empty when 0)."""
+        k = max(0, int(self._p("history_frames")))
+        return self._history[-k:] if k else []
 
-        Empty -> only the current frame is attached (single image). Otherwise the
-        previous frame is attached FIRST and this names my last plan, so I continue
-        my own approach across the view change instead of re-planning cold.
+    @staticmethod
+    def _continuity_text(hist):
+        """The {continuity} token: the N past frames (oldest first) + what I planned
+        at each, or empty when the buffer is off/empty.
+
+        The frames are attached BEFORE the current view; this note labels them and
+        says to continue my own approach across the change — the current instruction
+        still wins.
         """
-        if self._prev_pil is None:
+        if not hist:
             return ""
-        prev = self._prev_reasoning.strip() or "(no note)"
-        return (
-            "Two images are attached: the FIRST is my PREVIOUS view, the SECOND is my CURRENT view. "
-            f'Last step I planned: "{prev}". Continue that approach given how the view has changed — '
-            "build on the progress between the two frames, do not re-plan from scratch. But the CURRENT "
-            "instruction WINS: if it now points somewhere different, I follow it and drop the old plan."
-        )
+        k = len(hist)
+        lines = [f"{k + 1} images are attached, oldest first; the LAST is my CURRENT view — the "
+                 f"earlier {k} are my recent past view(s), with what I planned at each:"]
+        for i, (_, reasoning) in enumerate(hist, 1):
+            lines.append(f'- view {i}: "{(reasoning or "(no note)").strip()}"')
+        lines.append(
+            "I continue that approach across how the view has changed — build on the progress, do "
+            "not re-plan from scratch. But the CURRENT instruction WINS: if it now points somewhere "
+            "different, I follow it and drop the old plan.")
+        return "\n".join(lines)
 
     @staticmethod
     def _response_schema(n):
