@@ -1,8 +1,0 @@
-<?xml version="1.0"?>
-<root BTCPP_format="4">
-    <BehaviorTree ID="ExploreAhead">
-      <RetryUntilSuccessful num_attempts="3">
-        <SubTree ID="FollowPlannedTrajectory" description="Head in the general direction straight ahead, keeping to open floor, avoiding obstacles and not going to far. If the way straight ahead is blocked, turn left or right, whichever side is clearer, with no preference between the two."/>
-      </RetryUntilSuccessful>
-    </BehaviorTree>
-</root>

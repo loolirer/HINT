@@ -1,9 +1,0 @@
-<?xml version="1.0"?>
-<root BTCPP_format="4">
-    <BehaviorTree ID="ApproachDescribedTarget"> 
-      <Sequence>                                                         
-        <GroundDescriptionAction description="{description}" roi="{roi}" stamp="{stamp}"/>
-        <ApproachTargetAction roi="{roi}" stamp="{stamp}"/>
-      </Sequence>
-    </BehaviorTree>
-</root>
