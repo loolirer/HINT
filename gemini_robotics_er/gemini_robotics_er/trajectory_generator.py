@@ -1,4 +1,3 @@
-import cv2
 import numpy as np
 import rclpy
 from google.genai import types
@@ -8,7 +7,6 @@ from rclpy.executors import MultiThreadedExecutor
 
 from geometry_msgs.msg import Point
 from hint_interfaces.action import PlanTrajectory
-from sensor_msgs.msg import Image
 
 from gemini_robotics_er.gemini_base import GeminiActionNode
 
@@ -45,8 +43,6 @@ class TrajectoryPlannerNode(GeminiActionNode):
         self.declare_parameter("history_frames", 1)
         self._history = []   # list of (pil_img, reasoning), oldest first
 
-        self._debug_pub = self.create_publisher(Image, "~/debug", 10)
-
         self._action_server = ActionServer(
             self,
             PlanTrajectory,
@@ -74,7 +70,7 @@ class TrajectoryPlannerNode(GeminiActionNode):
             return self._abort(goal_handle, "No camera frame received yet.")
 
         try:
-            cv_bgr, pil_img = self._frame_to_pil(compressed)
+            _, pil_img = self._frame_to_pil(compressed)
         except Exception as e:
             return self._abort(goal_handle, f"Image conversion failed: {e}")
 
@@ -145,8 +141,6 @@ class TrajectoryPlannerNode(GeminiActionNode):
         self._history.append((pil_img, reasoning))
         k = max(0, int(self._p("history_frames")))
         self._history = self._history[-k:] if k else []
-
-        self._publish_debug(cv_bgr, stamp, markers, [c[1] for c in path_cands], turn)
 
         result = PlanTrajectory.Result()
         result.success = True
@@ -339,51 +333,6 @@ class TrajectoryPlannerNode(GeminiActionNode):
             marker.z = 0.0
             markers.append(marker)
         return markers
-
-    def _publish_debug(self, cv_bgr, stamp, selected, candidates, turn=0.0):
-        """All candidate paths in grey, the chosen medoid in green (tracker style).
-
-        ``selected`` is the medoid markers (empty for a turn-only move); ``candidates``
-        is every path candidate's markers (medoid included); ``turn`` is the chosen
-        end-of-path rotation in degrees. The medoid is drawn last so it sits on top.
-        """
-        try:
-            frame = cv_bgr.copy()
-            h, w = frame.shape[:2]
-            green = (0, 255, 0)
-
-            def to_px(markers):
-                return [(int((m.x + 1.0) / 2.0 * w), int((m.y + 1.0) / 2.0 * h))
-                        for m in markers]
-
-            # Every candidate in grey.
-            for markers in candidates:
-                if markers is selected:
-                    continue
-                pts = to_px(markers)
-                if len(pts) >= 2:
-                    cv2.polylines(frame, [np.array(pts, np.int32)], False,
-                                  (150, 150, 150), 2, cv2.LINE_AA)
-
-            # The chosen medoid in green, on top: line + waypoint dots.
-            px = to_px(selected)
-            if len(px) >= 2:
-                cv2.polylines(frame, [np.array(px, np.int32)], False,
-                              green, 2, cv2.LINE_AA)
-            for cx, cy in px:
-                cv2.circle(frame, (cx, cy), 4, green, -1)
-
-            label = (f"medoid of {len(candidates)}" if len(candidates) > 1
-                     else f"{len(px)} waypoints" if px else "turn-only")
-            label += f"  turn {turn:+.0f}deg"
-            cv2.putText(frame, label, (8, h - 10), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5, green, 1, cv2.LINE_AA)
-
-            out = self._bridge.cv2_to_imgmsg(frame, encoding="bgr8")
-            out.header.stamp = stamp
-            self._debug_pub.publish(out)
-        except Exception as e:
-            self.get_logger().warn(f"Debug publish failed: {e}")
 
     def _publish_feedback(self, goal_handle, state):
         fb = PlanTrajectory.Feedback()

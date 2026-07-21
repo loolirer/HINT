@@ -91,7 +91,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /camera/ground/debug
+        Value: /debug
       Value: true
     - Alpha: 1
       Buffer Length: 1

@@ -66,6 +66,13 @@ def generate_launch_description():
         parameters=[camera_rig, {"device": "GPU"}],
     )
 
+    visual_debug = Node(
+        package="hint_perception",
+        executable="visual_debug",
+        output="screen",
+        parameters=[camera_rig],
+    )
+
     trajectory_navigator = Node(
         package="hint_navigation",
         executable="trajectory_navigator",
@@ -153,6 +160,7 @@ def generate_launch_description():
             # cartographer,
             # occupancy_grid,
             ground_segmenter,
+            visual_debug,
             trajectory_navigator,
             nav2,
             trajectory_planner,

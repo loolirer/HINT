@@ -39,6 +39,7 @@ setup(
     entry_points={
         "console_scripts": [
             "ground_segmenter = hint_perception.ground_segmenter:main",
+            "visual_debug = hint_perception.visual_debug:main",
         ],
     },
 )
