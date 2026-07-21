@@ -27,6 +27,8 @@ public:
     return providedBasicPorts({
       BT::InputPort<std::string>("description"),
       BT::OutputPort<std::vector<geometry_msgs::msg::Point>>("markers"),
+      BT::OutputPort<double>(
+        "turn_degrees", "in-place turn to apply after the path (+left / -right, deg)"),
       BT::OutputPort<builtin_interfaces::msg::Time>("stamp"),
       BT::OutputPort<std::string>(
         "message", "the VLM's explanation of the chosen path (or why planning failed)"),
@@ -50,8 +52,9 @@ public:
       RCLCPP_WARN(logger(), "Trajectory planning failed: %s", wr.result->message.c_str());
       return BT::NodeStatus::FAILURE;
     }
-    setOutput("markers", wr.result->markers);
-    setOutput("stamp",   wr.result->stamp);
+    setOutput("markers",      wr.result->markers);
+    setOutput("turn_degrees", wr.result->turn_degrees);
+    setOutput("stamp",        wr.result->stamp);
     return BT::NodeStatus::SUCCESS;
   }
 

@@ -252,11 +252,21 @@ class TrajectoryNavigatorNode(Node):
     def _run(self, goal_handle):
         goal = goal_handle.request
 
+        # Turn-only move: the planner returned no path (just a turn). Nothing to follow —
+        # succeed immediately so the BT's SpinAction, which runs next in the sequence,
+        # performs the rotation. (A real grounding failure with waypoints present still
+        # aborts below.)
+        if not goal.waypoints:
+            result = FollowTrajectory.Result()
+            result.success = True
+            result.message = "Turn-only move — no trajectory to follow"
+            goal_handle.succeed()
+            return result
+
         path = self._build_path(goal)
         if path is None:
-            return self._abort(goal_handle, "Could not ground trajectory (no waypoints "
-                                            "or no odometry)")
-        self._path_pub.publish(path)  # RViz: the exact path handed to MPPI
+            return self._abort(goal_handle, "Could not ground trajectory (no odometry)")
+        self._publish_path(path)  # RViz: the exact path handed to MPPI
 
         if not self._fp_client.wait_for_server(
                 timeout_sec=float(self._p("server_timeout"))):
@@ -276,6 +286,7 @@ class TrajectoryNavigatorNode(Node):
         # Send and wait for acceptance.
         send_future = self._fp_client.send_goal_async(fp_goal)
         while rclpy.ok() and not send_future.done():
+            self._publish_path(path)
             self._publish_feedback(goal_handle, "IDLE")
             rate.sleep()
         fp_handle = send_future.result()
@@ -289,6 +300,10 @@ class TrajectoryNavigatorNode(Node):
             if goal_handle.is_cancel_requested and not canceling:
                 canceling = True
                 fp_handle.cancel_goal_async()
+            # Re-stamp + republish each tick so the path is transformed against the
+            # CURRENT odom->base_link, not the frozen plan-time transform — otherwise it
+            # sits locked in an ego (base_link) view instead of sliding as the robot moves.
+            self._publish_path(path)
             self._publish_feedback(goal_handle, "WAITING" if canceling else "RUNNING")
             rate.sleep()
 
@@ -323,6 +338,17 @@ class TrajectoryNavigatorNode(Node):
         result.message = message
         self.get_logger().warn(f"FollowTrajectory aborted: {message}")
         return result
+
+    def _publish_path(self, path):
+        """Publish the (odom-frame) path with a CURRENT stamp.
+
+        Re-stamping matters for ego (base_link) views: RViz transforms a Path at its
+        header stamp, so a once-published, frozen-stamp path stays pinned to the plan-time
+        robot pose. A fresh stamp each tick makes it slide as the robot moves — the same
+        reason MPPI's transformed_global_plan tracks correctly.
+        """
+        path.header.stamp = self.get_clock().now().to_msg()
+        self._path_pub.publish(path)
 
     def _publish_feedback(self, goal_handle, state):
         fb = FollowTrajectory.Feedback()
