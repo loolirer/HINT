@@ -121,9 +121,13 @@ class GroundSegmenter(Node):
         )
         # Reliable pub so a best-effort costmap observation sub is still compatible.
         self.pub_obstacles = self.create_publisher(PointCloud2, "/ground/obstacles", 5)
+        # Binary ground mask (255 = ground, 0 = not) at camera resolution, header
+        # inherited from the source frame. trajectory_navigator uses it to clip the VLM
+        # pixel trajectory to the ground.
+        self.pub_mask = self.create_publisher(Image, "/camera/ground/mask", 1)
         self.pub_debug = self.create_publisher(Image, "/camera/ground/debug", 1)
 
-        self.get_logger().info("OpenVINO Ground Segmenter (obstacle cloud) ready!")
+        self.get_logger().info("OpenVINO Ground Segmenter (mask + obstacle cloud) ready!")
 
     def _p(self, name):
         return self.get_parameter(name).value
@@ -292,6 +296,9 @@ class GroundSegmenter(Node):
         score = cv2.resize(score, (w, h), interpolation=cv2.INTER_LINEAR)
         ground = self._clean(score >= float(self._p("ground_threshold")))
 
+        # Binary ground mask (image space), for the trajectory ground-clipping consumer.
+        self._publish_mask(ground, msg.header)
+
         # Obstacle cloud (base_link, z=0), stamped at the source frame for latency comp.
         mx, my = self._mask_to_obstacle_cells(ground, w, h)
         header = Header()
@@ -302,6 +309,12 @@ class GroundSegmenter(Node):
 
         if self.pub_debug.get_subscription_count() > 0:
             self._publish_debug(cv_img, ground, msg.header)
+
+    def _publish_mask(self, ground, src_header):
+        """Publish the binary ground mask (mono8, 255=ground) at camera resolution."""
+        out = self.bridge.cv2_to_imgmsg(ground.astype(np.uint8) * 255, encoding="mono8")
+        out.header = src_header
+        self.pub_mask.publish(out)
 
     def _publish_debug(self, frame, ground, src_header):
         """Green where ground, red where not, blended onto the frame."""

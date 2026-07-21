@@ -70,6 +70,7 @@ ros2 topic hz /ground/obstacles                               # obstacle cloud, 
 |---|---|---|
 | `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Sub — latest-wins (best effort) |
 | `/ground/obstacles` | `sensor_msgs/PointCloud2` | Pub — non-ground cell centres in `base_link` (z=0), consumed by `hint_navigation`'s local costmap |
+| `/camera/ground/mask` | `sensor_msgs/Image` (`mono8`) | Pub — binary ground mask (255 = ground, 0 = not) at camera resolution, header from the source frame. `hint_navigation`'s `trajectory_navigator` uses it to clip the VLM pixel trajectory to the ground |
 | `/camera/ground/debug` | `sensor_msgs/Image` (`bgr8`) | Pub — green/red ground overlay (subscriber-gated) |
 
 ### Parameters
