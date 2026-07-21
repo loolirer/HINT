@@ -1,0 +1,143 @@
+# Mapless reactive Nav2 for HINT: only the controller_server (FollowPath + MPPI) and its
+# rolling local costmap, fed by ground_segmenter's /ground/obstacles point cloud. No
+# global costmap / planner / map_server / amcl / bt_navigator — the VLM path is followed
+# directly via the follow_path action (driven by trajectory_navigator).
+
+controller_server:
+  ros__parameters:
+    controller_frequency: 20.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.5
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugins: ["progress_checker"]
+    goal_checker_plugins: ["goal_checker"]
+    controller_plugins: ["FollowPath"]
+    # The unreachable-goal backstop: if the robot fails to move required_movement_radius
+    # within movement_time_allowance, follow_path ABORTs -> trajectory_navigator reports
+    # failure (the native equivalent of the old pursuit stall watchdog).
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.1
+      movement_time_allowance: 8.0
+    # Positional arrival — the VLM path carries no meaningful final heading, so yaw is
+    # effectively ignored.
+    goal_checker:
+      stateful: true
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.25
+      yaw_goal_tolerance: 3.2
+    FollowPath:
+      plugin: "nav2_mppi_controller::MPPIController"
+      time_steps: 48
+      model_dt: 0.05
+      batch_size: 1600
+      vx_std: 0.2
+      vy_std: 0.2
+      wz_std: 0.4
+      vx_max: 0.10          # 0.26 Waffle Pi rated max (m/s)
+      vx_min: 0.0           # forward-only: the camera faces forward, never reverse blind
+      vy_max: 0.0           # differential drive: no lateral velocity
+      wz_max: 1.82          # rad/s
+      ax_max: 3.0
+      ax_min: -3.0
+      az_max: 3.5
+      iteration_count: 1
+      prune_distance: 1.7
+      transform_tolerance: 0.2
+      temperature: 0.3
+      gamma: 0.015
+      motion_model: "DiffDrive"
+      visualize: true
+      AckermannConstraints:
+        min_turning_r: 0.0
+      critics: ["ConstraintCritic", "CostCritic", "GoalCritic", "GoalAngleCritic",
+                "PathAlignCritic", "PathFollowCritic", "PathAngleCritic", "PreferForwardCritic"]
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 4.0
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 1.4
+      GoalAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.0
+        threshold_to_consider: 0.5
+      PreferForwardCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 0.5
+      CostCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.81
+        critical_cost: 300.0
+        consider_footprint: false
+        collision_cost: 1000000.0
+        near_goal_distance: 1.0
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 14.0
+        max_path_occupancy_ratio: 0.05
+        trajectory_point_step: 4
+        threshold_to_consider: 0.5
+        offset_from_furthest: 20
+        use_path_orientations: false
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        offset_from_furthest: 5
+        threshold_to_consider: 1.4
+      PathAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 2.0
+        offset_from_furthest: 4
+        threshold_to_consider: 0.5
+        max_angle_to_furthest: 1.0
+        mode: 0
+    enable_stamped_cmd_vel: true   # TB3 consumes stamped /cmd_vel
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: odom
+      robot_base_frame: base_link
+      rolling_window: true
+      width: 4
+      height: 4
+      resolution: 0.05
+      robot_radius: 0.15
+      # Mapless: obstacles from the ground segmentation only, plus inflation. No static
+      # or voxel layer.
+      plugins: ["obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: ground
+        ground:
+          topic: /ground/obstacles
+          data_type: "PointCloud2"
+          marking: true
+          clearing: true
+          # base_link points sit at z=0; widen the height gate so they are accepted.
+          min_obstacle_height: -1.0
+          max_obstacle_height: 2.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.40   # the keep-out margin (comfort clearance)
+        cost_scaling_factor: 5.0
+      always_send_full_costmap: true

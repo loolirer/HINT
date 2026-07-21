@@ -19,7 +19,7 @@ void registerHintNodes(BT::BehaviorTreeFactory & factory, std::shared_ptr<rclcpp
   BT::RosNodeParams ground_params(node, "/description_detector_node/ground_description");
   BT::RosNodeParams approach_params(node, "/visual_servoing_node/approach_target");
   BT::RosNodeParams plan_params(node, "/trajectory_planner_node/plan_trajectory");
-  BT::RosNodeParams follow_params(node, "/pursuit_servo_node/follow_trajectory");
+  BT::RosNodeParams follow_params(node, "/trajectory_navigator_node/follow_trajectory");
   BT::RosNodeParams question_params(node, "/visual_question_node/ask");
   BT::RosNodeParams reason_params(node, "/reasoner_node/reason");
   BT::RosNodeParams mission_advance_params(node, "/mission_planner_node/advance");
