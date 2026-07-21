@@ -1,3 +1,4 @@
+setuptools<80
 openvino-dev
 onnxruntime
 onnxscript

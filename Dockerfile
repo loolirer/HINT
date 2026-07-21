@@ -54,6 +54,9 @@ RUN apt-get update && \
     fzf \
     tree \
     jq \
+    intel-opencl-icd \
+    ocl-icd-libopencl1 \
+    clinfo \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR ${COLCON_WS}
