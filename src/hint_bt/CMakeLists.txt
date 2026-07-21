@@ -5,6 +5,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(behaviortree_ros2 REQUIRED)
 find_package(hint_interfaces REQUIRED)
+find_package(nav2_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
@@ -23,6 +24,7 @@ ament_target_dependencies(hint_bt_nodes
   rclcpp
   behaviortree_ros2
   hint_interfaces
+  nav2_msgs
   sensor_msgs
   geometry_msgs
   builtin_interfaces

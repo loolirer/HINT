@@ -12,6 +12,10 @@ from sensor_msgs.msg import Image
 
 from gemini_robotics_er.gemini_base import GeminiActionNode
 
+# Below this magnitude (deg) a turn is treated as "no turn" when deciding whether an
+# empty-path reply is a valid turn-only move vs a genuine no-path (blocked / arrived).
+_TURN_EPS = 1.0
+
 
 class TrajectoryPlannerNode(GeminiActionNode):
     def __init__(self):
@@ -106,42 +110,52 @@ class TrajectoryPlannerNode(GeminiActionNode):
         if goal_handle.is_cancel_requested:
             return self._cancel(goal_handle)
 
-        # Parse every candidate the reply carries; keep those with a usable path.
+        # Parse every candidate the reply carries. A candidate with a usable path is a
+        # path candidate; one with no path but a real turn is a turn-only candidate
+        # (scan / re-orient in place).
         cand_dicts = self._candidate_dicts(self._parse_json(raw))
-        cands, first_reason = [], ""
+        path_cands, turn_cands, first_reason = [], [], ""
         for cd in cand_dicts:
-            reasoning, points = self._parse_reasoning_points(cd)
+            reasoning, points, turn = self._parse_reasoning_points(cd)
             first_reason = first_reason or reasoning
             markers = self._points_to_markers(points)
             if markers:
-                cands.append((reasoning, markers, points))
+                path_cands.append((reasoning, markers, points, turn))
+            elif abs(turn) >= _TURN_EPS:
+                turn_cands.append((reasoning, [], [], turn))
 
-        if not cands:
-            # Every candidate declined (wall / already there) or was unparseable.
+        if path_cands:
+            # Consensus: the medoid path — the candidate closest to all the others —
+            # carrying its own end-of-path turn.
+            reasoning, markers, points, turn = self._select_medoid(path_cands)
+            if len(cand_dicts) > 1:
+                self.get_logger().info(
+                    f"Chose medoid of {len(path_cands)}/{len(cand_dicts)} candidate paths.")
+        elif turn_cands:
+            # Turn-only move: no path, just rotate in place.
+            reasoning, markers, points, turn = turn_cands[0]
+            self.get_logger().info(f"Turn-only move: {turn:+.0f} deg, no trajectory.")
+        else:
+            # No path and no turn anywhere: blocked / already there / unparseable.
             reason = first_reason or "no traversable ground path was visible"
             return self._abort(
                 goal_handle,
                 f'No trajectory for "{goal.description}": {reason}',
             )
 
-        # Consensus: the medoid path — the candidate closest to all the others.
-        reasoning, markers, points = self._select_medoid(cands)
-        if len(cand_dicts) > 1:
-            self.get_logger().info(
-                f"Chose medoid of {len(cands)}/{len(cand_dicts)} candidate paths.")
-
         # Push this frame + the chosen reasoning into the buffer, trimmed to N.
         self._history.append((pil_img, reasoning))
         k = max(0, int(self._p("history_frames")))
         self._history = self._history[-k:] if k else []
 
-        self._publish_debug(cv_bgr, stamp, markers, [c[1] for c in cands])
+        self._publish_debug(cv_bgr, stamp, markers, [c[1] for c in path_cands], turn)
 
         result = PlanTrajectory.Result()
         result.success = True
         # The VLM's brief explanation of the chosen path rides on `message`.
-        result.message = reasoning or f"{len(markers)} waypoint(s)"
+        result.message = reasoning or f"{len(markers)} waypoint(s), turn {turn:+.0f} deg"
         result.markers = markers
+        result.turn_degrees = float(turn)
         result.stamp = stamp
         goal_handle.succeed()
         return result
@@ -196,10 +210,11 @@ class TrajectoryPlannerNode(GeminiActionNode):
         )
         plan = types.Schema(
             type=types.Type.OBJECT,
-            required=["reasoning", "waypoints"],
+            required=["reasoning", "waypoints", "turn_degrees"],
             properties={
                 "reasoning": types.Schema(type=types.Type.STRING),
                 "waypoints": types.Schema(type=types.Type.ARRAY, items=waypoint),
+                "turn_degrees": types.Schema(type=types.Type.NUMBER),
             },
         )
         if n <= 1:
@@ -217,17 +232,17 @@ class TrajectoryPlannerNode(GeminiActionNode):
         candidate_count>1 is unsupported by this model, so N-sampling is done by
         asking for N paths in a single response and taking the medoid.
         """
-        single = ('Return JSON only, no markdown fencing:\n'
-                  '{"reasoning": <plan the path in words, then draw it>,'
-                  '"waypoints": [{"point": [y, x], "label": <n>}, ...]}')
+        shape = ('{"reasoning": <plan the path in words, then draw it>,'
+                 '"waypoints": [{"point": [y, x], "label": <n>}, ...],'
+                 '"turn_degrees": <in-place turn at the end, + left / - right / 0 none>}')
+        single = 'Return JSON only, no markdown fencing:\n' + shape
         if n <= 1:
             return single
         return (
             f"Give my top {n} candidate paths for this. If the way is clear they will be similar; if "
             "the scene is ambiguous (two ways around something) let them differ so the real options "
             "show. Each is a COMPLETE plan by the rules above. Return JSON only, no markdown fencing:\n"
-            '{"candidates": [{"reasoning": <plan the path in words, then draw it>,'
-            '"waypoints": [{"point": [y, x], "label": <n>}, ...]}, ...]}')
+            '{"candidates": [' + shape + ', ...]}')
 
     @staticmethod
     def _candidate_dicts(data):
@@ -247,10 +262,10 @@ class TrajectoryPlannerNode(GeminiActionNode):
         """Return the consensus candidate — the one whose (arc-length-resampled)
         path is closest, summed, to all the others.
 
-        ``cands`` is a list of ``(reasoning, markers, points)`` triples. Averaging
-        whole paths is wrong (two valid routes average to a path between them), so
-        this picks the most central *actual* candidate instead. A single candidate
-        is returned as-is.
+        ``cands`` is a list of ``(reasoning, markers, points, turn)`` tuples (the whole
+        tuple is returned, so the chosen path keeps its own turn). Averaging whole paths
+        is wrong (two valid routes average to a path between them), so this picks the
+        most central *actual* candidate instead. A single candidate is returned as-is.
         """
         if len(cands) == 1:
             return cands[0]
@@ -281,24 +296,27 @@ class TrajectoryPlannerNode(GeminiActionNode):
                          np.interp(targets, arc, a[:, 1])], axis=1)
 
     def _parse_reasoning_points(self, data):
-        """Split the model reply into ``(reasoning, points)``.
+        """Split the model reply into ``(reasoning, points, turn_degrees)``.
 
         Accepts the documented object form
-        ``{"reasoning": ..., "waypoints": [...]}`` and tolerates a bare
-        ``[...]`` list (reasoning empty).
+        ``{"reasoning": ..., "waypoints": [...], "turn_degrees": ...}`` and tolerates a
+        bare ``[...]`` list (reasoning empty, no turn).
         """
         if isinstance(data, dict):
             reasoning = data.get("reasoning", "") or ""
             points = data.get("waypoints", [])
+            turn = data.get("turn_degrees", 0.0)
         elif isinstance(data, list):
-            reasoning = ""
-            points = data
+            reasoning, points, turn = "", data, 0.0
         else:
-            reasoning = ""
-            points = []
+            reasoning, points, turn = "", [], 0.0
         if not isinstance(points, list):
             points = []
-        return str(reasoning), points
+        try:
+            turn = max(-360.0, min(360.0, float(turn)))
+        except (TypeError, ValueError):
+            turn = 0.0
+        return str(reasoning), points, turn
 
     def _points_to_markers(self, points):
         """Convert Gemini ``[{"point": [y, x], ...}]`` to normalized markers.
@@ -324,11 +342,12 @@ class TrajectoryPlannerNode(GeminiActionNode):
             markers.append(marker)
         return markers
 
-    def _publish_debug(self, cv_bgr, stamp, selected, candidates):
+    def _publish_debug(self, cv_bgr, stamp, selected, candidates, turn=0.0):
         """All candidate paths in grey, the chosen medoid in green (tracker style).
 
-        ``selected`` is the medoid markers; ``candidates`` is every candidate's
-        markers (medoid included). The medoid is drawn last so it sits on top.
+        ``selected`` is the medoid markers (empty for a turn-only move); ``candidates``
+        is every path candidate's markers (medoid included); ``turn`` is the chosen
+        end-of-path rotation in degrees. The medoid is drawn last so it sits on top.
         """
         try:
             frame = cv_bgr.copy()
@@ -357,7 +376,8 @@ class TrajectoryPlannerNode(GeminiActionNode):
                 cv2.circle(frame, (cx, cy), 4, green, -1)
 
             label = (f"medoid of {len(candidates)}" if len(candidates) > 1
-                     else f"{len(px)} waypoints")
+                     else f"{len(px)} waypoints" if px else "turn-only")
+            label += f"  turn {turn:+.0f}deg"
             cv2.putText(frame, label, (8, h - 10), cv2.FONT_HERSHEY_SIMPLEX,
                         0.5, green, 1, cv2.LINE_AA)
 

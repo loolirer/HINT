@@ -1,11 +1,12 @@
 """Mapless reactive Nav2 bringup for HINT.
 
-Starts only the pieces needed to follow a VLM path safely off a local costmap:
-``controller_server`` (FollowPath + MPPI, with its rolling local_costmap) and a
-``nav2_lifecycle_manager`` that autostarts it. No map_server / amcl / planner_server /
+Starts the pieces needed to follow a VLM path safely off a local costmap and re-orient
+at the end: ``controller_server`` (FollowPath + MPPI, with its rolling local_costmap),
+``behavior_server`` (the Spin behavior, for the BT's end-of-trajectory / scan turn), and a
+``nav2_lifecycle_manager`` that autostarts both. No map_server / amcl / planner_server /
 bt_navigator — there is no global map. The obstacle layer is fed by ``ground_segmenter``
-(`/ground/obstacles`), and the path is delivered by ``trajectory_navigator`` via the
-controller's ``follow_path`` action.
+(`/ground/obstacles`); the path is delivered by ``trajectory_navigator`` via the
+controller's ``follow_path`` action; the turn by ``hint_bt``'s SpinAction via ``/spin``.
 """
 
 import os
@@ -36,6 +37,14 @@ def generate_launch_description():
         parameters=[params_file, {"use_sim_time": use_sim_time}],
     )
 
+    behavior_server = Node(
+        package="nav2_behaviors",
+        executable="behavior_server",
+        name="behavior_server",
+        output="screen",
+        parameters=[params_file, {"use_sim_time": use_sim_time}],
+    )
+
     lifecycle_manager = Node(
         package="nav2_lifecycle_manager",
         executable="lifecycle_manager",
@@ -44,12 +53,15 @@ def generate_launch_description():
         parameters=[{
             "use_sim_time": use_sim_time,
             "autostart": True,
-            "node_names": ["controller_server"],
+            # controller first so its local costmap is up before behavior_server (Spin)
+            # subscribes to it for collision checking.
+            "node_names": ["controller_server", "behavior_server"],
         }],
     )
 
     return LaunchDescription([
         declare_use_sim_time,
         controller_server,
+        behavior_server,
         lifecycle_manager,
     ])

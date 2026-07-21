@@ -8,6 +8,7 @@
 #include "hint_bt/nodes/mission_advance_action.hpp"
 #include "hint_bt/nodes/plan_trajectory_action.hpp"
 #include "hint_bt/nodes/reason_action.hpp"
+#include "hint_bt/nodes/spin_action.hpp"
 #include "hint_bt/nodes/visual_question_action.hpp"
 
 namespace hint_bt
@@ -20,6 +21,7 @@ void registerHintNodes(BT::BehaviorTreeFactory & factory, std::shared_ptr<rclcpp
   BT::RosNodeParams approach_params(node, "/visual_servoing_node/approach_target");
   BT::RosNodeParams plan_params(node, "/trajectory_planner_node/plan_trajectory");
   BT::RosNodeParams follow_params(node, "/trajectory_navigator_node/follow_trajectory");
+  BT::RosNodeParams spin_params(node, "/spin");
   BT::RosNodeParams question_params(node, "/visual_question_node/ask");
   BT::RosNodeParams reason_params(node, "/reasoner_node/reason");
   BT::RosNodeParams mission_advance_params(node, "/mission_planner_node/advance");
@@ -28,6 +30,7 @@ void registerHintNodes(BT::BehaviorTreeFactory & factory, std::shared_ptr<rclcpp
   factory.registerNodeType<ApproachTargetAction>("ApproachTargetAction", approach_params);
   factory.registerNodeType<PlanTrajectoryAction>("PlanTrajectoryAction", plan_params);
   factory.registerNodeType<FollowTrajectoryAction>("FollowTrajectoryAction", follow_params);
+  factory.registerNodeType<SpinAction>("SpinAction", spin_params);
   factory.registerNodeType<VisualQuestionAction>("VisualQuestionAction", question_params);
   factory.registerNodeType<ReasonAction>("ReasonAction", reason_params);
   factory.registerNodeType<MissionAdvance>("MissionAdvance", mission_advance_params);
