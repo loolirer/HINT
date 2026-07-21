@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>hint_nav2</name>
+  <version>0.0.0</version>
+  <description>Nav2 reactive-navigation integration for HINT: a fused ground_segmenter
+    (semantic ground ONNX -> obstacle PointCloud2) feeding a mapless rolling local
+    costmap, and a trajectory_navigator adapter that grounds VLM markers into a
+    nav_msgs/Path and drives Nav2's FollowPath (MPPI) controller.</description>
+  <maintainer email="lorenzo.oliveira@ee.ufcg.edu.br">loolirer</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>sensor_msgs_py</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>hint_interfaces</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
+
+  <!-- Nav2 stack brought up by launch/nav2.launch.py (mapless FollowPath + MPPI). -->
+  <exec_depend>nav2_controller</exec_depend>
+  <exec_depend>nav2_mppi_controller</exec_depend>
+  <exec_depend>nav2_costmap_2d</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <test_depend>ros-jazzy-compressed-image-transport</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

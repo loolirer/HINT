@@ -50,17 +50,37 @@ def generate_launch_description():
         arguments=["-resolution", "0.05", "-publish_period_sec", "1.0"],
     )
 
-    waypoint_tracker = Node(
-        package="visual_tracker",
-        executable="odom_waypoint_tracker",
-        name="waypoint_tracker_node",
+    # --- Nav2 reactive navigation (replaces odom_waypoint_tracker + pursuit_servo) ---
+    # Shared camera-rig geometry for the ground projection (match the real rig).
+    camera_rig = {
+        "camera_height": 0.14,
+        "camera_forward_offset": 0.0,
+        "camera_tilt": 0.0,
+        "camera_hfov_deg": 62.2,
+    }
+
+    ground_segmenter = Node(
+        package="hint_nav2",
+        executable="ground_segmenter",
         output="screen",
+        parameters=[camera_rig, {"device": "GPU"}],
     )
 
-    pursuit_servo = Node(
-        package="visual_servoing",
-        executable="pursuit_servo",
+    trajectory_navigator = Node(
+        package="hint_nav2",
+        executable="trajectory_navigator",
         output="screen",
+        parameters=[camera_rig],
+    )
+
+    nav2 = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory("hint_nav2"),
+                "launch",
+                "nav2.launch.py",
+            )
+        )
     )
 
     reasoner = Node(
@@ -132,8 +152,9 @@ def generate_launch_description():
             teleop,
             # cartographer,
             # occupancy_grid,
-            waypoint_tracker,
-            pursuit_servo,
+            ground_segmenter,
+            trajectory_navigator,
+            nav2,
             trajectory_planner,
             reasoner,
             mission_planner,
