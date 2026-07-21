@@ -36,7 +36,7 @@ To build and deploy the project, follow these steps:
 
 4. **Run the launch file**:
    ```bash
-   ros2 launch hint hint.launch.py
+   ros2 launch hint_bringup bringup.launch.py
    ```
 
 ---

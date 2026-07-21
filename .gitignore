@@ -2,7 +2,7 @@
 secrets/gemini_api_key.txt
 
 # ONNX / segmentation model weights (exported locally, never committed)
-src/hint_nav2/models/
+hint_perception/models/
 *.onnx
 
 # Byte-compiled / optimized / DLL files

@@ -1,0 +1,35 @@
+services:
+  turtlebot3:
+    container_name: turtlebot3
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    tty: true
+    restart: unless-stopped
+    cap_add:
+      - SYS_NICE
+    ulimits:
+      rtprio: 99
+      rttime: -1
+      memlock: 8428281856
+    network_mode: host
+    ipc: host
+    pid: host
+    environment:
+     - DISPLAY=${DISPLAY}
+     - QT_X11_NO_MITSHM=1
+     - TURTLEBOT3_MODEL=waffle_pi
+     - LDS_MODEL=LDS-02
+     - ROS_DOMAIN_ID=30
+     - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    volumes:
+      - ./.bash_history:/root/.bash_history
+      - /dev:/dev
+      - /dev/shm:/dev/shm
+      - /run/udev:/run/udev
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /tmp/.docker.xauth:/tmp/.docker.xauth:rw
+      - ..:/root/turtlebot3_ws/src
+      - ../secrets:/root/secrets:ro
+    privileged: true
+    command: bash -c "source /opt/ros/jazzy/setup.bash && bash"
