@@ -29,7 +29,14 @@ chain stays action-based.
 
 Per goal it:
 
-1. **Grounds** the normalized markers (`x`/`y ∈ [-1, 1]`, nearest-first) onto the ground
+0. **Ground-clips** the VLM pixel trajectory: each normalized marker is tested against
+   `hint_perception`'s binary ground mask (`/camera/ground/mask`, matched to the goal's
+   frame stamp); the **leading run** of on-ground markers is kept, and the **first marker
+   that leaves the ground is dropped along with every marker after it** — so the robot
+   never follows a path that runs off the floor. No fresh mask → the trajectory passes
+   through unclipped. If nothing survives (all off-ground, or the VLM sent none), the goal
+   succeeds as a no-op so the BT's Spin still runs.
+1. **Grounds** the surviving markers (`x`/`y ∈ [-1, 1]`, nearest-first) onto the ground
    plane in `base_link` via the analytic camera model (same projection as `hint_perception`),
    then re-expresses them in **`odom`** using the odometry pose at the goal's stamp — so the
    path is anchored once in the world, and the robot follows it while it stays put in `odom`
@@ -41,9 +48,13 @@ Per goal it:
 3. Handles the **turn-only** move: an empty `waypoints` goal succeeds immediately (nothing to
    follow), so the BT's `SpinAction` that runs next performs the rotation.
 
-It also republishes the grounded path (re-stamped, at control rate) on
-`~/path` (`/trajectory_navigator_node/path`, latched) purely for RViz — re-stamping is what
-lets it render correctly in an **ego (`base_link`) view** instead of freezing at plan time.
+It also republishes two grounded paths (re-stamped, at control rate) purely for RViz —
+re-stamping is what lets them render correctly in an **ego (`base_link`) view** instead of
+freezing at plan time:
+- **`~/path`** — the ground-clipped path actually handed to MPPI.
+- **`~/path_raw`** — the **full VLM trajectory** as grounded (never followed), so you can
+  see what the model intended vs what survived the clip. When nothing is clipped the two
+  coincide.
 
 ### Interfaces
 
@@ -51,8 +62,10 @@ lets it render correctly in an **ego (`base_link`) view** instead of freezing at
 |---|---|---|
 | `~/follow_trajectory` | `hint_interfaces/FollowTrajectory` | Action server (BT-facing) |
 | `follow_path` (see `follow_path_action`) | `nav2_msgs/FollowPath` | Action client (Nav2 controller) |
+| `/camera/ground/mask` (see `mask_topic`) | `sensor_msgs/Image` (`mono8`) | Sub — ground mask for clipping the pixel trajectory |
 | `/odom` (see `odom_topic`) | `nav_msgs/Odometry` | Sub — world anchor for grounding |
-| `~/path` | `nav_msgs/Path` (latched) | Pub — the grounded path, for RViz |
+| `~/path` | `nav_msgs/Path` (latched) | Pub — the ground-clipped path handed to MPPI, for RViz |
+| `~/path_raw` | `nav_msgs/Path` (latched) | Pub — the full VLM trajectory grounded (debug; never followed) |
 
 ### Key parameters
 
