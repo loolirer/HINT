@@ -12,10 +12,6 @@ from sensor_msgs.msg import Image
 
 from gemini_robotics_er.gemini_base import GeminiActionNode
 
-# Below this magnitude (deg) a turn is treated as "no turn" when deciding whether an
-# empty-path reply is a valid turn-only move vs a genuine no-path (blocked / arrived).
-_TURN_EPS = 1.0
-
 
 class TrajectoryPlannerNode(GeminiActionNode):
     def __init__(self):
@@ -110,19 +106,27 @@ class TrajectoryPlannerNode(GeminiActionNode):
         if goal_handle.is_cancel_requested:
             return self._cancel(goal_handle)
 
-        # Parse every candidate the reply carries. A candidate with a usable path is a
-        # path candidate; one with no path but a real turn is a turn-only candidate
-        # (scan / re-orient in place).
-        cand_dicts = self._candidate_dicts(self._parse_json(raw))
-        path_cands, turn_cands, first_reason = [], [], ""
-        for cd in cand_dicts:
+        # Parse the reply. **Any interpretable response is a success** — the generator only
+        # relays what the model said (waypoints, possibly empty; a turn, possibly 0), and
+        # whether an environment is done / blocked is the narrative's call, not ours. The
+        # only failures are *no usable response*: a timeout / API error (handled above), or
+        # an unparseable reply here — a genuine model malfunction, distinct from a valid
+        # "empty" decision, so the BT/narrative sees an error rather than a silent no-op.
+        parsed = self._parse_json(raw)
+        if parsed is None:
+            return self._abort(
+                goal_handle,
+                f'VLM response for "{goal.description}" was not parseable JSON',
+            )
+        cand_dicts = self._candidate_dicts(parsed)
+        path_cands, first_reason, first_turn = [], "", 0.0
+        for i, cd in enumerate(cand_dicts):
             reasoning, points, turn = self._parse_reasoning_points(cd)
-            first_reason = first_reason or reasoning
+            if i == 0:
+                first_reason, first_turn = reasoning, turn
             markers = self._points_to_markers(points)
             if markers:
                 path_cands.append((reasoning, markers, points, turn))
-            elif abs(turn) >= _TURN_EPS:
-                turn_cands.append((reasoning, [], [], turn))
 
         if path_cands:
             # Consensus: the medoid path — the candidate closest to all the others —
@@ -131,17 +135,11 @@ class TrajectoryPlannerNode(GeminiActionNode):
             if len(cand_dicts) > 1:
                 self.get_logger().info(
                     f"Chose medoid of {len(path_cands)}/{len(cand_dicts)} candidate paths.")
-        elif turn_cands:
-            # Turn-only move: no path, just rotate in place.
-            reasoning, markers, points, turn = turn_cands[0]
-            self.get_logger().info(f"Turn-only move: {turn:+.0f} deg, no trajectory.")
         else:
-            # No path and no turn anywhere: blocked / already there / unparseable.
-            reason = first_reason or "no traversable ground path was visible"
-            return self._abort(
-                goal_handle,
-                f'No trajectory for "{goal.description}": {reason}',
-            )
+            # No waypoints in any candidate: a turn-only (scan / re-orient) or a no-op
+            # move — still a valid response. Relay the first candidate's turn verbatim.
+            reasoning, markers, points, turn = first_reason, [], [], first_turn
+            self.get_logger().info(f"No waypoints — turn-only/no-op move ({turn:+.0f} deg).")
 
         # Push this frame + the chosen reasoning into the buffer, trimmed to N.
         self._history.append((pil_img, reasoning))
