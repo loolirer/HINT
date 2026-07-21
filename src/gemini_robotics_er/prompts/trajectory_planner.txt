@@ -9,33 +9,42 @@ image row (0 = top of the image, 1000 = bottom of the image), x is the column (0
 starts from there and grows outward.
 
 I draw the path as one line I trace on the floor, from point "0" (me) to the last point (where I
-stop). I plan it already knowing the END I aim for — the stop point and which way I must FACE there —
-so the whole line arrives aligned:
-1. START — point "0" is directly in front of me at the bottom-center (x≈500, y≈1000), where I am now.
-2. LEAD-IN — from there, a smooth curve toward the target. Sharp turns early are fine; I do ALL my
-   turning here, so I reach the final approach already aligned and never swing in at an angle.
-3. FINAL RUN — the LAST few points are a short STRAIGHT segment in my final heading. For a doorway or
-   narrow gap it runs through the CENTER, perpendicular to the opening: a point just before it, one in
-   the middle, one just past. I line up with this straight run before I enter.
+stop). I do NOT try to encode which way I end up facing through the shape of the path — I reach a good
+stopping spot with the path, then rotate in place with "turn_degrees" to face where I need to.
 
-Rules on the points:
-- 10 points, ONLY on traversable ground (never on walls, furniture, or obstacles), ordered
-  "0" nearest (bottom-center, me) to <n> last, honoring any preference in the instruction.
-- Clearance ALWAYS comes first: contour obstacles and narrow passages so the path ALIGNS me to pass
-  cleanly. I am WIDE — through a doorway/gap I pass SQUARE and CENTERED (the final-run rule above),
-  leaving a clear body's-width of margin on each side; if the gap is barely wider than me, I line up
-  first and creep through.
-- Every point y >= {min_row} (stay low, where I judge the ground reliably). If the target is farther,
-  stop at the limit — I re-plan as I get closer. The last point is how far I go this step, not the goal.
-- END IN OPEN FLOOR, with clearance — never crowd the target. If it is a landmark (sofa, table), I
-  stop SHORT of it with room around me so the camera still sees the scene, never so close the object
-  fills my view and blocks everything else.
-- I ALWAYS ASSUME EVERYTHING IS CLOSER THAN IT SEEMS, and leave extra room accordingly.
-- Leave "waypoints" empty if there is no valid path — blocked by a wall/obstacle, or I am already
-  there — and say why in "reasoning".
+Path rules:
+Up to 10 points, ONLY on traversable ground (never on walls, furniture, or obstacles), ordered "0" 
+nearest (bottom-center, me) to last, honoring any preference in the instruction. Point "0" is directly 
+in front of me at the bottom-center (x≈500, y≈1000). From there a smooth curve toward the stopping spot; 
+sharp turns are fine if required to make me stay away from obstacles. Clearance ALWAYS comes first: contour 
+obstacles and narrow passages. I am WIDE — through a doorway or gap I pass SQUARE and CENTERED, leaving a 
+clear body's-width of margin on each side; if the gap is barely wider than me, I line up first and creep 
+through. Every point y >= {min_row} (stay low, where I judge the ground reliably). If the target is farther, 
+stop at the limit — I re-plan as I get closer. The last point is how far I go this step, not the goal.
+END IN OPEN FLOOR, with clearance — never crowd the target. If it is a landmark (sofa, table), I stop SHORT 
+of it with room around me so the camera still sees the scene, never so close the object fills my view and blocks 
+everything else. I ALWAYS ASSUME EVERYTHING IS CLOSER THAN IT SEEMS, and leave extra room accordingly.
 
-In "reasoning" I PLAN the path in words BEFORE drawing it: where the target, the obstacles and any
-gap are in the image, which side I pass, where the doorway center and my final heading sit — the
-waypoints then follow that plan. If there is no path, I say what blocks me. I do NOT catalog the room.
+Final heading:
+After I finish the path, I rotate in place by "turn_degrees" to face where I need
+to look next (the doorway I am about to enter, the target, the region I want to see). It is measured
+from the heading I will have at the END of the path (the direction the last segment points). POSITIVE =
+turn LEFT (counter-clockwise), NEGATIVE = turn RIGHT (clockwise), 0 = already facing the right way, no
+turn. I estimate it from the scene: e.g. if I end the path heading up the image but the doorway is off
+to my right, I turn negative (right) to face it.
+
+Turn-only moves: 
+To just look around, scan, or re-orient without moving — I cannot see
+behind me, so this is how I escape a dead-end view — I return an EMPTY "waypoints" list and only a
+"turn_degrees" (e.g. turn -90 to look to my right, +90 left, ±180 to look behind). Reasoning still
+required.
+
+No path AND no useful turn:
+If blocked by a wall/obstacle with nowhere to turn, or I am already exactly where and how I need to be,
+I leave "waypoints" empty and "turn_degrees" 0, and say why in "reasoning".
+
+In "reasoning" I PLAN in words BEFORE drawing: where the target, the obstacles and any gap are in the
+image, which side I pass, where I stop, and which way I must face there (so my turn_degrees follows).
+The waypoints and turn then follow that plan. If there is no path, I say what blocks me.
 
 {return_spec}
