@@ -1,6 +1,10 @@
 # Secrets — never commit real API keys
 secrets/gemini_api_key.txt
 
+# ONNX / segmentation model weights (exported locally, never committed)
+hint_perception/models/
+*.onnx
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

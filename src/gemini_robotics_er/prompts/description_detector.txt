@@ -1,7 +1,0 @@
-Looking through my camera, return a single bounding box for: "{description}".
-Return [] if I cannot see the described region.
-
-JSON only, no markdown fencing:
-[{"box_2d": [ymin, xmin, ymax, xmax], "label": "<label>"}]
-
-Coordinates normalized to 0-1000, integer values only.
