@@ -1,0 +1,6 @@
+mission: "Walk around"
+
+environments:
+  - name: "Main Room"
+    description: "An indoor environment"
+    intent: "Move around in random trajectories and make a random turn at the en. Never stop."

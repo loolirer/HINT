@@ -21,10 +21,20 @@ from google.genai import types
 from PIL import Image as PILImage
 from rclpy.action import CancelResponse, GoalResponse
 from rclpy.node import Node
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 
 from sensor_msgs.msg import CompressedImage
 
 DEFAULT_MODEL_ID = "gemini-robotics-er-1.6-preview"
+
+# Latest-frame-only camera QoS: keep just the newest frame and drop stale ones
+# rather than queue/retransmit them. best_effort avoids back-pressuring a remote
+# (over-WiFi) publisher; these nodes buffer frames themselves and select by stamp.
+_LATEST_FRAME_QOS = QoSProfile(
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+)
 
 
 class GeminiActionNode(Node):
@@ -59,7 +69,7 @@ class GeminiActionNode(Node):
         self._frame_buffer: deque = deque(maxlen=buffer_size)
 
         self.create_subscription(
-            CompressedImage, camera_topic, self._camera_cb, 1
+            CompressedImage, camera_topic, self._camera_cb, _LATEST_FRAME_QOS
         )
 
     # ------------------------------------------------------------------

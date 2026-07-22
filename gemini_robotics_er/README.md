@@ -154,7 +154,8 @@ Built as a sibling of `description_detector`: same inputs (a camera `stamp` + a 
 |---|---|---|
 | `~/plan_trajectory` | `hint_interfaces/action/PlanTrajectory` | Action server |
 | `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Sub — ring buffer of last 30 frames |
-| `~/debug` | `sensor_msgs/Image` | Pub — all sampled candidate paths in grey, the chosen medoid drawn on top in green (tracker style) with waypoint dots |
+
+> No debug image — visualization is centralized in `hint_perception`'s `visual_debug` node (it projects the navigator's grounded paths onto the frame). This node publishes only its `markers` + `turn_degrees` result.
 
 **`plan_trajectory` action fields**
 

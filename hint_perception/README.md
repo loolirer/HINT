@@ -1,10 +1,15 @@
 # hint_perception
 
-Semantic ground perception for HINT: a single node, `ground_segmenter`, turns the camera
-stream into an **obstacle point cloud** for the mapless Nav2 local costmap
-(`hint_navigation`). It runs a semantic-segmentation ONNX model on the iGPU (OpenVINO),
-takes everything that is **not** traversable ground, projects those pixels onto the ground
-plane, and publishes them as a `sensor_msgs/PointCloud2`.
+Perception + debug visualization for HINT. Two nodes:
+
+| Node | Role |
+|---|---|
+| `ground_segmenter` | Semantic ground ONNX → obstacle `PointCloud2` (for the Nav2 costmap) + binary ground mask |
+| `visual_debug` | Composes one `/debug` image from the other nodes' real outputs (no per-node debug topics) |
+
+`ground_segmenter` runs a semantic-segmentation ONNX model on the iGPU (OpenVINO), takes
+everything that is **not** traversable ground, projects those pixels onto the ground plane,
+and publishes them as a `sensor_msgs/PointCloud2` — plus the binary ground mask.
 
 ```bash
 colcon build --symlink-install --packages-select hint_perception
@@ -26,11 +31,12 @@ Fused inference + projection in one node:
 3. **Publish** those obstacle cell centres as a `PointCloud2` on `/ground/obstacles` in
    `base_link` (z = 0), stamped with the source frame's header stamp — so Nav2's obstacle
    layer TF-transforms it `base_link → odom` at that stamp (latency-compensated placement).
-   One point per BEV cell keeps the cloud light. A green/red ground-overlay debug image is
-   published on `/camera/ground/debug` (subscriber-gated).
+   One point per BEV cell keeps the cloud light. It also publishes the **binary ground
+   mask** on `/camera/ground/mask` (`mono8`) at camera resolution.
 
 > This node **owns the camera geometry** (it needs it to project). The costmap it feeds
-> only sees the point cloud.
+> only sees the point cloud. Visual debug (the green/red overlay etc.) lives in
+> `visual_debug`, not here.
 
 ### Model
 
@@ -60,8 +66,8 @@ ros2 run hint_perception ground_segmenter \
 Watch it:
 
 ```bash
-ros2 run rqt_image_view rqt_image_view /camera/ground/debug   # green = ground, red = not
-ros2 topic hz /ground/obstacles                               # obstacle cloud, per inference
+ros2 run rqt_image_view rqt_image_view /camera/ground/mask   # the binary ground mask
+ros2 topic hz /ground/obstacles                              # obstacle cloud, per inference
 ```
 
 ### Interfaces
@@ -70,8 +76,7 @@ ros2 topic hz /ground/obstacles                               # obstacle cloud, 
 |---|---|---|
 | `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Sub — latest-wins (best effort) |
 | `/ground/obstacles` | `sensor_msgs/PointCloud2` | Pub — non-ground cell centres in `base_link` (z=0), consumed by `hint_navigation`'s local costmap |
-| `/camera/ground/mask` | `sensor_msgs/Image` (`mono8`) | Pub — binary ground mask (255 = ground, 0 = not) at camera resolution, header from the source frame. `hint_navigation`'s `trajectory_navigator` uses it to clip the VLM pixel trajectory to the ground |
-| `/camera/ground/debug` | `sensor_msgs/Image` (`bgr8`) | Pub — green/red ground overlay (subscriber-gated) |
+| `/camera/ground/mask` | `sensor_msgs/Image` (`mono8`) | Pub — binary ground mask (255 = ground, 0 = not) at camera resolution, header from the source frame. Consumed by `hint_navigation`'s trajectory clipping and by `visual_debug`'s overlay |
 
 ### Parameters
 
@@ -92,4 +97,43 @@ ros2 topic hz /ground/obstacles                               # obstacle cloud, 
 | `bev_half_width` | `1.5` | Lateral extent each side (m) |
 | `bev_resolution` | `0.05` | BEV cell size (m) — one obstacle point per cell (~ costmap resolution) |
 | `obstacle_frame` | `base_link` | Frame the obstacle cloud is published in |
-| `overlay_alpha` | `0.4` | Debug ground-tint strength |
+
+---
+
+## visual_debug
+
+The single place for live visualization. Instead of every node shipping its own debug image,
+each node publishes only its **real output**, and this node layers those into one **`/debug`**
+image (`sensor_msgs/Image`, `bgr8`). Rendering is **subscriber-gated** — nothing is composed
+or published unless something subscribes to `/debug`.
+
+Layers (each toggled by a `show_*` param):
+1. **Backdrop** — the camera frame.
+2. **Ground overlay** — the binary mask tinted (muted green = ground, coral = not), alpha-blended.
+3. **Paths** — the navigator's `~/path_raw` (full VLM intent) and `~/path` (followed, ground-clipped),
+   each transformed `odom → current base_link` and projected onto the frame, so they track as the
+   robot moves. Amber = intent, teal = followed.
+4. **BT state** — the mission tree's live state (`/hint_behavior_server/state`) as text, top-left.
+
+```bash
+ros2 run rqt_image_view rqt_image_view /debug
+ros2 param set /visual_debug_node show_mask false        # toggle any layer live
+```
+
+### Interfaces
+
+| Topic | Type | Direction |
+|---|---|---|
+| `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Sub — backdrop, drives the render |
+| `/camera/ground/mask` | `sensor_msgs/Image` (`mono8`) | Sub — ground overlay |
+| `/trajectory_navigator_node/path` | `nav_msgs/Path` | Sub — followed (clipped) path |
+| `/trajectory_navigator_node/path_raw` | `nav_msgs/Path` | Sub — full VLM-intent path |
+| `/odom` | `nav_msgs/Odometry` | Sub — pose for re-projecting the paths |
+| `/hint_behavior_server/state` | `std_msgs/String` | Sub — mission-tree state text |
+| `/debug` | `sensor_msgs/Image` (`bgr8`) | Pub — the single composited debug image |
+
+### Parameters
+
+Camera rig (`camera_height`/`camera_forward_offset`/`camera_tilt`/`camera_hfov_deg`, match the
+segmenter); layer toggles `show_mask` / `show_path` / `show_path_raw` / `show_bt_state` (all
+default true); `overlay_alpha` (0.35); and a `*_topic` name per input.

@@ -2,6 +2,7 @@
 #include <string>
 
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/string.hpp>
 
 #include <behaviortree_ros2/tree_execution_server.hpp>
 
@@ -18,6 +19,12 @@ public:
   explicit HintBtExecutorNode(const rclcpp::Node::SharedPtr & node)
     : BT::TreeExecutionServer(node)
   {
+    // Republish the tree's live feedback (running-leaf name) on a latched topic, so
+    // observers (e.g. visual_debug) can show mission state without being the goal client
+    // that ExecuteTree action feedback goes to.
+    state_pub_ = node->create_publisher<std_msgs::msg::String>(
+      "~/state", rclcpp::QoS(1).transient_local());
+    publishState("IDLE");
   }
 
 protected:
@@ -45,7 +52,8 @@ protected:
     return true;
   }
 
-  // Narrates progress: name of the currently RUNNING leaf (action) node.
+  // Narrates progress: name of the currently RUNNING leaf (action) node. Also mirrored
+  // onto the ~/state topic for observers.
   std::optional<std::string> onLoopFeedback() override
   {
     std::string name;
@@ -56,8 +64,29 @@ protected:
         name = n->name();
       }
     });
-    return name.empty() ? std::nullopt : std::optional<std::string>(name);
+    if (!name.empty()) {
+      publishState(name);
+      return name;
+    }
+    return std::nullopt;
   }
+
+  // Back to idle once a tree finishes (success/failure/cancel).
+  std::optional<std::string> onTreeExecutionCompleted(BT::NodeStatus, bool) override
+  {
+    publishState("IDLE");
+    return std::nullopt;
+  }
+
+private:
+  void publishState(const std::string & s)
+  {
+    std_msgs::msg::String msg;
+    msg.data = s;
+    state_pub_->publish(msg);
+  }
+
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
 };
 
 int main(int argc, char * argv[])

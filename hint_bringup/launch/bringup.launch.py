@@ -12,9 +12,8 @@ def generate_launch_description():
         get_package_share_directory("hint_bringup"), "config", "teleop.yaml"
     )
     cartographer_config_dir = os.path.join(
-        get_package_share_directory("turtlebot3_cartographer"), "config"
+        get_package_share_directory("hint_bringup"), "config"
     )
-
     teleop = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
@@ -33,12 +32,12 @@ def generate_launch_description():
         package="cartographer_ros",
         executable="cartographer_node",
         name="cartographer_node",
-        output="screen",
         arguments=[
             "-configuration_directory",
             cartographer_config_dir,
             "-configuration_basename",
             "turtlebot3_lds_2d.lua",
+            "--ros-args", "--log-level", "error",
         ],
     )
 
@@ -46,16 +45,16 @@ def generate_launch_description():
         package="cartographer_ros",
         executable="cartographer_occupancy_grid_node",
         name="cartographer_occupancy_grid_node",
-        output="screen",
-        arguments=["-resolution", "0.05", "-publish_period_sec", "1.0"],
+        arguments=[
+            "-resolution", "0.05", "-publish_period_sec", "2.0",
+            "--ros-args", "--log-level", "error",
+        ],
     )
 
-    # --- Nav2 reactive navigation (replaces odom_waypoint_tracker + pursuit_servo) ---
-    # Shared camera-rig geometry for the ground projection (match the real rig).
     camera_rig = {
-        "camera_height": 0.14,
-        "camera_forward_offset": 0.0,
-        "camera_tilt": 0.0,
+        "camera_height": 0.105,
+        "camera_forward_offset": 0.073,
+        "camera_tilt": -0.025,
         "camera_hfov_deg": 62.2,
     }
 
@@ -64,6 +63,13 @@ def generate_launch_description():
         executable="ground_segmenter",
         output="screen",
         parameters=[camera_rig, {"device": "GPU"}],
+    )
+
+    visual_debug = Node(
+        package="hint_perception",
+        executable="visual_debug",
+        output="screen",
+        parameters=[camera_rig],
     )
 
     trajectory_navigator = Node(
@@ -90,9 +96,9 @@ def generate_launch_description():
         parameters=[
             {
                 "api_key_path": "/root/secrets/gemini_api_key.txt",
-                "model_id": "gemini-3.1-flash-lite",
+                "model_id": "gemini-3.6-flash",
                 "thinking_budget": -1,
-                "history_frames": 1,
+                "history_frames": 3,
                 "structured_output": "off",
             }
         ],
@@ -150,9 +156,10 @@ def generate_launch_description():
     return LaunchDescription(
         [
             teleop,
-            # cartographer,
-            # occupancy_grid,
+            #cartographer,
+            #occupancy_grid,
             ground_segmenter,
+            visual_debug,
             trajectory_navigator,
             nav2,
             trajectory_planner,

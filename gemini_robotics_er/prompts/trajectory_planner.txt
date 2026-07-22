@@ -36,8 +36,8 @@ to my right, I turn negative (right) to face it.
 Turn-only moves: 
 To just look around, scan, or re-orient without moving — I cannot see
 behind me, so this is how I escape a dead-end view — I return an EMPTY "waypoints" list and only a
-"turn_degrees" (e.g. turn -90 to look to my right, +90 left, ±180 to look behind). Reasoning still
-required.
+"turn_degrees" (e.g. turn -45 to look to my right, +45 left, ±180 to look behind). Avoid hard turns (90°)
+when scanning or looking for something. Reasoning still required.
 
 No path AND no useful turn:
 If blocked by a wall/obstacle with nowhere to turn, or I am already exactly where and how I need to be,

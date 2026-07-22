@@ -21,8 +21,10 @@ cloud** for Nav2's local costmap:
    stamp, so segmenter latency lands the points where they were seen, not where the robot
    is now (free latency compensation). One point per BEV cell keeps the cloud light.
 
-It also publishes a green/red ground-overlay debug image on ``/camera/ground/debug``
-(subscriber-gated).
+It also publishes the binary ground mask on ``/camera/ground/mask`` (``mono8``, 255 = ground)
+at camera resolution — consumed by ``hint_navigation``'s trajectory clipping and by
+``visual_debug``'s overlay. Visual debug (the green/red overlay etc.) lives in the
+``visual_debug`` node, not here.
 
 The output layout is detected at load time, so a model pulled from Hugging Face works
 without code edits:
@@ -99,7 +101,6 @@ class GroundSegmenter(Node):
         self.declare_parameter("bev_half_width", 1.5)  # m lateral each side
         self.declare_parameter("bev_resolution", 0.05)  # m per cell (~ costmap res)
         self.declare_parameter("obstacle_frame", "base_link")  # cloud frame_id
-        self.declare_parameter("overlay_alpha", 0.4)  # debug ground-tint strength
 
         self.get_logger().info(f"Loading ONNX model '{model_path}' on device '{device}'")
         core = Core()
@@ -125,7 +126,6 @@ class GroundSegmenter(Node):
         # inherited from the source frame. trajectory_navigator uses it to clip the VLM
         # pixel trajectory to the ground.
         self.pub_mask = self.create_publisher(Image, "/camera/ground/mask", 1)
-        self.pub_debug = self.create_publisher(Image, "/camera/ground/debug", 1)
 
         self.get_logger().info("OpenVINO Ground Segmenter (mask + obstacle cloud) ready!")
 
@@ -307,23 +307,11 @@ class GroundSegmenter(Node):
         pts = np.stack([mx, my, np.zeros_like(mx)], axis=1).astype(np.float32)
         self.pub_obstacles.publish(point_cloud2.create_cloud_xyz32(header, pts))
 
-        if self.pub_debug.get_subscription_count() > 0:
-            self._publish_debug(cv_img, ground, msg.header)
-
     def _publish_mask(self, ground, src_header):
         """Publish the binary ground mask (mono8, 255=ground) at camera resolution."""
         out = self.bridge.cv2_to_imgmsg(ground.astype(np.uint8) * 255, encoding="mono8")
         out.header = src_header
         self.pub_mask.publish(out)
-
-    def _publish_debug(self, frame, ground, src_header):
-        """Green where ground, red where not, blended onto the frame."""
-        tint = np.where(ground[..., None], (0, 255, 0), (0, 0, 255)).astype(np.float32)
-        a = float(np.clip(self._p("overlay_alpha"), 0.0, 1.0))
-        blended = ((1.0 - a) * frame.astype(np.float32) + a * tint).astype(np.uint8)
-        out = self.bridge.cv2_to_imgmsg(blended, encoding="bgr8")
-        out.header = src_header
-        self.pub_debug.publish(out)
 
 
 def main():

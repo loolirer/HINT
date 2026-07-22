@@ -4,6 +4,7 @@ project(hint_behavior)
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(behaviortree_ros2 REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(hint_interfaces REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -41,6 +42,7 @@ target_link_libraries(behavior_server hint_behavior_nodes)
 ament_target_dependencies(behavior_server
   rclcpp
   behaviortree_ros2
+  std_msgs
 )
 
 install(TARGETS behavior_server
