@@ -35,10 +35,10 @@ controller_server:
       vx_std: 0.2
       vy_std: 0.2
       wz_std: 0.4
-      vx_max: 0.10          # 0.26 Waffle Pi rated max (m/s)
+      vx_max: 0.13          # 0.26 Waffle Pi rated max (m/s)
       vx_min: 0.0           # forward-only: the camera faces forward, never reverse blind
       vy_max: 0.0           # differential drive: no lateral velocity
-      wz_max: 1.82          # rad/s
+      wz_max: 0.9          # # 1.82 Waffle Pi rated max (rad/s)
       ax_max: 3.0
       ax_min: -3.0
       az_max: 3.5
