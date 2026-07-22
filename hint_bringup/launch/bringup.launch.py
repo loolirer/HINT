@@ -14,18 +14,24 @@ def generate_launch_description():
     cartographer_config_dir = os.path.join(
         get_package_share_directory("hint_bringup"), "config"
     )
-    teleop = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(
-                get_package_share_directory("teleop_twist_joy"),
-                "launch",
-                "teleop-launch.py",
-            )
-        ),
-        launch_arguments={
-            "config_filepath": teleop_config,
-            "publish_stamped_twist": "true",
-        }.items(),
+
+    teleop = GroupAction(
+        actions=[
+            SetRemap(src="/cmd_vel", dst="/cmd_vel_teleop"),
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(
+                        get_package_share_directory("teleop_twist_joy"),
+                        "launch",
+                        "teleop-launch.py",
+                    )
+                ),
+                launch_arguments={
+                    "config_filepath": teleop_config,
+                    "publish_stamped_twist": "true",
+                }.items(),
+            ),
+        ]
     )
 
     cartographer = Node(
@@ -37,7 +43,9 @@ def generate_launch_description():
             cartographer_config_dir,
             "-configuration_basename",
             "turtlebot3_lds_2d.lua",
-            "--ros-args", "--log-level", "error",
+            "--ros-args",
+            "--log-level",
+            "error",
         ],
     )
 
@@ -46,8 +54,13 @@ def generate_launch_description():
         executable="cartographer_occupancy_grid_node",
         name="cartographer_occupancy_grid_node",
         arguments=[
-            "-resolution", "0.05", "-publish_period_sec", "2.0",
-            "--ros-args", "--log-level", "error",
+            "-resolution",
+            "0.05",
+            "-publish_period_sec",
+            "2.0",
+            "--ros-args",
+            "--log-level",
+            "error",
         ],
     )
 
@@ -79,17 +92,22 @@ def generate_launch_description():
         parameters=[camera_rig],
     )
 
-    nav2 = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(
-                get_package_share_directory("hint_navigation"),
-                "launch",
-                "nav2.launch.py",
-            )
-        )
+    nav2 = GroupAction(
+        actions=[
+            SetRemap(src="/cmd_vel", dst="/cmd_vel_nav2"),
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(
+                        get_package_share_directory("hint_navigation"),
+                        "launch",
+                        "nav2.launch.py",
+                    )
+                )
+            ),
+        ]
     )
 
-    reasoner = Node(
+    visual_reasoner = Node(
         package="gemini_robotics_er",
         executable="visual_reasoner",
         output="screen",
@@ -104,7 +122,7 @@ def generate_launch_description():
         ],
     )
 
-    trajectory_planner = Node(
+    trajectory_generator = Node(
         package="gemini_robotics_er",
         executable="trajectory_generator",
         output="screen",
@@ -156,14 +174,14 @@ def generate_launch_description():
     return LaunchDescription(
         [
             teleop,
-            #cartographer,
-            #occupancy_grid,
+            # cartographer,
+            # occupancy_grid,
             ground_segmenter,
             visual_debug,
-            trajectory_navigator,
+            trajectory_generator,
             nav2,
             trajectory_planner,
-            reasoner,
+            visual_reasoner,
             narrative_navigation,
             bt_executor,
             rviz2,
