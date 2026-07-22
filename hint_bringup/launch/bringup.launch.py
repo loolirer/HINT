@@ -12,9 +12,8 @@ def generate_launch_description():
         get_package_share_directory("hint_bringup"), "config", "teleop.yaml"
     )
     cartographer_config_dir = os.path.join(
-        get_package_share_directory("turtlebot3_cartographer"), "config"
+        get_package_share_directory("hint_bringup"), "config"
     )
-
     teleop = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
@@ -47,7 +46,7 @@ def generate_launch_description():
         executable="cartographer_occupancy_grid_node",
         name="cartographer_occupancy_grid_node",
         arguments=[
-            "-resolution", "0.05", "-publish_period_sec", "1.0",
+            "-resolution", "0.05", "-publish_period_sec", "2.0",
             "--ros-args", "--log-level", "error",
         ],
     )
@@ -97,9 +96,9 @@ def generate_launch_description():
         parameters=[
             {
                 "api_key_path": "/root/secrets/gemini_api_key.txt",
-                "model_id": "gemini-3.1-flash-lite",
+                "model_id": "gemini-3.6-flash",
                 "thinking_budget": -1,
-                "history_frames": 1,
+                "history_frames": 3,
                 "structured_output": "off",
             }
         ],
