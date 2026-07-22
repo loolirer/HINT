@@ -11,9 +11,17 @@ def generate_launch_description():
     teleop_config = os.path.join(
         get_package_share_directory("hint_bringup"), "config", "teleop.yaml"
     )
+    
     cartographer_config_dir = os.path.join(
         get_package_share_directory("hint_bringup"), "config"
     )
+
+    camera_rig = {
+        "camera_height": 0.105,
+        "camera_forward_offset": 0.073,
+        "camera_tilt": -0.025,
+        "camera_hfov_deg": 62.2,
+    }
 
     teleop = GroupAction(
         actions=[
@@ -63,13 +71,6 @@ def generate_launch_description():
             "error",
         ],
     )
-
-    camera_rig = {
-        "camera_height": 0.105,
-        "camera_forward_offset": 0.073,
-        "camera_tilt": -0.025,
-        "camera_hfov_deg": 62.2,
-    }
 
     ground_segmenter = Node(
         package="hint_perception",
