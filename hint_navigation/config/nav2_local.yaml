@@ -25,7 +25,7 @@ controller_server:
     goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.25
+      xy_goal_tolerance: 0.05
       yaw_goal_tolerance: 3.2
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
@@ -35,10 +35,10 @@ controller_server:
       vx_std: 0.2
       vy_std: 0.2
       wz_std: 0.4
-      vx_max: 0.13          # 0.26 Waffle Pi rated max (m/s)
+      vx_max: 0.26          # 0.26 Waffle Pi rated max (m/s)
       vx_min: 0.0           # forward-only: the camera faces forward, never reverse blind
       vy_max: 0.0           # differential drive: no lateral velocity
-      wz_max: 0.9          # # 1.82 Waffle Pi rated max (rad/s)
+      wz_max: 1.82          # # 1.82 Waffle Pi rated max (rad/s)
       ax_max: 3.0
       ax_min: -3.0
       az_max: 3.5
