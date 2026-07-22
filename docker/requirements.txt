@@ -3,3 +3,5 @@ openvino-dev
 onnxruntime
 onnxscript
 google-genai
+transformers
+torch

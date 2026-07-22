@@ -43,9 +43,19 @@ from rclpy.action import ActionClient, ActionServer, CancelResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 
 from hint_interfaces.action import MissionAdvance, Reason
 from sensor_msgs.msg import CompressedImage
+
+# Latest-frame-only camera QoS: keep just the newest frame and drop stale ones
+# instead of queueing/retransmitting. best_effort avoids back-pressuring a remote
+# (over-WiFi) publisher; the director latches move-start frames into its own buffer.
+_LATEST_FRAME_QOS = QoSProfile(
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+)
 
 # A real JSON schema (not a loose shape hint): the reasoner turns this into
 # response_schema for constrained decoding, so the compile reply is always
@@ -129,7 +139,7 @@ class MissionPlannerNode(Node):
         # Camera on the same reentrant group so frames keep arriving while an
         # advance blocks on the reasoner call.
         self.create_subscription(
-            CompressedImage, self._p("camera_topic"), self._camera_cb, 1,
+            CompressedImage, self._p("camera_topic"), self._camera_cb, _LATEST_FRAME_QOS,
             callback_group=cbg)
 
         if self._plan is not None:
