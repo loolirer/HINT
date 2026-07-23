@@ -168,6 +168,8 @@ class VisualDebugNode(Node):
             frame = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding="bgr8")
         except Exception:
             return
+        if frame is None:  # truncated JPEG decodes to None without raising
+            return
         h, w = frame.shape[:2]
         with self._lock:
             mask, path, path_raw = self._mask, self._path, self._path_raw
