@@ -285,7 +285,16 @@ class GroundSegmenter(Node):
         return np.transpose(rgb, (2, 0, 1))[np.newaxis, ...]  # (1, 3, H, W)
 
     def callback(self, msg):
-        cv_img = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        # A truncated JPEG (best-effort WiFi stream) decodes to None or raises;
+        # either way skip the frame instead of letting the exception kill the node.
+        try:
+            cv_img = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        except Exception as e:
+            self.get_logger().warn(f"Skipping undecodable frame: {e}")
+            return
+        if cv_img is None:
+            self.get_logger().warn("Skipping undecodable frame (decode returned None)")
+            return
         out = self.compiled_model([self._preprocess(cv_img)])[self.output_layer]
         score = self._ground_score(np.asarray(out))
 
