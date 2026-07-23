@@ -2,16 +2,16 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import GroupAction, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch_ros.actions import Node
+from launch_ros.actions import Node, SetRemap
 
 
 def generate_launch_description():
     teleop_config = os.path.join(
         get_package_share_directory("hint_bringup"), "config", "teleop.yaml"
     )
-    
+
     cartographer_config_dir = os.path.join(
         get_package_share_directory("hint_bringup"), "config"
     )
@@ -38,6 +38,21 @@ def generate_launch_description():
                     "config_filepath": teleop_config,
                     "publish_stamped_twist": "true",
                 }.items(),
+            ),
+        ]
+    )
+
+    nav2 = GroupAction(
+        actions=[
+            SetRemap(src="/cmd_vel", dst="/cmd_vel_nav2"),
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(
+                        get_package_share_directory("hint_navigation"),
+                        "launch",
+                        "nav2.launch.py",
+                    )
+                )
             ),
         ]
     )
@@ -79,48 +94,11 @@ def generate_launch_description():
         parameters=[camera_rig, {"device": "GPU"}],
     )
 
-    visual_debug = Node(
-        package="hint_perception",
-        executable="visual_debug",
-        output="screen",
-        parameters=[camera_rig],
-    )
-
     trajectory_navigator = Node(
         package="hint_navigation",
         executable="trajectory_navigator",
         output="screen",
         parameters=[camera_rig],
-    )
-
-    nav2 = GroupAction(
-        actions=[
-            SetRemap(src="/cmd_vel", dst="/cmd_vel_nav2"),
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    os.path.join(
-                        get_package_share_directory("hint_navigation"),
-                        "launch",
-                        "nav2.launch.py",
-                    )
-                )
-            ),
-        ]
-    )
-
-    visual_reasoner = Node(
-        package="gemini_robotics_er",
-        executable="visual_reasoner",
-        output="screen",
-        parameters=[
-            {
-                "api_key_path": "/root/secrets/gemini_api_key.txt",
-                "model_id": "gemini-3.6-flash",
-                "thinking_budget": -1,
-                "history_frames": 3,
-                "structured_output": "off",
-            }
-        ],
     )
 
     trajectory_generator = Node(
@@ -135,6 +113,21 @@ def generate_launch_description():
                 "temperature": 1.0,
                 "n_candidates": 5,
                 "history_frames": 0,
+                "structured_output": "off",
+            }
+        ],
+    )
+
+    visual_reasoner = Node(
+        package="gemini_robotics_er",
+        executable="visual_reasoner",
+        output="screen",
+        parameters=[
+            {
+                "api_key_path": "/root/secrets/gemini_api_key.txt",
+                "model_id": "gemini-3.6-flash",
+                "thinking_budget": -1,
+                "history_frames": 3,
                 "structured_output": "off",
             }
         ],
@@ -158,6 +151,13 @@ def generate_launch_description():
         ],
     )
 
+    visual_debug = Node(
+        package="hint_perception",
+        executable="visual_debug",
+        parameters=[camera_rig],
+        output="screen",
+    )
+
     rviz2 = Node(
         package="rviz2",
         executable="rviz2",
@@ -168,23 +168,25 @@ def generate_launch_description():
                 "viz",
                 "hint.rviz",
             ),
+            "--ros-args",
+            "--log-level",
+            "error",
         ],
-        output="screen",
     )
 
     return LaunchDescription(
         [
             teleop,
+            nav2,
             # cartographer,
             # occupancy_grid,
             ground_segmenter,
-            visual_debug,
+            trajectory_navigator,
             trajectory_generator,
-            nav2,
-            trajectory_planner,
             visual_reasoner,
             narrative_navigation,
             bt_executor,
+            visual_debug,
             rviz2,
         ]
     )
