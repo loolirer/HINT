@@ -1,6 +1,6 @@
 services:
-  turtlebot3:
-    container_name: turtlebot3
+  hint:
+    container_name: hint
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -18,8 +18,6 @@ services:
     environment:
      - DISPLAY=${DISPLAY}
      - QT_X11_NO_MITSHM=1
-     - TURTLEBOT3_MODEL=waffle_pi
-     - LDS_MODEL=LDS-02
      - ROS_DOMAIN_ID=30
      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
     volumes:
@@ -29,7 +27,7 @@ services:
       - /run/udev:/run/udev
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - /tmp/.docker.xauth:/tmp/.docker.xauth:rw
-      - ..:/root/turtlebot3_ws/src
+      - ..:/root/hint_ws/src
       - ../secrets:/root/secrets:ro
     privileged: true
     command: bash -c "source /opt/ros/jazzy/setup.bash && bash"

@@ -2,7 +2,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import GroupAction, IncludeLaunchDescription
+from launch.actions import ExecuteProcess, GroupAction, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node, SetRemap
 
@@ -22,6 +22,11 @@ def generate_launch_description():
         "camera_tilt": -0.025,
         "camera_hfov_deg": 62.2,
     }
+
+    camera_remap = (
+        "/camera/image_raw/compressed",
+        "/camera/image_raw/compressed/throttle",
+    )
 
     teleop = GroupAction(
         actions=[
@@ -91,7 +96,8 @@ def generate_launch_description():
         package="hint_perception",
         executable="ground_segmenter",
         output="screen",
-        parameters=[camera_rig, {"device": "GPU"}],
+        parameters=[camera_rig, {"device": "GPU", "model": "segformer-b5-ade"}],
+        remappings=[camera_remap],
     )
 
     trajectory_navigator = Node(
@@ -111,11 +117,12 @@ def generate_launch_description():
                 "model_id": "gemini-robotics-er-1.6-preview",
                 "thinking_budget": 0,
                 "temperature": 1.0,
-                "n_candidates": 5,
-                "history_frames": 0,
-                "structured_output": "off",
+                "n_candidates": 3,
+                "history_frames": 1,
+                "structured_output": "json",
             }
         ],
+        remappings=[camera_remap],
     )
 
     visual_reasoner = Node(
@@ -126,17 +133,23 @@ def generate_launch_description():
             {
                 "api_key_path": "/root/secrets/gemini_api_key.txt",
                 "model_id": "gemini-3.6-flash",
-                "thinking_budget": -1,
-                "history_frames": 3,
-                "structured_output": "off",
+                "thinking_budget": 512,
+                "structured_output": "json",
             }
         ],
+        remappings=[camera_remap],
     )
 
     narrative_navigation = Node(
         package="hint_narrative",
         executable="narrative_navigation",
         output="screen",
+        parameters=[
+            {
+                "history_frames": 1,
+            }
+        ],
+        remappings=[camera_remap],
     )
 
     bt_executor = Node(
@@ -156,6 +169,7 @@ def generate_launch_description():
         executable="visual_debug",
         parameters=[camera_rig],
         output="screen",
+        remappings=[camera_remap],
     )
 
     rviz2 = Node(
@@ -178,8 +192,8 @@ def generate_launch_description():
         [
             teleop,
             nav2,
-            # cartographer,
-            # occupancy_grid,
+            cartographer,
+            occupancy_grid,
             ground_segmenter,
             trajectory_navigator,
             trajectory_generator,
