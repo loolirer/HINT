@@ -5,3 +5,4 @@ onnxscript
 google-genai
 transformers
 torch
+matplotlib

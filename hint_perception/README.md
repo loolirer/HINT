@@ -59,8 +59,8 @@ python3 scripts/export_seg_onnx.py \
 ### Usage
 
 ```bash
-ros2 run hint_perception ground_segmenter \
-  --ros-args -p model_path:=/root/turtlebot3_ws/src/hint_perception/models/ground-seg.onnx
+# `model` is a NAME, resolved against the package models/ dir (prefix match allowed)
+ros2 run hint_perception ground_segmenter --ros-args -p model:=segformer-b2-ade
 ```
 
 Watch it:
@@ -80,12 +80,12 @@ ros2 topic hz /ground/obstacles                              # obstacle cloud, p
 
 ### Parameters
 
-`model_path` and `device` are read at startup; the rest are live-adjustable.
+`model` and `device` are read at startup; the rest are live-adjustable.
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `model_path` | share `models/segformer-b5-ade.onnx` | Path to the segmentation ONNX |
-| `device` | `AUTO` | OpenVINO device (`AUTO`/`GPU`/`CPU`) — force `GPU` to fail loudly if the iGPU isn't available |
+| `model` | `segformer-b2-ade` | Model **name** (with/without `.onnx`, or a prefix like `segformer-b2`), always resolved against the package `models/` dir — never a path. First sorted match wins; unknown name errors listing what's available |
+| `device` | `AUTO` | OpenVINO device (`AUTO`/`GPU`/`CPU`) — force `GPU` to fail loudly if the iGPU isn't available. **Note:** a heavy model (e.g. SegFormer-B5) can trip the Intel i915 GPU-reset (hangcheck), leaving the inference wedged (the hang holds the Python GIL, so no in-process recovery is possible — see the external watchdog below). `CPU` never hangs and is as fast as the iGPU here anyway |
 | `ground_class_ids` | `[3]` | Class ids counted as ground (ADE20K `floor`). Must match the model's label map |
 | `ground_threshold` | `0.5` | Ground-probability cut |
 | `morph_kernel` | `7` | Close+open kernel (px) to fill holes / drop specks |
@@ -97,6 +97,26 @@ ros2 topic hz /ground/obstacles                              # obstacle cloud, p
 | `bev_half_width` | `1.5` | Lateral extent each side (m) |
 | `bev_resolution` | `0.05` | BEV cell size (m) — one obstacle point per cell (~ costmap resolution) |
 | `obstacle_frame` | `base_link` | Frame the obstacle cloud is published in |
+
+### Reliability — naive node + external watchdog
+
+`ground_segmenter` is **naive by design**: it decodes, infers, and publishes synchronously in
+the callback, with no notion that inference can hang or that it can stop. This is deliberate —
+an OpenVINO iGPU hang blocks in an uninterruptible driver call that **holds the Python GIL**, so
+*any* in-process watchdog (same thread or a worker thread) is frozen too and can never fire.
+
+Resilience is therefore **external**, assembled in `hint_bringup`:
+
+- **`scripts/segmenter_watchdog.sh`** — a plain shell loop (its own process, immune to the
+  node's GIL) launched via `ExecuteProcess`. If `/camera/ground/mask` goes silent for `STALL`
+  seconds while the camera is still publishing, the device has wedged, so it `pkill -9`s the
+  segmenter. Tunable via env (`MASK_TOPIC`, `CAM_TOPIC`, `STALL`, `STARTUP`, `RESTART_GRACE`,
+  `PROC_MATCH`).
+- **`respawn=True`** on the `ground_segmenter` node in `bringup.launch.py` — the moment the
+  watchdog kills it, launch restarts it (reloading the model fresh).
+
+Net effect: a wedged iGPU self-heals in ~`STALL`+`RESTART_GRACE` seconds with no code inside the
+segmenter. (`device=CPU` sidesteps the hang entirely and is the simplest choice.)
 
 ---
 

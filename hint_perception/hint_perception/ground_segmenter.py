@@ -1,8 +1,8 @@
 """Ground segmenter -> obstacle point cloud (fused, one node) for the Nav2 costmap.
 
 Runs a semantic-segmentation ONNX model via OpenVINO (Intel iGPU by default), mirroring
-``depth_anything``'s inference plumbing (same ``Core`` / ``compile_model`` setup, same
-ImageNet preprocessing). Consumes ``/camera/image_raw/compressed`` — the node runs
+``depth_anything``'s inference plumbing (same ``Core`` / ``compile_model`` setup; the
+ImageNet preprocessing is folded into the graph). Consumes ``/camera/image_raw/compressed`` — the node runs
 off-robot and pulling the raw stream costs more latency than the JPEG decode.
 
 Unlike the earlier segmenter this node does **not** publish a binary mask. It owns the
@@ -22,9 +22,14 @@ cloud** for Nav2's local costmap:
    is now (free latency compensation). One point per BEV cell keeps the cloud light.
 
 It also publishes the binary ground mask on ``/camera/ground/mask`` (``mono8``, 255 = ground)
-at camera resolution — consumed by ``hint_navigation``'s trajectory clipping and by
-``visual_debug``'s overlay. Visual debug (the green/red overlay etc.) lives in the
-``visual_debug`` node, not here.
+at the processing-grid resolution (camera aspect, 1/``proc_scale`` of camera res) —
+consumed by ``hint_navigation``'s trajectory clipping (normalized coords, so any res
+works) and by ``visual_debug``'s overlay (which resizes it to the frame). Visual debug
+(the green/red overlay etc.) lives in the ``visual_debug`` node, not here.
+
+Preprocessing (BGR->RGB, resize, ImageNet normalize, HWC->CHW) is folded into the
+compiled model via OpenVINO's PrePostProcessor, so it runs on the inference device and
+the callback feeds the raw uint8 BGR frame.
 
 The output layout is detected at load time, so a model pulled from Hugging Face works
 without code edits:
@@ -44,7 +49,8 @@ import numpy as np
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
-from openvino.runtime import Core
+from openvino.preprocess import ColorFormat, PrePostProcessor, ResizeAlgorithm
+from openvino.runtime import Core, Layout, Type
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CompressedImage, Image, PointCloud2
@@ -75,21 +81,35 @@ class GroundSegmenter(Node):
         super().__init__("ground_segmenter_node")
         self.bridge = CvBridge()
 
-        default_model_path = os.path.join(
-            get_package_share_directory("hint_perception"),
-            "models", "segformer-b5-ade.onnx",
-        )
-        model_path = os.path.expanduser(os.path.expandvars(
-            self.declare_parameter("model_path", default_model_path)
+        # Model is chosen by NAME (with or without the .onnx suffix), always resolved
+        # against the package's models/ dir — never a full path. Pass e.g.
+        # "segformer-b2-ade", or a prefix like "segformer-b2" (first match wins).
+        self._models_dir = os.path.join(
+            get_package_share_directory("hint_perception"), "models")
+        model_name = (
+            self.declare_parameter("model", "segformer-b0-ade")
             .get_parameter_value().string_value
-        ))
+        )
+        model_path = self._resolve_model(model_name)
         device = (
             self.declare_parameter("device", "AUTO").get_parameter_value().string_value
         )
-
         self.declare_parameter("ground_class_ids", _DEFAULT_GROUND_IDS)
         self.declare_parameter("ground_threshold", 0.5)  # ground-probability cut
-        self.declare_parameter("morph_kernel", 7)  # hole-fill / speck-drop size, px
+        # Hole-fill / speck-drop kernel, in PROCESSING-grid pixels (the camera-aspect
+        # grid at 1/proc_scale of camera res) — 3 there ≈ the old 7 at full res.
+        self.declare_parameter("morph_kernel", 3)
+        # Ground-score reduction, live-adjustable:
+        #   "softmax" — summed ground-class probabilities, cut at ground_threshold;
+        #   "argmax"  — pixel is ground iff its argmax class is in ground_class_ids.
+        #               Skips the full-class softmax (big CPU cut); ground_threshold
+        #               is inert in this mode.
+        self.declare_parameter("score_mode", "argmax")
+        # All post-processing (threshold, morphology, BEV warp) and the published mask
+        # run on a camera-aspect grid at 1/proc_scale of the camera resolution — the
+        # score comes out of the model at a coarse stride anyway, so full-res work is
+        # wasted. Consumers are resolution-agnostic (normalized coords / they resize).
+        self.declare_parameter("proc_scale", 4)
 
         # --- Camera geometry for the ground->BEV homography (match the real rig) ---
         self.declare_parameter("camera_height", 0.14)  # m above the ground plane
@@ -105,32 +125,85 @@ class GroundSegmenter(Node):
         self.get_logger().info(f"Loading ONNX model '{model_path}' on device '{device}'")
         core = Core()
         model = core.read_model(model_path)
+        # Model spatial dims, read BEFORE the preprocessor rewrites the input to a
+        # dynamic-shape u8 tensor.
+        _, _, self.in_h, self.in_w = (int(d) for d in model.input(0).shape)
+        self.get_logger().info(f"Model input size: {self.in_w}x{self.in_h} (WxH)")
+
+        # Fold the whole CPU preprocessing chain (BGR->RGB, resize to the model dims,
+        # /255 + ImageNet normalize, HWC->CHW) into the compiled graph so it runs on
+        # the inference device: the callback feeds the raw uint8 BGR frame directly.
+        ppp = PrePostProcessor(model)
+        (ppp.input().tensor()
+            .set_element_type(Type.u8)
+            .set_layout(Layout("NHWC"))
+            .set_color_format(ColorFormat.BGR)
+            .set_spatial_dynamic_shape())
+        (ppp.input().preprocess()
+            .convert_element_type(Type.f32)
+            .convert_color(ColorFormat.RGB)
+            .resize(ResizeAlgorithm.RESIZE_LINEAR)
+            .mean([m * 255.0 for m in _MEAN])
+            .scale([s * 255.0 for s in _STD]))
+        ppp.input().model().set_layout(Layout("NCHW"))
+        model = ppp.build()
+
         config = {"PERFORMANCE_HINT": "LATENCY"}
         if device in ("GPU", "AUTO"):
             config["INFERENCE_PRECISION_HINT"] = "f16"
         self.compiled_model = core.compile_model(model, device_name=device, config=config)
-        self.input_layer = self.compiled_model.input(0)
         self.output_layer = self.compiled_model.output(0)
-        _, _, self.in_h, self.in_w = (int(d) for d in self.input_layer.shape)
-        self.get_logger().info(f"Model input size: {self.in_w}x{self.in_h} (WxH)")
 
         self._class_axis = self._detect_class_axis()
 
+        # Naive by design: this node just infers and publishes, synchronously, in the
+        # callback. It has NO notion that inference can hang or that it can stop — if the
+        # inference device wedges (e.g. an Intel iGPU hang), an EXTERNAL monitor
+        # (segmenter_watchdog in hint_bringup, + launch respawn) notices the mask going
+        # silent and kills/restarts the process. Keeping the node dumb avoids the in-node
+        # watchdog trap: a GIL-holding native hang freezes any same-process watchdog too.
         self.create_subscription(
             CompressedImage, "/camera/image_raw/compressed",
             self.callback, _LATEST_FRAME_QOS,
         )
         # Reliable pub so a best-effort costmap observation sub is still compatible.
         self.pub_obstacles = self.create_publisher(PointCloud2, "/ground/obstacles", 5)
-        # Binary ground mask (255 = ground, 0 = not) at camera resolution, header
-        # inherited from the source frame. trajectory_navigator uses it to clip the VLM
-        # pixel trajectory to the ground.
+        # Binary ground mask (255 = ground, 0 = not) at the processing-grid resolution,
+        # header inherited from the source frame. trajectory_navigator uses it to clip
+        # the VLM pixel trajectory to the ground (via normalized coords, res-agnostic).
         self.pub_mask = self.create_publisher(Image, "/camera/ground/mask", 1)
 
         self.get_logger().info("OpenVINO Ground Segmenter (mask + obstacle cloud) ready!")
 
     def _p(self, name):
         return self.get_parameter(name).value
+
+    # ------------------------------------------------------------------
+    # Model resolution + device (re)compile
+
+    def _resolve_model(self, name):
+        """Resolve a model NAME to an .onnx file inside the package models/ dir.
+
+        Accepts "segformer-b2-ade", "segformer-b2-ade.onnx", or a prefix like
+        "segformer-b2" (first sorted match wins). Any path components are stripped — the
+        search is always models/ — so the model can't be pointed elsewhere by accident.
+        Raises FileNotFoundError (listing what's available) on no match.
+        """
+        base = os.path.basename(name.strip())
+        if base.endswith(".onnx"):
+            base = base[: -len(".onnx")]
+        available = sorted(
+            f for f in os.listdir(self._models_dir) if f.endswith(".onnx")
+        ) if os.path.isdir(self._models_dir) else []
+        # Exact "<name>.onnx" first, then a "<name>*.onnx" prefix match.
+        for cand in [f"{base}.onnx"] + [f for f in available if f.startswith(base)]:
+            path = os.path.join(self._models_dir, cand)
+            if os.path.isfile(path):
+                return path
+        raise FileNotFoundError(
+            f"No .onnx model matching '{name}' in {self._models_dir}. "
+            f"Available: {available or 'none'}"
+        )
 
     # ------------------------------------------------------------------
     # Output-layout detection
@@ -189,6 +262,12 @@ class GroundSegmenter(Node):
         if out.shape[axis] == 1:  # single-channel score in a class-shaped tensor
             self._class_axis = None
             return self._ground_score(out)
+
+        if str(self._p("score_mode")).lower() == "argmax":
+            # Fast path: ground iff the winning class is a ground class. Skips the
+            # full-class softmax; ground_threshold plays no role here (the map is
+            # already binary, and 0/1 passes any threshold in (0, 1]).
+            return np.isin(out.argmax(axis=axis), self._ids()).astype(np.float32)
 
         e = np.exp(out - out.max(axis=axis, keepdims=True))  # stable softmax
         prob = e / e.sum(axis=axis, keepdims=True)
@@ -275,18 +354,14 @@ class GroundSegmenter(Node):
         return mx, my
 
     # ------------------------------------------------------------------
-    # Preprocess / callback
-
-    def _preprocess(self, bgr):
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        rgb = cv2.resize(rgb, (self.in_w, self.in_h), interpolation=cv2.INTER_AREA)
-        rgb = rgb.astype(np.float32) / 255.0
-        rgb = (rgb - _MEAN) / _STD
-        return np.transpose(rgb, (2, 0, 1))[np.newaxis, ...]  # (1, 3, H, W)
+    # Callback (preprocessing lives inside the compiled model — see __init__)
 
     def callback(self, msg):
-        # A truncated JPEG (best-effort WiFi stream) decodes to None or raises;
-        # either way skip the frame instead of letting the exception kill the node.
+        # Naive synchronous inference: decode -> infer -> mask + obstacle cloud, right here.
+        # No hang detection, no recovery — if the device wedges, an external monitor
+        # (hint_bringup's segmenter_watchdog + launch respawn) restarts this process.
+        # A truncated JPEG (best-effort WiFi stream) decodes to None or raises; skip the
+        # frame instead of crashing — that's normal operation, not device recovery.
         try:
             cv_img = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding="bgr8")
         except Exception as e:
@@ -295,21 +370,27 @@ class GroundSegmenter(Node):
         if cv_img is None:
             self.get_logger().warn("Skipping undecodable frame (decode returned None)")
             return
-        out = self.compiled_model([self._preprocess(cv_img)])[self.output_layer]
+
+        out = self.compiled_model([cv_img[np.newaxis]])[self.output_layer]
         score = self._ground_score(np.asarray(out))
 
-        # Upsample the score to the camera frame, then threshold — never the reverse. The
-        # head emits at a coarse stride; cutting first and resizing the binary mask
-        # staircases every boundary by the stride factor.
+        # Resample the score to the PROCESSING grid — camera aspect (the head's stride may
+        # not match it) at 1/proc_scale of camera res — then threshold, never the reverse:
+        # cutting first and resizing the binary mask staircases every boundary. Everything
+        # downstream (morphology, BEV warp, published mask) stays on this small grid; the
+        # camera model in _ground_to_pixels is resolution-invariant.
         h, w = cv_img.shape[:2]
-        score = cv2.resize(score, (w, h), interpolation=cv2.INTER_LINEAR)
+        scale = max(1, int(self._p("proc_scale")))
+        ws, hs = max(2, w // scale), max(2, h // scale)
+        score = cv2.resize(score, (ws, hs), interpolation=cv2.INTER_LINEAR)
         ground = self._clean(score >= float(self._p("ground_threshold")))
 
-        # Binary ground mask (image space), for the trajectory ground-clipping consumer.
+        # Binary ground mask (image space, processing-grid res), for the trajectory
+        # ground-clipping consumer (which maps normalized coords into mask.shape).
         self._publish_mask(ground, msg.header)
 
         # Obstacle cloud (base_link, z=0), stamped at the source frame for latency comp.
-        mx, my = self._mask_to_obstacle_cells(ground, w, h)
+        mx, my = self._mask_to_obstacle_cells(ground, ws, hs)
         header = Header()
         header.stamp = msg.header.stamp
         header.frame_id = str(self._p("obstacle_frame"))
@@ -317,7 +398,7 @@ class GroundSegmenter(Node):
         self.pub_obstacles.publish(point_cloud2.create_cloud_xyz32(header, pts))
 
     def _publish_mask(self, ground, src_header):
-        """Publish the binary ground mask (mono8, 255=ground) at camera resolution."""
+        """Publish the binary ground mask (mono8, 255=ground) at processing-grid res."""
         out = self.bridge.cv2_to_imgmsg(ground.astype(np.uint8) * 255, encoding="mono8")
         out.header = src_header
         self.pub_mask.publish(out)
