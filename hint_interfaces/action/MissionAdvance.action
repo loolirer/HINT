@@ -3,6 +3,7 @@
 bool success        # did the move just executed (plan + follow) succeed? (ignored on the first call)
 string observation  # grounded VLM feedback from the execution, verbatim (the planner's path reasoning)
 string mission_path # optional: load this mission YAML before advancing; empty keeps the current one
+bool first          # true on the FIRST advance of a fresh tree run -> wipe any prior narrative and reseed. The MissionAdvance BT leaf latches this per run (fresh leaf instance per ExecuteTree goal); an explicit signal, NOT inferred from an empty observation (a mid-run move can legitimately report nothing)
 ---
 # Result — the next directive
 bool mission_done    # true when the mission is over (complete OR failed)

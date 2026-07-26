@@ -47,6 +47,13 @@ public:
     goal.success      = (getInput<std::string>("success").value_or("true") != "false");
     goal.observation  = getInput<std::string>("observation").value_or("");
     goal.mission_path = getInput<std::string>("mission").value_or("");
+    // Run-boundary signal: true on the FIRST advance of this run, false after.
+    // The leaf instance is rebuilt per ExecuteTree goal (behavior_server composes
+    // a fresh tree per goal), so this member re-initializes to true each run — an
+    // explicit "new run, reset the mission" flag, NOT inferred from an empty
+    // observation (which a mid-run move can legitimately produce).
+    goal.first  = first_run_;
+    first_run_  = false;
     return true;
   }
 
@@ -78,6 +85,11 @@ public:
     RCLCPP_WARN(logger(), "MissionAdvance could not run (%s)", BT::toStr(error));
     return BT::NodeStatus::FAILURE;
   }
+
+private:
+  // Latched true at construction (fresh instance per tree build = per run), flipped
+  // false after the first goal is dispatched. See setGoal.
+  bool first_run_{true};
 };
 
 }  // namespace hint_behavior

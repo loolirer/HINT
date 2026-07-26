@@ -35,6 +35,7 @@ setup(
     entry_points={
         "console_scripts": [
             "narrative_navigation = hint_narrative.narrative_navigation:main",
+            "mission_report = hint_narrative.mission_report:main",
         ],
     },
 )

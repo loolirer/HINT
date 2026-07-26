@@ -31,6 +31,9 @@ Persistence (siblings of the mission YAML), both append-only:
 
 import json
 import os
+import shutil
+import signal
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -87,6 +90,21 @@ NARRATIVE_SCHEMA = json.dumps({
 
 ACTIONS = ("stay", "advance", "back", "insert")
 
+# Minimal topic set recorded per mission (no images / clouds / costmap, to keep the bag
+# small). The two paths + odom/tf give trajectory; the action _action/status topics give
+# the VLM-thinking vs movement time windows the mission_report script derives stats from.
+# Missing topics (e.g. /map in the mapless setup) are simply not recorded — harmless.
+_BAG_TOPICS = [
+    "/tf", "/tf_static", "/odom",
+    "/trajectory_navigator_node/path",       # truncated (clipped) path handed to MPPI
+    "/trajectory_navigator_node/path_raw",   # full VLM-intent path
+    "/map",                                  # OccupancyGrid if a map exists (else absent)
+    "/trajectory_generator/plan_trajectory/_action/status",         # executor-VLM windows
+    "/narrative_navigation/advance/_action/status",                 # director-VLM windows
+    "/trajectory_navigator_node/follow_trajectory/_action/status",  # drive windows
+    "/spin/_action/status",                                         # turn windows
+]
+
 
 class MissionPlannerNode(Node):
     def __init__(self):
@@ -98,6 +116,10 @@ class MissionPlannerNode(Node):
         self.declare_parameter("prompts_dir", os.path.join(share, "prompts"))
         self.declare_parameter("narrative_path", "")   # empty -> <mission>.narrative.jsonl
         self.declare_parameter("log_path", "")          # empty -> <mission>.log.jsonl
+        # Automatic minimal MCAP rosbag, one per mission run (see _BAG_TOPICS). Starts on a
+        # fresh run, ends when the mission ends. Overwritten each run (mirrors the jsonl).
+        self.declare_parameter("record_bag", True)
+        self.declare_parameter("bag_path", "")          # empty -> <mission>.bag (sibling dir)
         self.declare_parameter("reasoner_action", "/visual_reasoner/reason")
         self.declare_parameter("reasoner_timeout", 30.0)
         self.declare_parameter("max_env_cycles", 10)     # stuck backstop per environment
@@ -107,6 +129,17 @@ class MissionPlannerNode(Node):
         # 1 = before/after of the last move (the default); 3-4 = deeper history. Each
         # extra frame is more image tokens = more latency/cost. Live-adjustable.
         self.declare_parameter("history_frames", 1)
+        # Compile resilience. On a reasoner/API failure the narrative did NOT
+        # advance, so rather than re-serving a stale instruction (which would drive
+        # the robot on an un-updated belief), the advance call WAITS and retries the
+        # compile. `compile_retries` = retries after the first attempt: -1 = retry
+        # indefinitely until it succeeds or the BT halts; 0 = one attempt; N = N
+        # retries. On a *bounded* budget being exhausted the mission aborts (BT
+        # FAILURE), never re-serving. `compile_retry_delay` = backoff between
+        # attempts. The robot never moves while waiting — the follow only runs once
+        # advance returns. Live-adjustable.
+        self.declare_parameter("compile_retries", -1)
+        self.declare_parameter("compile_retry_delay", 2.0)
 
         self._lock = threading.Lock()
         _mp = self._p("mission_path")
@@ -119,6 +152,7 @@ class MissionPlannerNode(Node):
         self._failed = False                    # mission stuck past the cycle cap
         self._version = -1
         self._served = False
+        self._bag_proc = None                   # running `ros2 bag record` subprocess, or None
         # Director vision: the latest camera frame, and a rolling buffer of the last
         # N frames latched at move boundaries (= the starts of recent moves). Those
         # past frames + the current one are the image history handed to the director.
@@ -207,122 +241,156 @@ class MissionPlannerNode(Node):
     # Action server — report-and-advance (one narrative recompile per cycle)
 
     def _advance_cb(self, goal_handle):
+        # Serialize cycles, and never let an unexpected failure (bad mission file,
+        # disk/IO error, malformed goal, ...) escape the execute callback — that
+        # would leave the goal hanging and could kill the executor thread. Any
+        # exception becomes a clean mission_failed result so the BT ends
+        # deterministically (FAILURE) instead of stalling.
         with self._lock:
-            req = goal_handle.request
-            # Per-call mission selection: switch missions if the goal points at a
-            # different YAML (resumes that mission's narrative if it already exists).
-            if req.mission_path and os.path.abspath(req.mission_path) != self._mission_path:
-                self.get_logger().info(f"Switching mission -> {req.mission_path}")
-                self._load_mission(req.mission_path)
-
-            # No mission loaded and none provided — nothing to do; fail cleanly so
-            # the tree ends (FAILURE) rather than driving on an empty instruction.
-            if self._plan is None:
+            try:
+                return self._advance_locked(goal_handle)
+            except Exception as e:   # noqa: BLE001 — deliberately broad: this is the backstop
+                self.get_logger().error(f"Advance failed, aborting mission: {e!r}")
+                try:
+                    self._stop_recording()
+                except Exception:
+                    pass
                 result = MissionAdvance.Result()
                 result.mission_done = True
                 result.mission_failed = True
-                result.message = "No mission loaded — pass mission_path in the advance goal."
-                goal_handle.succeed()
-                self.get_logger().warn(result.message)
+                result.message = f"Mission planner error: {e}"
+                if goal_handle.is_active:
+                    goal_handle.succeed()
                 return result
 
-            if self._version >= 0 and not os.path.exists(self._narrative_path()):
-                self.get_logger().info(
-                    "Narrative file missing — restarting the mission from scratch.")
-                self._load_mission(self._mission_path)
+    def _advance_locked(self, goal_handle):
+        req = goal_handle.request
+        # Per-call mission selection: switch missions if the goal points at a
+        # different YAML (resumes that mission's narrative if it already exists).
+        if req.mission_path and os.path.abspath(req.mission_path) != self._mission_path:
+            self.get_logger().info(f"Switching mission -> {req.mission_path}")
+            self._load_mission(req.mission_path)
 
-            # A NEW tree run's FIRST advance reports no outcome — the BT's
-            # {plan_message} is unset in a fresh blackboard, so `observation` is
-            # empty; every mid-run advance carries the planner's reasoning. So
-            # "already served before AND a no-outcome tick" = the tree was called
-            # again → wipe any existing narrative/log and reseed. Missions never
-            # resume across runs, no matter how the last one ended (finish, fail, or
-            # a premature Ctrl+C mid-run). The finished run's files persist until
-            # this next call, so they stay debuggable in between.
-            if self._served and not req.observation.strip():
-                self.get_logger().info(
-                    "New tree run (no outcome reported) — wiping old logs, starting fresh.")
-                self._reset_mission()
-
-            self._feedback(goal_handle, MissionAdvance, "RUNNING")
-
-            trigger = None
-            if self._served:
-                trigger = {"success": bool(req.success), "observation": req.observation}
-                self._append_log("follow",
-                                 result="success" if req.success else "failure",
-                                 observation=req.observation)
-
-            # Image history for the director-VLM. `after` = the current view (where
-            # the last move ended); the buffer holds the starts of recent moves. The
-            # director reads the move outcomes from these frames — the planner's text
-            # note is no longer fed in. Depth is `history_frames`.
-            after = self._latest_frame
-            history = self._history_window()
-            images, vision = self._vision_inputs(history, after)
-
-            data = self._compile(vision, images, goal_handle)
-
-            if goal_handle.is_cancel_requested:
-                goal_handle.canceled()
-                cancelled = MissionAdvance.Result()
-                cancelled.message = "Cancelled."
-                self.get_logger().info("Advance cancelled (BT halt).")
-                return cancelled
-
+        # No mission loaded and none provided — nothing to do; fail cleanly so
+        # the tree ends (FAILURE) rather than driving on an empty instruction.
+        if self._plan is None:
             result = MissionAdvance.Result()
-            if data is None:
-                # Compile failed: keep state, append NO snapshot, re-serve current.
-                cur = self._current()
-                result.mission_done = self._complete()
-                result.mission_failed = False
-                result.area = cur["name"] if cur else ""
-                result.description = self._narrative.get("next", "")
-                result.message = "Compile failed — re-serving previous instruction."
-                self._push_frame()
-                self._served = True
-                goal_handle.succeed()
-                self.get_logger().warn(result.message)
-                return result
-
-            action = self._apply(data)
-            self._narrative = {"situation": str(data.get("situation", "")),
-                               "done": str(data.get("done", "")),
-                               "next": str(data.get("next", ""))}
-            self._append_snapshot(trigger, action)
-
-            cur = self._current()
-            result.area = cur["name"] if cur else ""
-
-            if self._failed:
-                result.mission_done = True
-                result.mission_failed = True
-                result.message = (
-                    f"Mission failed — stuck in '{result.area}' past the cycle cap.")
-                goal_handle.succeed()
-                self.get_logger().warn(result.message)
-                return result
-
-            if self._complete():
-                result.mission_done = True
-                result.mission_failed = False
-                result.message = self._narrative.get("done", "") or "Mission complete."
-                goal_handle.succeed()
-                self.get_logger().info(f"Mission complete (v{self._version}).")
-                return result
-
-            result.mission_done = False
-            result.mission_failed = False
-            result.description = self._narrative.get("next", "")
-            result.message = self._narrative.get("done", "")
-            # This instruction will now be executed — push the current view into the
-            # frame buffer as a move-start frame for the director's next comparison.
-            self._push_frame()
-            self._served = True
+            result.mission_done = True
+            result.mission_failed = True
+            result.message = "No mission loaded — pass mission_path in the advance goal."
             goal_handle.succeed()
-            self.get_logger().info(
-                f"v{self._version} [{result.area}] ({action}) next: {result.description}")
+            self.get_logger().warn(result.message)
             return result
+
+        if self._version >= 0 and not os.path.exists(self._narrative_path()):
+            self.get_logger().info(
+                "Narrative file missing — restarting the mission from scratch.")
+            self._load_mission(self._mission_path)
+
+        # A NEW tree run announces itself explicitly: `first` is latched true on
+        # the BT's first MissionAdvance tick of the run (fresh leaf instance per
+        # ExecuteTree goal) and false thereafter. On it we wipe any existing
+        # narrative/log and reseed. Missions never resume across runs, no matter
+        # how the last one ended (finish, fail, or a premature Ctrl+C mid-run).
+        # The finished run's files persist until this next call, so they stay
+        # debuggable in between. (This used to be *inferred* from an empty
+        # observation, but a mid-run move can legitimately report nothing — that
+        # inference could wipe a live mission, so the signal is now explicit.)
+        if req.first:
+            self.get_logger().info(
+                "New tree run! Wiping old logs, starting fresh.")
+            self._reset_mission()
+
+        self._feedback(goal_handle, MissionAdvance, "RUNNING")
+
+        trigger = None
+        if self._served:
+            trigger = {"success": bool(req.success), "observation": req.observation}
+            self._append_log("follow",
+                             result="success" if req.success else "failure",
+                             observation=req.observation)
+
+        # Image history for the director-VLM. `after` = the current view (where
+        # the last move ended); the buffer holds the starts of recent moves. The
+        # director reads the move outcomes from these frames — the planner's text
+        # note is no longer fed in. Depth is `history_frames`.
+        after = self._latest_frame
+        history = self._history_window()
+        images, vision = self._vision_inputs(history, after)
+
+        data = self._compile(vision, images, goal_handle)
+
+        if goal_handle.is_cancel_requested:
+            goal_handle.canceled()
+            cancelled = MissionAdvance.Result()
+            cancelled.message = "Cancelled."
+            self.get_logger().info("Advance cancelled (BT halt).")
+            return cancelled
+
+        result = MissionAdvance.Result()
+        if data is None:
+            # Compile failed past the retry budget: the narrative did NOT
+            # advance, so we never fabricate progress by re-serving a stale
+            # instruction (which would drive the robot on an un-updated belief).
+            # Abort cleanly — mission_failed -> BT FAILURE. With
+            # compile_retries = -1 the compile waits indefinitely, so this is
+            # only reached once a *bounded* budget is exhausted; a BT halt is
+            # handled by the cancel check above, not here. Record a `fail`
+            # snapshot first so the narrative history explains why the run stopped.
+            self._failed = True
+            self._append_snapshot(trigger, "fail")
+            cur = self._current()
+            result.mission_done = True
+            result.mission_failed = True
+            result.area = cur["name"] if cur else ""
+            result.message = (
+                "Narrative compile failed past the retry budget — aborting "
+                "(the narrative did not advance).")
+            self._stop_recording()
+            goal_handle.succeed()
+            self.get_logger().warn(result.message)
+            return result
+
+        action = self._apply(data)
+        self._narrative = {"situation": str(data.get("situation", "")),
+                           "done": str(data.get("done", "")),
+                           "next": str(data.get("next", ""))}
+        self._append_snapshot(trigger, action)
+
+        cur = self._current()
+        result.area = cur["name"] if cur else ""
+
+        if self._failed:
+            result.mission_done = True
+            result.mission_failed = True
+            result.message = (
+                f"Mission failed — stuck in '{result.area}' past the cycle cap.")
+            self._stop_recording()
+            goal_handle.succeed()
+            self.get_logger().warn(result.message)
+            return result
+
+        if self._complete():
+            result.mission_done = True
+            result.mission_failed = False
+            result.message = self._narrative.get("done", "") or "Mission complete."
+            self._stop_recording()
+            goal_handle.succeed()
+            self.get_logger().info(f"Mission complete (v{self._version}).")
+            return result
+
+        result.mission_done = False
+        result.mission_failed = False
+        result.description = self._narrative.get("next", "")
+        result.message = self._narrative.get("done", "")
+        # This instruction will now be executed — push the current view into the
+        # frame buffer as a move-start frame for the director's next comparison.
+        self._push_frame()
+        self._served = True
+        goal_handle.succeed()
+        self.get_logger().info(
+            f"v{self._version} [{result.area}] ({action}) next: {result.description}")
+        return result
 
     def _apply(self, data):
         """Enrich the current environment, apply the queue edit + stuck-cap.
@@ -341,12 +409,18 @@ class MissionPlannerNode(Node):
         if action not in ACTIONS:
             action = "stay"
         head_changed = False
-        if action == "advance" and self._queue:
-            self._visited.append(self._queue.pop(0))
-            head_changed = True
-        elif action == "back" and self._visited:
-            self._queue.insert(0, self._visited.pop())
-            head_changed = True
+        if action == "advance":
+            if self._queue:
+                self._visited.append(self._queue.pop(0))
+                head_changed = True
+            else:
+                action = "stay"   # nothing left to advance past — record it as a no-op
+        elif action == "back":
+            if self._visited:
+                self._queue.insert(0, self._visited.pop())
+                head_changed = True
+            else:
+                action = "stay"   # nothing to go back to — record it as a no-op
         elif action == "insert":
             ne = data.get("new_environment") or {}
             name = str(ne.get("name", "")).strip()
@@ -375,6 +449,15 @@ class MissionPlannerNode(Node):
     # Narrative recompile (the single reasoner call)
 
     def _compile(self, vision, images, goal_handle=None):
+        """Recompile the narrative via one reasoner call, WAITING through failures.
+
+        The narrative only advances on a real reply, so a reasoner/API failure must
+        not push the robot on a stale belief. Instead we retry (the advance call
+        blocks in RUNNING, so the robot stays put) with `compile_retry_delay`
+        backoff, up to `compile_retries` (-1 = indefinitely). Returns the compiled
+        dict on success, or None when a *bounded* budget is exhausted (-> the
+        caller aborts) or a BT halt cancels the wait (-> the caller's cancel check).
+        """
         prompt = self._fill("compile.txt", {
             "brief": self._brief,
             "environment": self._context_text(),
@@ -382,11 +465,28 @@ class MissionPlannerNode(Node):
             "narrative": self._narrative_text(),
             "vision": vision,
         })
-        data = self._call_reasoner(prompt, NARRATIVE_SCHEMA, images, goal_handle)
-        if not isinstance(data, dict):
-            self.get_logger().warn("Narrative compile failed — keeping previous narrative.")
-            return None
-        return data
+        retries = int(self._p("compile_retries"))     # -1 = retry indefinitely
+        delay = max(0.0, float(self._p("compile_retry_delay")))
+        attempt = 0
+        while True:
+            data = self._call_reasoner(prompt, NARRATIVE_SCHEMA, images, goal_handle)
+            if isinstance(data, dict):
+                return data
+            # BT halted us mid-wait — bail; the advance callback's cancel check runs.
+            if goal_handle is not None and goal_handle.is_cancel_requested:
+                return None
+            attempt += 1
+            if retries >= 0 and attempt > retries:
+                self.get_logger().warn(
+                    f"Narrative compile failed after {attempt} attempt(s) — "
+                    "giving up (aborting the mission).")
+                return None
+            budget = f"{attempt}/{retries + 1}" if retries >= 0 else f"{attempt}, indefinite"
+            self.get_logger().warn(
+                f"Narrative compile failed (attempt {budget}) — the robot waits; "
+                f"retrying in {delay:.1f}s (narrative not advanced).")
+            if not self._interruptible_sleep(delay, goal_handle):
+                return None   # cancelled during the backoff
 
     def _context_text(self):
         """Only the current environment + a one-line peek — bounded regardless of
@@ -481,9 +581,16 @@ class MissionPlannerNode(Node):
 
     def _load_mission(self, path):
         """(Re)load the mission at ``path`` and reset runtime state — or resume it
-        if that mission's narrative already exists. Switchable per ~/advance call."""
-        self._mission_path = os.path.abspath(path)
-        self._load_plan()
+        if that mission's narrative already exists. Switchable per ~/advance call.
+
+        Parses the plan BEFORE committing any state, so a bad path / malformed YAML
+        raises without corrupting ``_mission_path`` / ``_plan`` (leaving the current
+        mission intact); the ``_advance_cb`` backstop turns the raise into a clean
+        mission_failed."""
+        abspath = os.path.abspath(path)
+        plan = self._load_plan(abspath)   # may raise — before any state is committed
+        self._mission_path = abspath
+        self._plan = plan
         self._load_or_seed()
         self._env_cycles = 0
 
@@ -501,11 +608,17 @@ class MissionPlannerNode(Node):
         self._load_or_seed()          # narrative now absent -> seeds a fresh plan
         self._env_cycles = 0
         self._frame_history = []
+        self._start_recording()       # fresh run -> fresh bag (overwrites the previous)
 
-    def _load_plan(self):
-        with open(self._mission_path, "r") as f:
-            self._plan = yaml.safe_load(f)
-        self.get_logger().info(f"Loaded semantic plan from {self._mission_path}.")
+    def _load_plan(self, path):
+        """Read + parse a mission YAML into a plan dict (does not mutate state).
+        Raises on a missing file, unparseable YAML, or a non-mapping document."""
+        with open(path, "r") as f:
+            plan = yaml.safe_load(f)
+        if not isinstance(plan, dict):
+            raise ValueError(f"Mission file {path} did not parse to a mapping.")
+        self.get_logger().info(f"Loaded semantic plan from {path}.")
+        return plan
 
     def _seed_queue(self):
         return [{"name": e.get("name", ""),
@@ -542,13 +655,18 @@ class MissionPlannerNode(Node):
             self._version = -1
             self._served = False
             self._failed = False
+            self._start_recording()   # fresh seed (no narrative on disk) -> start the bag
 
     def _append_snapshot(self, trigger, action):
-        """Append a full snapshot — the versioned, git-like history (queue included)."""
-        self._version += 1
+        """Append a full snapshot — the versioned, git-like history (queue included).
+
+        ``_version`` is bumped only AFTER the write succeeds, so an IO failure can't
+        leave the in-memory counter ahead of what's on disk (a later resume reads the
+        tail, so the two must agree)."""
+        next_version = self._version + 1
         cur = self._current()
         rec = {
-            "version": self._version,
+            "version": next_version,
             "ts": self._now(),
             "current_environment": cur["name"] if cur else "",
             "mission_complete": self._complete(),
@@ -563,6 +681,7 @@ class MissionPlannerNode(Node):
         }
         with open(self._narrative_path(), "a") as f:
             f.write(json.dumps(rec) + "\n")
+        self._version = next_version   # commit only after the write succeeds
         return rec
 
     def _append_log(self, event, result="", observation=""):
@@ -587,7 +706,70 @@ class MissionPlannerNode(Node):
         return base + suffix
 
     # ------------------------------------------------------------------
+    # Mission rosbag (minimal MCAP, one per run, overwritten)
+
+    def _bag_dir(self):
+        return self._p("bag_path") or self._sibling(".bag")
+
+    def _start_recording(self):
+        """(Re)start the mission bag: stop any running one, delete the previous bag
+        dir (overwrite semantics — `ros2 bag record` refuses an existing dir), then
+        spawn a fresh `ros2 bag record`. No-op when `record_bag` is false or no
+        mission is loaded. Its own session group so our SIGINT (not the parent's
+        Ctrl+C) drives its shutdown."""
+        if not bool(self._p("record_bag")) or self._plan is None:
+            return
+        self._stop_recording()
+        bag_dir = self._bag_dir()
+        try:
+            if os.path.exists(bag_dir):
+                shutil.rmtree(bag_dir)
+        except OSError as e:
+            self.get_logger().warn(f"Could not delete old bag {bag_dir}: {e}")
+        # --include-hidden-topics is required: the four `_action/status` topics are
+        # hidden (they carry a `/_action/` segment), and `ros2 bag record` drops
+        # hidden topics even when named explicitly — without this the mission_report
+        # VLM/turn/movement windows come back empty.
+        cmd = ["ros2", "bag", "record", "--storage", "mcap",
+               "--include-hidden-topics", "-o", bag_dir, *_BAG_TOPICS]
+        try:
+            self._bag_proc = subprocess.Popen(cmd, start_new_session=True)
+            self.get_logger().info(f"Recording mission bag -> {bag_dir}")
+        except (OSError, ValueError) as e:
+            self._bag_proc = None
+            self.get_logger().warn(f"Could not start bag recording: {e}")
+
+    def _stop_recording(self):
+        """SIGINT the recorder so rosbag2 flushes metadata.yaml, then reap it.
+        Idempotent — safe to call when nothing is recording or it already exited."""
+        proc = self._bag_proc
+        self._bag_proc = None
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            proc.send_signal(signal.SIGINT)
+            proc.wait(timeout=10.0)
+            self.get_logger().info("Mission bag closed.")
+        except subprocess.TimeoutExpired:
+            self.get_logger().warn("Bag recorder did not exit on SIGINT — killing it.")
+            proc.kill()
+        except OSError as e:
+            self.get_logger().warn(f"Error stopping bag recorder: {e}")
+
+    # ------------------------------------------------------------------
     # Small utilities
+
+    @staticmethod
+    def _interruptible_sleep(seconds, goal_handle=None):
+        """Sleep up to `seconds`, returning False early if a BT-halt cancel arrives
+        (True if it slept the full duration). Lets the compile backoff bail out the
+        instant the tree halts, mirroring `_await`'s cancel polling."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if goal_handle is not None and goal_handle.is_cancel_requested:
+                return False
+            time.sleep(0.1)
+        return True
 
     @staticmethod
     def _now():
@@ -623,6 +805,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        node._stop_recording()   # flush the mission bag if a run was interrupted
         executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()
