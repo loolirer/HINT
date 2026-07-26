@@ -3,7 +3,8 @@ Panels:
     Help Height: 0
     Name: Displays
     Property Tree Widget:
-      Expanded: ~
+      Expanded:
+        - /Path2/Topic1
       Splitter Ratio: 0.5
     Tree Height: 314
   - Class: rviz_common/Selection
@@ -115,7 +116,7 @@ Visualization Manager:
       Shaft Length: 0.10000000149011612
       Topic:
         Depth: 1
-        Durability Policy: Volatile
+        Durability Policy: Transient Local
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Best Effort

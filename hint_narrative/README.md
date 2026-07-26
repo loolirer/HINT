@@ -55,14 +55,19 @@ action log). When it loads a mission it **resumes** from the tail of that missio
 exists; delete that file to start fresh.
 
 **Missions never resume across runs.** Every new tree run starts clean. The **first** `~/advance` of
-a run reports no outcome (nothing has executed yet, so `observation` is empty — the BT's
-`{plan_message}` is unset in a fresh blackboard), which the node treats as "the tree was called
-again": it **deletes** any existing `.narrative.jsonl` + `.log.jsonl` and reseeds from the plan. This
-holds no matter how the previous run ended — clean completion, failure, or a premature **Ctrl+C**
-mid-run — because the detector keys on the fresh run's first tick, not on the old run's ending. The
-previous run's files persist *until* you launch the next run, so they stay there for debugging in
-between; they're wiped only when a new run actually begins. (Every mid-run advance carries the
-planner's reasoning in `observation`, so this only fires on a run's first tick, never mid-mission.)
+a run carries `first: true` — an **explicit** run-boundary flag the `MissionAdvance` BT leaf latches
+on its first tick of the run (the leaf instance is rebuilt per `ExecuteTree` goal, so `first` is true
+exactly once per run, false thereafter). On it the node **deletes** any existing `.narrative.jsonl` +
+`.log.jsonl` and reseeds from the plan. This holds no matter how the previous run ended — clean
+completion, failure, or a premature **Ctrl+C** mid-run — because the flag keys on the fresh run's
+first tick, not on the old run's ending. The previous run's files persist *until* you launch the next
+run, so they stay there for debugging in between; they're wiped only when a new run actually begins.
+
+> Earlier this was *inferred* from an empty `observation`, but a mid-run move can legitimately report
+> nothing (e.g. a planning failure that leaves `{plan_message}` empty), and that inference could then
+> wipe a **live** mission mid-run (and livelock re-seeding). The signal is now the explicit `first`
+> goal field, so a genuine empty observation is never mistaken for a new run. Driving `~/advance` by
+> hand? Pass `first: true` on your first call (or just delete the `.narrative.jsonl`) to restart.
 
 The siblings are written next to the **real** mission file: `os.path.realpath` resolves the
 `--symlink-install` symlink back to the source tree, so in a dev workspace they appear in
@@ -155,6 +160,30 @@ Every move's raw outcome, append-only, one JSON object per line
 into the narrative. Kept distinct from the narrative history: this is the *raw actions*, that is
 the *compiled belief*.
 
+## Mission rosbag + report (`<mission>.bag`, `mission_report.png`)
+
+Every run auto-records a **minimal MCAP rosbag** (`<mission>.bag`, a sibling of the mission YAML),
+started on a fresh run and closed when the mission ends (or on Ctrl+C). It is **overwritten each
+run**, mirroring the jsonl semantics. The topic set is deliberately small (no images / clouds /
+costmap — just `/tf`, `/tf_static`, `/odom`, the navigator's raw + truncated paths, `/map` if
+present, and the `plan_trajectory` / `advance` / `follow_trajectory` / `spin` `_action/status`
+topics). Toggle with the `record_bag` param; relocate with `bag_path`. Recording is a controlled
+`ros2 bag record --storage mcap` subprocess (needs `ros-<distro>-rosbag2-storage-mcap`).
+
+The offline **`mission_report`** script compiles that bag into one annotated figure plus stats,
+written **into the mission's directory** (`mission_report.png` + `mission_stats.json`):
+
+```bash
+ros2 run hint_narrative mission_report missions/<name>/mission.bag
+```
+
+Reference frame is `map` if the bag has one, else `odom`. The figure shows the **actual** driven
+path (continuous), the VLM **raw** and **truncated** paths, the robot **footprint** (circle +
+heading) drawn **only at VLM plan-call poses**, start/end markers, each **turn** as a curved arrow
+labelled with its measured (odometry) magnitude, and a stats box: mission duration, VLM-processing
+time (`plan_trajectory` + `advance` windows) and movement time (`follow_trajectory` + `spin`
+windows) — all derived from the recorded `_action/status` topics, so no runtime node is touched.
+
 ## Prompt template (`prompts/compile.txt`)
 
 The single reasoner prompt (replacing the old judge/replan/compress). Placeholders are literal
@@ -200,14 +229,15 @@ mission loaded and none provided fails cleanly (`mission_failed`).
 | `/camera/image_raw/compressed` (see `camera_topic`) | `sensor_msgs/CompressedImage` | Sub — latest frame; latched into the director's rolling image buffer (`history_frames`) |
 
 **`advance`** — Goal: `success` (did the last move execute?), `observation` (the planner's VLM
-reasoning, verbatim), and `mission_path` (optional — the mission to run; loads/switches it when it
-changes, else keeps the current one). The node appends the outcome to the pure log, applies the
-queue edit + recompiles the narrative (`compile.txt` → reasoner), appends the new snapshot, and
-returns Result:
-`mission_done` (queue empty **or** failed), `mission_failed` (stuck past the cap), `description`
-(= the narrative's `next`), `area` (= the current queue head), `message` (= the narrative's `done`,
-or the failure reason). On the first call nothing has executed (`success` defaults true,
-`observation` empty) so it just emits the opening instruction.
+reasoning, verbatim), `mission_path` (optional — the mission to run; loads/switches it when it
+changes, else keeps the current one), and `first` (true only on the run's first tick → wipe + reseed;
+see **Missions never resume across runs** above). The node appends the outcome to the pure log,
+applies the queue edit + recompiles the narrative (`compile.txt` → reasoner), appends the new
+snapshot, and returns Result:
+`mission_done` (queue empty **or** failed), `mission_failed` (stuck past the cap, or an unrecoverable
+compile/IO error), `description` (= the narrative's `next`), `area` (= the current queue head),
+`message` (= the narrative's `done`, or the failure reason). On the first call nothing has executed
+(`success` defaults true, `observation` empty) so it just emits the opening instruction.
 
 ### Parameters
 
@@ -218,8 +248,12 @@ or the failure reason). On the first call nothing has executed (`success` defaul
 | `prompts_dir` | share `prompts/` | Directory holding `compile.txt` |
 | `narrative_path` | `""` | Narrative history; empty → sibling of the real mission file (`<mission>.narrative.jsonl`) |
 | `log_path` | `""` | Raw log; empty → sibling of the real mission file (`<mission>.log.jsonl`) |
+| `record_bag` | `true` | Auto-record the per-run minimal MCAP rosbag (start on a fresh run, close on mission end). Set `false` to disable (e.g. tests) |
+| `bag_path` | `""` | Rosbag output dir; empty → sibling of the real mission file (`<mission>.bag`). Overwritten each fresh run |
 | `reasoner_action` | `/visual_reasoner/reason` | Reasoner action name |
-| `reasoner_timeout` | `30.0` | Seconds to wait on the reasoner call |
+| `reasoner_timeout` | `30.0` | Seconds to wait on a single reasoner call |
+| `compile_retries` | `-1` | On a compile (reasoner/API) failure the narrative did **not** advance, so instead of re-serving a stale instruction (which would drive the robot on an un-updated belief) the `~/advance` call **waits and retries** — the robot stays put (the BT leaf sits in `RUNNING`; the follow only runs once advance returns). Retries after the first attempt: **`-1` = retry indefinitely** until it succeeds or the BT halts; `0` = one attempt; `N` = N retries. On a *bounded* budget being exhausted the mission **aborts** (`mission_failed` → BT `FAILURE`), never re-serving. Live-adjustable |
+| `compile_retry_delay` | `2.0` | Backoff (s) between compile retries (see `compile_retries`). The wait is cancellable — a BT halt / Ctrl+C breaks out immediately |
 | `max_env_cycles` | `8` | Cycles on one environment before the mission fails (stuck backstop) |
 | `camera_topic` | `/camera/image_raw/compressed` | Frame source for the director's image history |
 | `history_frames` | `1` | Director vision-buffer depth N — how many past move-start frames to attach ahead of the current view. `0` = current view only (no move comparison), `1` = before/after of the last move, `3–4` = deeper history. Each extra frame adds image tokens → more latency/cost. Live-adjustable. Only images are buffered; the narrative (`done`) carries the text history |
@@ -237,12 +271,13 @@ each subsequent call reports the previous move's outcome (with the planner's rea
 returns the next:
 
 ```bash
-# cycle 0 — load a mission (via mission_path) and get the opening instruction
+# cycle 0 — load a mission (via mission_path); first:true wipes any prior narrative
+# and reseeds, then returns the opening instruction
 ros2 action send_goal /narrative_navigation/advance hint_interfaces/action/MissionAdvance \
-  "{success: true, observation: '', mission_path: '/root/turtlebot3_ws/src/hint_narrative/missions/bedroom_to_living_room/mission.yaml'}" \
+  "{success: true, observation: '', first: true, mission_path: '/root/turtlebot3_ws/src/hint_narrative/missions/bedroom_to_living_room/mission.yaml'}" \
   --feedback
 
-# report the move + get the next (mission_path can be omitted once loaded)
+# report the move + get the next (first defaults false; mission_path can be omitted once loaded)
 ros2 action send_goal /narrative_navigation/advance hint_interfaces/action/MissionAdvance \
   "{success: true, observation: 'planner: routed to the far wall, a doorway is now visible ahead'}" \
   --feedback

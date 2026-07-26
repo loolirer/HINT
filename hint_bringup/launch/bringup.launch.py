@@ -117,8 +117,8 @@ def generate_launch_description():
                 "model_id": "gemini-robotics-er-1.6-preview",
                 "thinking_budget": 0,
                 "temperature": 1.0,
-                "n_candidates": 3,
-                "history_frames": 1,
+                "n_candidates": 1,
+                "history_frames": 2,
                 "structured_output": "json",
             }
         ],
@@ -132,8 +132,8 @@ def generate_launch_description():
         parameters=[
             {
                 "api_key_path": "/root/secrets/gemini_api_key.txt",
-                "model_id": "gemini-3.6-flash",
-                "thinking_budget": 512,
+                "model_id": "gemini-robotics-er-1.6-preview",
+                "thinking_budget": -1,
                 "structured_output": "json",
             }
         ],
@@ -146,7 +146,7 @@ def generate_launch_description():
         output="screen",
         parameters=[
             {
-                "history_frames": 1,
+                "history_frames": 2,
             }
         ],
         remappings=[camera_remap],
