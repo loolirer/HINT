@@ -54,6 +54,15 @@ RUN apt-get update && \
     clinfo \
     && rm -rf /var/lib/apt/lists/*
 
+RUN mkdir -p /opt/btcpp_ros2/src && \
+    git clone https://github.com/BehaviorTree/BehaviorTree.ROS2.git \
+        /opt/btcpp_ros2/src/BehaviorTree.ROS2 && \
+    git -C /opt/btcpp_ros2/src/BehaviorTree.ROS2 checkout ${BTCPP_ROS2_REF} && \
+    bash -c "source /opt/ros/${ROS_DISTRO}/setup.bash && cd /opt/btcpp_ros2 && \
+        colcon build --merge-install --packages-up-to behaviortree_ros2 \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release" && \
+    rm -rf /opt/btcpp_ros2/build /opt/btcpp_ros2/log /opt/btcpp_ros2/src
+
 WORKDIR ${COLCON_WS}
 
 RUN bash -c "source /opt/ros/${ROS_DISTRO}/setup.bash && \
@@ -65,9 +74,8 @@ RUN python3 -m pip config set global.break-system-packages true && \
     pip3 install --no-cache-dir -r requirements.txt
 
 RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> ~/.bashrc && \
+    echo "source /opt/btcpp_ros2/install/setup.bash" >> ~/.bashrc && \
     echo "source ${COLCON_WS}/install/setup.bash" >> ~/.bashrc && \
-    echo "alias cb='colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release'" >> ~/.bashrc && \
-    echo "alias kh='pkill -TERM -f \"ros2 launch\" 2>/dev/null; pkill -TERM -f \"ros2 run\" 2>/dev/null; sleep 1; pkill -9 -f \"ros2\" 2>/dev/null; pkill -9 -f lk_tracker 2>/dev/null; pkill -9 -f visual_servo 2>/dev/null; pkill -9 -f cartographer 2>/dev/null; pkill -9 rviz2 2>/dev/null; ros2 daemon stop 2>/dev/null; ros2 daemon start 2>/dev/null; echo done'" >> ~/.bashrc && \
-    echo "export ROS_DOMAIN_ID=30" >> ~/.bashrc
+    echo "alias cbss='colcon build --symlink-install && source install/setup.sh'" >> ~/.bashrc
 
 CMD ["bash"]
