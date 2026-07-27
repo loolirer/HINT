@@ -45,6 +45,8 @@ from nav2_msgs.action import FollowPath
 
 from hint_interfaces.action import FollowTrajectory
 
+from hint_navigation.camera_rig import CameraRig
+
 
 def _yaw_from_quat(q):
     siny = 2.0 * (q.w * q.z + q.x * q.y)
@@ -60,11 +62,9 @@ class TrajectoryNavigatorNode(Node):
     def __init__(self):
         super().__init__("trajectory_navigator_node")
 
-        # --- Camera geometry for the normalized-marker -> ground projection ---
-        self.declare_parameter("camera_height", 0.14)  # m above the ground plane
-        self.declare_parameter("camera_forward_offset", 0.0)  # m ahead of base origin
-        self.declare_parameter("camera_tilt", 0.0)  # rad, positive = pitched down
-        self.declare_parameter("camera_hfov_deg", 62.2)  # horizontal FOV (Pi cam v2)
+        # --- Camera rig for the normalized-marker -> ground projection (shared,
+        # live-adjustable; re-snapshotted per goal via CameraRig.from_node) ---
+        CameraRig.declare(self)
         # Image size the markers are normalized against — only the aspect ratio and hfov
         # actually affect grounding, so the camera's nominal resolution is enough.
         self.declare_parameter("image_width", 640)
@@ -82,7 +82,7 @@ class TrajectoryNavigatorNode(Node):
         # Ground-mask clipping: the VLM pixel trajectory is truncated at the first marker
         # that leaves the segmented ground (that marker and all after it are dropped, so we
         # never follow a path that runs off the floor). No fresh mask -> pass through.
-        self.declare_parameter("mask_topic", "/camera/ground/mask")
+        self.declare_parameter("mask_topic", "/camera/ground")
         self.declare_parameter("mask_timeout", 5.0)  # s; older mask -> skip clipping
         self.declare_parameter("server_timeout", 10.0)  # s to wait for controller_server
         self.declare_parameter("control_rate", 20.0)  # Hz feedback/poll loop
@@ -239,28 +239,6 @@ class TrajectoryNavigatorNode(Node):
     # ------------------------------------------------------------------
     # Grounding: normalized markers -> ground (base_link) -> odom Path
 
-    def _pixels_to_ground(self, pts, w, h):
-        """Back-project pixel points (N,2) onto the ground plane (base_link).
-
-        Same model as ``odom_waypoint_tracker._pixels_to_ground``: (X forward, Y left).
-        Points on/above the horizon clamp to a far ground distance rather than diverging.
-        """
-        hfov = math.radians(float(self._p("camera_hfov_deg")))
-        f = (w / 2.0) / math.tan(hfov / 2.0)
-        cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
-        tilt = float(self._p("camera_tilt"))
-        cos_t, sin_t = math.cos(tilt), math.sin(tilt)
-        cam_h = float(self._p("camera_height"))
-        x_off = float(self._p("camera_forward_offset"))
-        xn = (pts[:, 0] - cx) / f
-        yn = (pts[:, 1] - cy) / f
-        denom = cos_t * yn + sin_t
-        denom = np.where(denom > 1e-4, denom, 1e-4)  # clamp horizon/above to far
-        t = cam_h / denom
-        X = x_off + t * (cos_t - sin_t * yn)
-        Y = t * (-xn)
-        return np.stack([X, Y], axis=1).astype(np.float64)
-
     def _build_path(self, waypoints, stamp):
         """Ground ``waypoints`` (normalized image markers) into a ``nav_msgs/Path`` in
         ``path_frame``. Returns the Path, or None (no usable waypoints / no odom).
@@ -278,7 +256,8 @@ class TrajectoryNavigatorNode(Node):
         pix = np.empty_like(norm)
         pix[:, 0] = (norm[:, 0] + 1.0) * 0.5 * (w - 1)
         pix[:, 1] = (norm[:, 1] + 1.0) * 0.5 * (h - 1)
-        ground = self._pixels_to_ground(pix, w, h)  # (N,2) base_link (X fwd, Y left)
+        # (N,2) base_link (X fwd, Y left); snapshot the rig now (live-adjustable).
+        ground = CameraRig.from_node(self).pixels_to_ground(pix, w, h)
 
         # base_link (ref pose) -> odom. Prepend the robot's own pose so the path starts
         # at the robot, then the grounded markers nearest-first.

@@ -1,5 +1,5 @@
 # Mapless reactive Nav2 for HINT: only the controller_server (FollowPath + MPPI) and its
-# rolling local costmap, fed by ground_segmenter's /ground/obstacles point cloud. No
+# rolling local costmap, fed by obstacle_projector's /obstacles point cloud. No
 # global costmap / planner / map_server / amcl / bt_navigator — the VLM path is followed
 # directly via the follow_path action (driven by trajectory_navigator).
 
@@ -125,7 +125,7 @@ local_costmap:
         enabled: true
         observation_sources: ground
         ground:
-          topic: /ground/obstacles
+          topic: /obstacles
           data_type: "PointCloud2"
           marking: true
           clearing: true

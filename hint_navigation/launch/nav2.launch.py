@@ -4,8 +4,8 @@ Starts the pieces needed to follow a VLM path safely off a local costmap and re-
 at the end: ``controller_server`` (FollowPath + MPPI, with its rolling local_costmap),
 ``behavior_server`` (the Spin behavior, for the BT's end-of-trajectory / scan turn), and a
 ``nav2_lifecycle_manager`` that autostarts both. No map_server / amcl / planner_server /
-bt_navigator — there is no global map. The obstacle layer is fed by ``ground_segmenter``
-(`/ground/obstacles`); the path is delivered by ``trajectory_navigator`` via the
+bt_navigator — there is no global map. The obstacle layer is fed by ``obstacle_projector``
+(`/obstacles`); the path is delivered by ``trajectory_navigator`` via the
 controller's ``follow_path`` action; the turn by ``hint_behavior``'s SpinAction via ``/spin``.
 """
 

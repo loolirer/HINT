@@ -19,10 +19,10 @@ setup(
     zip_safe=True,
     maintainer="loolirer",
     maintainer_email="lorenzo.oliveira@ee.ufcg.edu.br",
-    description="Nav2 reactive-navigation integration for HINT: a trajectory_navigator "
-                "adapter that grounds VLM markers into a nav_msgs/Path and drives Nav2's "
-                "FollowPath (MPPI) controller over a mapless local costmap (fed by "
-                "hint_perception's ground_segmenter).",
+    description="Nav2 reactive-navigation integration for HINT and the image<->metric "
+                "bridge (sole owner of the camera rig, camera_rig.CameraRig): trajectory_navigator "
+                "(VLM markers -> nav_msgs/Path -> Nav2 FollowPath/MPPI), obstacle_projector "
+                "(ground mask -> obstacle PointCloud2), and visual_debug (composited /debug).",
     license="Apache-2.0",
     extras_require={
         "test": ["pytest"],
@@ -30,6 +30,8 @@ setup(
     entry_points={
         "console_scripts": [
             "trajectory_navigator = hint_navigation.trajectory_navigator:main",
+            "obstacle_projector = hint_navigation.obstacle_projector:main",
+            "visual_debug = hint_navigation.visual_debug:main",
         ],
     },
 )

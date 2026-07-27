@@ -14,8 +14,10 @@ in one place. It has no nodes of its own; `launch/bringup.launch.py` starts the 
 ## What it launches
 
 - `teleop_twist_joy`
-- `ground_segmenter` (`hint_perception`) — semantic ground ONNX → obstacle `PointCloud2` on `/ground/obstacles`
+- `ground_segmenter` (`hint_perception`) — semantic ground ONNX → binary ground mask on `/camera/ground` (image space only, no rig)
+- `obstacle_projector` (`hint_navigation`) — ground mask → obstacle `PointCloud2` on `/obstacles`
 - `trajectory_navigator` (`hint_navigation`) — grounds VLM markers → `odom` path → Nav2 `follow_path`
+- `visual_debug` (`hint_navigation`) — composes one `/debug` image (mask overlay + navigator paths + BT state)
 - the mapless Nav2 stack via `hint_navigation/launch/nav2.launch.py`: `controller_server` (FollowPath + MPPI), `behavior_server` (Spin), `nav2_lifecycle_manager`
 - `trajectory_generator` (`gemini_robotics_er`) — VLM ground-trajectory planner (+ end-of-move turn)
 - `visual_reasoner` (`gemini_robotics_er`) — generic text/vision → JSON reasoner (the narrative director)
@@ -24,8 +26,10 @@ in one place. It has no nodes of its own; `launch/bringup.launch.py` starts the 
 - `rviz2`
 
 The shared camera-rig geometry (`camera_height` / `camera_forward_offset` / `camera_tilt` /
-`camera_hfov_deg`) is passed to `ground_segmenter` and `trajectory_navigator` in one dict — keep
-it matching the real rig.
+`camera_hfov_deg`) is passed in one `camera_rig` dict to the three nodes that own metric space —
+`obstacle_projector`, `trajectory_navigator`, and `visual_debug` (all in `hint_navigation`, via
+`camera_rig.CameraRig`) — keep it matching the real rig. `ground_segmenter` no longer takes it
+(perception is image-space only).
 
 ## Usage
 
@@ -52,7 +56,7 @@ ros2 launch hint_bringup bringup.launch.py
 ## RViz2 layout
 
 `viz/hint.rviz` opens in an **ego view** (`base_link` fixed frame). Useful displays for this
-stack: `/local_costmap/costmap`, `/ground/obstacles` (PointCloud2, Decay Time 0),
+stack: `/local_costmap/costmap`, `/obstacles` (PointCloud2, Decay Time 0),
 `/trajectory_navigator_node/path`, and — with MPPI `visualize` on —
 `/controller_server/trajectories` + `/controller_server/transformed_global_plan`. Adjust and
 save; the file is used on the next launch.

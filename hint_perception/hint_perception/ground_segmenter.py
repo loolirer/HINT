@@ -1,31 +1,21 @@
-"""Ground segmenter -> obstacle point cloud (fused, one node) for the Nav2 costmap.
+"""Ground segmenter -> binary ground mask (image space only).
 
 Runs a semantic-segmentation ONNX model via OpenVINO (Intel iGPU by default), mirroring
 ``depth_anything``'s inference plumbing (same ``Core`` / ``compile_model`` setup; the
 ImageNet preprocessing is folded into the graph). Consumes ``/camera/image_raw/compressed`` — the node runs
 off-robot and pulling the raw stream costs more latency than the JPEG decode.
 
-Unlike the earlier segmenter this node does **not** publish a binary mask. It owns the
-camera geometry and turns the ground segmentation straight into an **obstacle point
-cloud** for Nav2's local costmap:
+This node is **purely image-space**: it labels pixels and nothing more. It owns no camera
+geometry (the rig) — anything metric lives on the navigation side (hint_navigation's
+``obstacle_projector`` turns this mask into the Nav2 obstacle cloud; the
+``trajectory_navigator`` uses it to clip pixel trajectories; ``visual_debug`` overlays it).
 
-1. Infer per-pixel ground probability (model-output layout detected at load time, exactly
-   as before), threshold into a ground mask at the camera frame.
-2. Warp the mask through the ground-plane homography into a metric top-down (BEV) grid
-   (camera model ``camera_height`` / ``camera_tilt`` / ``camera_hfov_deg`` /
-   ``camera_forward_offset``, the same projection ``odom_waypoint_tracker`` uses); a cell
-   that is **known but not ground** is an obstacle.
-3. Publish those obstacle cell centres as a ``sensor_msgs/PointCloud2`` on
-   ``/ground/obstacles`` in ``base_link`` (z = 0), stamped with the **source frame's
-   header stamp** — Nav2's obstacle layer TF-transforms it ``base_link -> odom`` at that
-   stamp, so segmenter latency lands the points where they were seen, not where the robot
-   is now (free latency compensation). One point per BEV cell keeps the cloud light.
-
-It also publishes the binary ground mask on ``/camera/ground/mask`` (``mono8``, 255 = ground)
-at the processing-grid resolution (camera aspect, 1/``proc_scale`` of camera res) —
-consumed by ``hint_navigation``'s trajectory clipping (normalized coords, so any res
-works) and by ``visual_debug``'s overlay (which resizes it to the frame). Visual debug
-(the green/red overlay etc.) lives in the ``visual_debug`` node, not here.
+1. Infer per-pixel ground probability (model-output layout detected at load time), then
+   threshold into a binary ground mask on a small camera-aspect processing grid
+   (1/``proc_scale`` of camera res).
+2. Publish it on ``/camera/ground`` (``mono8``, 255 = ground), header inherited from the
+   source camera frame (so downstream latency compensation keys off the capture stamp).
+   Consumers are resolution-agnostic (normalized coords / they resize).
 
 Preprocessing (BGR->RGB, resize, ImageNet normalize, HWC->CHW) is folded into the
 compiled model via OpenVINO's PrePostProcessor, so it runs on the inference device and
@@ -41,7 +31,6 @@ without code edits:
 * ``(1, H, W)`` integer — an already-argmaxed class map; ``ground_class_ids`` selects.
 """
 
-import math
 import os
 
 import cv2
@@ -53,9 +42,7 @@ from openvino.preprocess import ColorFormat, PrePostProcessor, ResizeAlgorithm
 from openvino.runtime import Core, Layout, Type
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import CompressedImage, Image, PointCloud2
-from sensor_msgs_py import point_cloud2
-from std_msgs.msg import Header
+from sensor_msgs.msg import CompressedImage, Image
 
 # ImageNet normalization (RGB order) — the standard for HF segmentation backbones.
 _MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -105,22 +92,11 @@ class GroundSegmenter(Node):
         #               Skips the full-class softmax (big CPU cut); ground_threshold
         #               is inert in this mode.
         self.declare_parameter("score_mode", "argmax")
-        # All post-processing (threshold, morphology, BEV warp) and the published mask
-        # run on a camera-aspect grid at 1/proc_scale of the camera resolution — the
-        # score comes out of the model at a coarse stride anyway, so full-res work is
-        # wasted. Consumers are resolution-agnostic (normalized coords / they resize).
+        # All post-processing (threshold, morphology) and the published mask run on a
+        # camera-aspect grid at 1/proc_scale of the camera resolution — the score comes
+        # out of the model at a coarse stride anyway, so full-res work is wasted.
+        # Consumers are resolution-agnostic (normalized coords / they resize).
         self.declare_parameter("proc_scale", 4)
-
-        # --- Camera geometry for the ground->BEV homography (match the real rig) ---
-        self.declare_parameter("camera_height", 0.14)  # m above the ground plane
-        self.declare_parameter("camera_forward_offset", 0.0)  # m ahead of base origin
-        self.declare_parameter("camera_tilt", 0.0)  # rad, positive = pitched down
-        self.declare_parameter("camera_hfov_deg", 62.2)  # horizontal FOV (Pi cam v2)
-        # --- BEV window (base_link: x forward, y left); one obstacle point per cell ---
-        self.declare_parameter("bev_range", 3.0)  # m forward coverage
-        self.declare_parameter("bev_half_width", 1.5)  # m lateral each side
-        self.declare_parameter("bev_resolution", 0.05)  # m per cell (~ costmap res)
-        self.declare_parameter("obstacle_frame", "base_link")  # cloud frame_id
 
         self.get_logger().info(f"Loading ONNX model '{model_path}' on device '{device}'")
         core = Core()
@@ -166,14 +142,12 @@ class GroundSegmenter(Node):
             CompressedImage, "/camera/image_raw/compressed",
             self.callback, _LATEST_FRAME_QOS,
         )
-        # Reliable pub so a best-effort costmap observation sub is still compatible.
-        self.pub_obstacles = self.create_publisher(PointCloud2, "/ground/obstacles", 5)
         # Binary ground mask (255 = ground, 0 = not) at the processing-grid resolution,
-        # header inherited from the source frame. trajectory_navigator uses it to clip
-        # the VLM pixel trajectory to the ground (via normalized coords, res-agnostic).
-        self.pub_mask = self.create_publisher(Image, "/camera/ground/mask", 1)
+        # header inherited from the source frame. Navigation-side consumers use it:
+        # obstacle_projector (BEV -> cloud), trajectory_navigator (clip), visual_debug.
+        self.pub_mask = self.create_publisher(Image, "/camera/ground", 1)
 
-        self.get_logger().info("OpenVINO Ground Segmenter (mask + obstacle cloud) ready!")
+        self.get_logger().info("OpenVINO Ground Segmenter (image -> ground mask) ready!")
 
     def _p(self, name):
         return self.get_parameter(name).value
@@ -288,76 +262,10 @@ class GroundSegmenter(Node):
         return m.astype(bool)
 
     # ------------------------------------------------------------------
-    # Camera model + BEV geometry (same projection as odom_waypoint_tracker / pursuit)
-
-    def _bev_geom(self):
-        res = max(1e-3, float(self._p("bev_resolution")))
-        rng = float(self._p("bev_range"))
-        half = float(self._p("bev_half_width"))
-        return (max(2, int(round(rng / res))), max(2, int(round(2 * half / res))),
-                res, rng, half)
-
-    def _metric_to_cell(self, x, y, res, rng, half):
-        return (rng - x) / res - 0.5, (half - y) / res - 0.5  # (row, col)
-
-    def _ground_to_pixels(self, gxy, w, h):
-        """Project ground points (N,2 metric base_link) to image pixels (N,2)."""
-        hfov = math.radians(float(self._p("camera_hfov_deg")))
-        f = (w / 2.0) / math.tan(hfov / 2.0)
-        cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
-        tilt = float(self._p("camera_tilt"))
-        cos_t, sin_t = math.cos(tilt), math.sin(tilt)
-        cam_h = float(self._p("camera_height"))
-        x_off = float(self._p("camera_forward_offset"))
-        dx = gxy[:, 0] - x_off
-        cam_z = cos_t * dx + sin_t * cam_h
-        cam_x = -gxy[:, 1]
-        cam_y = -sin_t * dx + cos_t * cam_h
-        z = np.where(cam_z > 1e-6, cam_z, 1e-6)
-        pix = np.stack([cx + f * cam_x / z, cy + f * cam_y / z], axis=1)
-        return pix, cam_z > 1e-6  # pixels + in-front mask
-
-    def _mask_to_obstacle_cells(self, ground, w, h):
-        """Warp the image-space ground mask to BEV; return obstacle (mx, my) points.
-
-        ``ground`` is a boolean image mask (True = traversable). A BEV cell is an
-        obstacle when it is **known** (inside the camera wedge) but **not ground**.
-        """
-        rows, cols, res, rng, half = self._bev_geom()
-        x_off = float(self._p("camera_forward_offset"))
-        x_near = max(0.25 * rng, x_off + 0.2)
-        gx = np.array([[rng, half], [rng, -half], [x_near, half], [x_near, -half]])
-        img_pts = self._ground_to_pixels(gx, w, h)[0].astype(np.float32)
-        bev_pts = np.array(
-            [self._metric_to_cell(x, y, res, rng, half)[::-1] for x, y in gx],
-            dtype=np.float32,
-        )
-        m = cv2.getPerspectiveTransform(bev_pts, img_pts)
-
-        flags = cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP
-        g = cv2.warpPerspective(
-            ground.astype(np.uint8), m, (cols, rows), flags=flags, borderValue=0) > 0
-        known = cv2.warpPerspective(
-            np.full((h, w), 255, np.uint8), m, (cols, rows), flags=flags, borderValue=0
-        ) > 0
-        # Rows whose ground points sit at/behind the image plane sample garbage.
-        tilt = float(self._p("camera_tilt"))
-        cam_h = float(self._p("camera_height"))
-        cell_x = rng - (np.arange(rows) + 0.5) * res
-        behind = (np.cos(tilt) * (cell_x - x_off) + np.sin(tilt) * cam_h) <= 1e-3
-        known[behind, :] = False
-        g[behind, :] = False
-
-        ys, xs = np.nonzero(known & ~g)
-        mx = rng - (ys + 0.5) * res            # metric x forward
-        my = half - (xs + 0.5) * res           # metric y left
-        return mx, my
-
-    # ------------------------------------------------------------------
     # Callback (preprocessing lives inside the compiled model — see __init__)
 
     def callback(self, msg):
-        # Naive synchronous inference: decode -> infer -> mask + obstacle cloud, right here.
+        # Naive synchronous inference: decode -> infer -> ground mask, right here.
         # No hang detection, no recovery — if the device wedges, an external monitor
         # (hint_bringup's segmenter_watchdog + launch respawn) restarts this process.
         # A truncated JPEG (best-effort WiFi stream) decodes to None or raises; skip the
@@ -376,26 +284,17 @@ class GroundSegmenter(Node):
 
         # Resample the score to the PROCESSING grid — camera aspect (the head's stride may
         # not match it) at 1/proc_scale of camera res — then threshold, never the reverse:
-        # cutting first and resizing the binary mask staircases every boundary. Everything
-        # downstream (morphology, BEV warp, published mask) stays on this small grid; the
-        # camera model in _ground_to_pixels is resolution-invariant.
+        # cutting first and resizing the binary mask staircases every boundary. The mask
+        # stays on this small grid; downstream consumers are resolution-agnostic.
         h, w = cv_img.shape[:2]
         scale = max(1, int(self._p("proc_scale")))
         ws, hs = max(2, w // scale), max(2, h // scale)
         score = cv2.resize(score, (ws, hs), interpolation=cv2.INTER_LINEAR)
         ground = self._clean(score >= float(self._p("ground_threshold")))
 
-        # Binary ground mask (image space, processing-grid res), for the trajectory
-        # ground-clipping consumer (which maps normalized coords into mask.shape).
+        # Binary ground mask (image space, processing-grid res); the header carries the
+        # source-frame stamp so the navigation side can latency-compensate.
         self._publish_mask(ground, msg.header)
-
-        # Obstacle cloud (base_link, z=0), stamped at the source frame for latency comp.
-        mx, my = self._mask_to_obstacle_cells(ground, ws, hs)
-        header = Header()
-        header.stamp = msg.header.stamp
-        header.frame_id = str(self._p("obstacle_frame"))
-        pts = np.stack([mx, my, np.zeros_like(mx)], axis=1).astype(np.float32)
-        self.pub_obstacles.publish(point_cloud2.create_cloud_xyz32(header, pts))
 
     def _publish_mask(self, ground, src_header):
         """Publish the binary ground mask (mono8, 255=ground) at processing-grid res."""

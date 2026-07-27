@@ -29,9 +29,9 @@ setup(
     zip_safe=True,
     maintainer="loolirer",
     maintainer_email="lorenzo.oliveira@ee.ufcg.edu.br",
-    description="HINT perception: semantic ground segmentation (ground_segmenter) whose "
-                "non-ground cells become an obstacle PointCloud2 (/ground/obstacles) for "
-                "the mapless Nav2 local costmap.",
+    description="HINT perception (image space only): semantic ground segmentation "
+                "(ground_segmenter) publishing a binary ground mask (/camera/ground). "
+                "The metric obstacle cloud + debug view live in hint_navigation.",
     license="Apache-2.0",
     extras_require={
         "test": ["pytest"],
@@ -39,7 +39,6 @@ setup(
     entry_points={
         "console_scripts": [
             "ground_segmenter = hint_perception.ground_segmenter:main",
-            "visual_debug = hint_perception.visual_debug:main",
         ],
     },
 )

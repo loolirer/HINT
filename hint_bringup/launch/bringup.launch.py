@@ -96,8 +96,15 @@ def generate_launch_description():
         package="hint_perception",
         executable="ground_segmenter",
         output="screen",
-        parameters=[camera_rig, {"device": "GPU", "model": "segformer-b5-ade"}],
+        parameters=[{"device": "GPU", "model": "segformer-b5-ade"}],
         remappings=[camera_remap],
+    )
+
+    obstacle_projector = Node(
+        package="hint_navigation",
+        executable="obstacle_projector",
+        output="screen",
+        parameters=[camera_rig],
     )
 
     trajectory_navigator = Node(
@@ -165,7 +172,7 @@ def generate_launch_description():
     )
 
     visual_debug = Node(
-        package="hint_perception",
+        package="hint_navigation",
         executable="visual_debug",
         parameters=[camera_rig],
         output="screen",
@@ -195,6 +202,7 @@ def generate_launch_description():
             cartographer,
             occupancy_grid,
             ground_segmenter,
+            obstacle_projector,
             trajectory_navigator,
             trajectory_generator,
             visual_reasoner,
