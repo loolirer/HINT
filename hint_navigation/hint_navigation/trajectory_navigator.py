@@ -58,6 +58,58 @@ def _quat_from_yaw(yaw):
     return (0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0))  # (x, y, z, w)
 
 
+def _smooth_resample(pts, spacing, samples_per_seg=24):
+    """Densify a sparse polyline into a smooth, uniformly-spaced curve.
+
+    Nav2's MPPI path critics (``offset_from_furthest``, path-align) assume a path sampled
+    near costmap resolution; the raw VLM markers are far too sparse (a handful of points
+    over metres), which stalls the optimizer mid-path. This fits a **centripetal**
+    Catmull-Rom spline (alpha=0.5) through ``pts`` (an ``(N, 2)`` array, in order) and
+    resamples it at ~``spacing`` m arc-length steps. Centripetal parameterization keeps the
+    curve close to the polyline with no cusps or self-intersections, so the smoothed path
+    never bows far from the waypoints. Endpoints are clamped (first/last control points are
+    duplicated) so the curve starts/ends exactly on ``pts``.
+
+    Two points give a straight resampled segment; ``pts`` passes through unchanged when it
+    has fewer than 2 points or is already shorter than one ``spacing`` step.
+    """
+    pts = np.asarray(pts, dtype=np.float64)
+    if len(pts) < 2:
+        return pts
+
+    if len(pts) == 2:
+        curve = pts
+    else:
+        # Centripetal knots: t_{i+1} = t_i + |P_{i+1} - P_i|^0.5.
+        d = np.hypot(*np.diff(pts, axis=0).T)
+        t = np.concatenate([[0.0], np.cumsum(np.sqrt(np.maximum(d, 1e-9)))])
+        # Pad with clamped endpoints so every real segment has 4 control points.
+        P = np.vstack([pts[0], pts, pts[-1]])
+        tt = np.concatenate([[t[0] - (t[1] - t[0])], t, [t[-1] + (t[-1] - t[-2])]])
+        segs = []
+        for i in range(1, len(P) - 2):                     # segment P[i] -> P[i+1]
+            t0, t1, t2, t3 = tt[i - 1], tt[i], tt[i + 1], tt[i + 2]
+            if min(t1 - t0, t2 - t1, t3 - t2) <= 0.0:      # degenerate knot — skip
+                continue
+            u = np.linspace(t1, t2, samples_per_seg, endpoint=False)[:, None]
+            A1 = (t1 - u) / (t1 - t0) * P[i - 1] + (u - t0) / (t1 - t0) * P[i]
+            A2 = (t2 - u) / (t2 - t1) * P[i] + (u - t1) / (t2 - t1) * P[i + 1]
+            A3 = (t3 - u) / (t3 - t2) * P[i + 1] + (u - t2) / (t3 - t2) * P[i + 2]
+            B1 = (t2 - u) / (t2 - t0) * A1 + (u - t0) / (t2 - t0) * A2
+            B2 = (t3 - u) / (t3 - t1) * A2 + (u - t1) / (t3 - t1) * A3
+            segs.append((t2 - u) / (t2 - t1) * B1 + (u - t1) / (t2 - t1) * B2)
+        segs.append(pts[-1][None, :])                      # close on the final waypoint
+        curve = np.vstack(segs)
+
+    # Uniform arc-length resample of the smooth curve at ~spacing.
+    s = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(curve, axis=0).T))])
+    if s[-1] < spacing:
+        return pts
+    su = np.linspace(0.0, s[-1], int(s[-1] / spacing) + 1)
+    return np.column_stack([np.interp(su, s, curve[:, 0]),
+                            np.interp(su, s, curve[:, 1])])
+
+
 class TrajectoryNavigatorNode(Node):
     def __init__(self):
         super().__init__("trajectory_navigator_node")
@@ -86,6 +138,10 @@ class TrajectoryNavigatorNode(Node):
         self.declare_parameter("mask_timeout", 5.0)  # s; older mask -> skip clipping
         self.declare_parameter("server_timeout", 10.0)  # s to wait for controller_server
         self.declare_parameter("control_rate", 20.0)  # Hz feedback/poll loop
+        # Smooth-densification spacing (m): the grounded VLM markers are resampled onto a
+        # centripetal Catmull-Rom spline at this arc-length step before FollowPath, so MPPI's
+        # path critics see a dense path (≈ costmap resolution). Live-adjustable.
+        self.declare_parameter("path_resolution", 0.05)
 
         # --- Nav2 FollowPath client ---
         self._fp_client = ActionClient(
@@ -276,6 +332,11 @@ class TrajectoryNavigatorNode(Node):
         odom_pts = odom_pts[keep]
         if len(odom_pts) < 2:
             return None
+
+        # Smooth + densify: fit a centripetal Catmull-Rom through the sparse markers and
+        # resample at ~path_resolution m, so MPPI's path critics get a costmap-resolution
+        # path instead of a few far-apart points (which stalled the optimizer mid-path).
+        odom_pts = _smooth_resample(odom_pts, float(self._p("path_resolution")))
 
         path = Path()
         path.header.frame_id = str(self._p("path_frame"))
