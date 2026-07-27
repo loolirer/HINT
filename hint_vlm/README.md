@@ -7,14 +7,12 @@ Robotics-ER model and live under `hint_vlm/gemini/`.
 
 | Executable | Description |
 |---|---|
-| `description_detector` | Grounds a natural-language description to a bounding box (ROI) on a camera frame |
-| `visual_question` | Answers a yes/no question about a camera frame (VLM sanity-check fallback) |
 | `trajectory_generator` | Plans a ground-restricted trajectory (ordered waypoints + an end-of-move in-place turn) from a text instruction |
 | `visual_reasoner` | Generic text(+optional-image)-in / JSON-out LLM reasoner — the mission planner's director (sees the move's before/after frames) |
 
 Shared plumbing (API-key loading + client, stamped camera ring buffer, timeout-guarded API call, single-goal action lifecycle, **prompt-template loading**) lives in `hint_vlm/gemini/gemini_base.py` as `GeminiActionNode`; each executable subclasses it.
 
-> **Gemini best practices applied** (per the [image-understanding](https://ai.google.dev/gemini-api/docs/image-understanding) and [robotics](https://ai.google.dev/gemini-api/docs/robotics-overview) docs): the contents list is **text-first, then image(s)** — every node calls `_call_api([prompt, *frames])` (with multi-frame order preserved so the prompt can say "the first / second image"). Coordinates follow the ER convention, `[y, x]` normalized `0–1000`. The ER model is tuned to **sample** for spatial reasoning, so pointing/trajectory nodes (`trajectory_generator`, `description_detector`) run **`temperature 1.0`**, not `0.0`; the `visual_question` verdict and the `visual_reasoner` structured-JSON director stay deterministic.
+> **Gemini best practices applied** (per the [image-understanding](https://ai.google.dev/gemini-api/docs/image-understanding) and [robotics](https://ai.google.dev/gemini-api/docs/robotics-overview) docs): the contents list is **text-first, then image(s)** — every node calls `_call_api([prompt, *frames])` (with multi-frame order preserved so the prompt can say "the first / second image"). Coordinates follow the ER convention, `[y, x]` normalized `0–1000`. The ER model is tuned to **sample** for spatial reasoning, so the pointing/trajectory node (`trajectory_generator`) runs **`temperature 1.0`**, not `0.0`; the `visual_reasoner` structured-JSON director stays deterministic.
 >
 > **Structured output — two strengths.** `_call_api(contents, json_output=True)` is **JSON mode** (`response_mime_type=application/json`): it forbids invalid-JSON tokens (killing the degenerate `"<td>"`-style corruption on long replies) while leaving field structure to the model, so reasoning quality is largely preserved. `_call_api(contents, response_schema=…)` is the **stricter** constrained decoding to an exact schema — always valid *and* shaped, but the hard grammar can **cost spatial-reasoning quality**. So `trajectory_generator` defaults to **JSON mode** (see its `structured_output` param) and only uses the full schema on request; the `visual_reasoner` director uses the schema for its narrative (enum-constrained `environment_action`). Plain `_call_api(contents)` stays fully unconstrained.
 
@@ -40,87 +38,18 @@ Alternatively, export `GEMINI_API_KEY` in the container's environment and omit t
 
 ---
 
-## description_detector
+## Common parameters
 
-Converts a text description into a bounding box (ROI) using the Gemini Robotics-ER model, then hands the ROI off to the IBVS pipeline. Subscribes to `/camera/image_raw/compressed` and keeps a ring buffer of the last 30 frames; the action goal carries only a stamp to select the frame.
-
-### Interfaces
-
-| Interface | Type | Direction |
-|---|---|---|
-| `~/ground_description` | `hint_interfaces/action/GroundDescription` | Action server |
-| `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Sub — ring buffer of last 30 frames |
-| `~/debug` | `sensor_msgs/Image` | Pub — latest grounded bbox drawn on the matched frame |
-
-**`ground_description` action fields**
-
-| Field | Type | Description |
-|---|---|---|
-| **Goal** `stamp` | `builtin_interfaces/Time` | Stamp of the frame to ground on; `{sec: 0, nanosec: 0}` uses the latest received frame |
-| **Goal** `description` | `string` | Natural-language description of the target region |
-| **Result** `success` | `bool` | Whether a matching region was found |
-| **Result** `message` | `string` | Label returned by the model, or error reason |
-| **Result** `roi` | `sensor_msgs/RegionOfInterest` | Bounding box of the matched region |
-| **Result** `stamp` | `builtin_interfaces/Time` | Stamp of the frame that was grounded |
-| **Feedback** `state` | `string` | `"RUNNING"` while the API call is in flight |
-
-### Parameters
+Every node subclasses `GeminiActionNode`, so they share this base parameter set (each node's own section lists any extras on top):
 
 | Parameter | Default | Effect |
 |---|---|---|
 | `api_key_path` | `""` | Path to a file containing the Gemini API key; falls back to `GEMINI_API_KEY` env var if empty |
 | `model_id` | `gemini-robotics-er-1.6-preview` | Gemini model to use |
-| `temperature` | `0.0` | Sampling temperature. Default `0.0` (deterministic); the docs recommend **`1.0` for spatial reasoning** (pointing/trajectory), so bringup sets `1.0` for `trajectory_generator` and `description_detector` |
+| `temperature` | `0.0` | Sampling temperature. Default `0.0` (deterministic); the docs recommend **`1.0` for spatial reasoning** (pointing/trajectory), so bringup sets `1.0` for `trajectory_generator` |
 | `api_timeout` | `10.0` | Seconds before the API call is abandoned and the action is aborted |
-| `thinking_budget` | `0` | Gemini thinking budget in tokens (`0` = off). Per-node — raise it for a reasoning-heavy node (e.g. the `visual_reasoner`), leave `0` for the perception nodes |
+| `thinking_budget` | `0` | Gemini thinking budget in tokens (`0` = off). Per-node — raise it for a reasoning-heavy node (e.g. the `visual_reasoner`), leave `0` for the pointing/trajectory node |
 | `prompts_dir` | package `share/prompts` | Directory the node loads its prompt template from |
-
-### Test
-
-```bash
-ros2 action send_goal /description_detector_node/ground_description \
-  hint_interfaces/action/GroundDescription \
-  "{stamp: {sec: 0, nanosec: 0}, description: 'the door on the left'}"
-```
-
----
-
-## visual_question
-
-Answers a yes/no question about a camera frame with the VLM, returning a short rationale. Built as a sanity-check fallback for the approach pipeline: when a sequential approach fails (e.g. the tracker drops the target on close approach), the behavior tree can ask *"is the target still in view?"* and use the verdict to decide between retrying and giving up — turning an ambiguous tracker loss into an explicit yes/no.
-
-Like `description_detector`, it keeps a ring buffer of the last 30 frames; the goal's `stamp` selects the frame (`0` → latest). The result carries **three** states, not two: `answered` is `false` whenever the check could not run (no frame, decode error, timeout, API error, unparseable reply), otherwise `affirmative` holds the yes/no verdict. **Every** path — verdict or "couldn't determine" — *succeeds* at the ROS layer, so the `rationale` always reaches the caller and a sanity check that cannot run never masquerades as a "no". (The node is currently standalone — its BT wrapper was removed; drive it directly via the action.)
-
-### Interfaces
-
-| Interface | Type | Direction |
-|---|---|---|
-| `~/ask` | `hint_interfaces/action/VisualQuestion` | Action server |
-| `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Sub — ring buffer of last 30 frames |
-| `~/debug` | `sensor_msgs/Image` | Pub — frame annotated with the verdict and rationale |
-
-**`ask` action fields**
-
-| Field | Type | Description |
-|---|---|---|
-| **Goal** `stamp` | `builtin_interfaces/Time` | Stamp of the frame to reason about; `{sec: 0, nanosec: 0}` uses the latest received frame |
-| **Goal** `question` | `string` | Yes/no question to ask about the frame |
-| **Result** `answered` | `bool` | `false` if the VLM could not be reached / gave no usable answer |
-| **Result** `affirmative` | `bool` | The yes/no verdict (only meaningful when `answered` is `true`) |
-| **Result** `rationale` | `string` | One-sentence explanation of the answer, or the reason it couldn't answer |
-| **Feedback** `state` | `string` | `"RUNNING"` while the API call is in flight |
-
-### Parameters
-
-Parameters are the same as `description_detector` (`api_key_path`, `model_id`, `temperature`, `api_timeout`, `thinking_budget`, `prompts_dir`).
-
-### Test
-
-```bash
-ros2 action send_goal /visual_question_node/ask \
-  hint_interfaces/action/VisualQuestion \
-  "{stamp: {sec: 0, nanosec: 0}, question: 'is a trash bin visible in the frame?'}"
-```
 
 ---
 
@@ -128,7 +57,7 @@ ros2 action send_goal /visual_question_node/ask \
 
 Plans a **ground-restricted trajectory** from a natural-language instruction using Gemini Robotics-ER's point-defining capability. Given a description (e.g. *"walk to the door keeping to the right of the wall"* or *"reach the table without going over the mattress"*), it returns an ordered set of floor waypoints (`markers`) **and** a signed `turn_degrees` (an in-place rotation to apply at the end of the move — including a turn-only "scan" move with empty `markers`). The `FollowPlannedTrajectory` behavior in `hint_behavior` chains plan → follow → turn: `hint_navigation`'s `trajectory_navigator` grounds the markers into a metric `odom` path and drives them via Nav2's `follow_path` (MPPI), then Nav2's Spin behavior applies `turn_degrees`. This opens room for semantic navigation preferences and constraint-aware waypoint generation.
 
-Built as a sibling of `description_detector`: same inputs (a camera `stamp` + a text field) and the same stamp-based ring buffer / API plumbing (both subclass `GeminiActionNode`). Instead of one bounding box it grounds an **ordered marker array in normalized image space** (`geometry_msgs/Point[]`, `x`/`y ∈ [-1, 1]` (center 0), `z` unused, `markers[0]` nearest → `markers[-1]` farthest) plus the frame `stamp`. The model is prompted to keep points on the traversable ground plane, ordered nearest→farthest, and to honor any semantic preference in the instruction.
+Same stamp-based ring buffer / API plumbing as `visual_reasoner` (both subclass `GeminiActionNode`), with a camera `stamp` + a text field as input. Instead of a single result value it grounds an **ordered marker array in normalized image space** (`geometry_msgs/Point[]`, `x`/`y ∈ [-1, 1]` (center 0), `z` unused, `markers[0]` nearest → `markers[-1]` farthest) plus the frame `stamp`. The model is prompted to keep points on the traversable ground plane, ordered nearest→farthest, and to honor any semantic preference in the instruction.
 
 > **The `reasoning` field is a path note — what the model did and why (F2).** Since the
 > `hint_narrative` director sees the frames directly, `reasoning` is not the narrative's eyes, so the
@@ -173,7 +102,7 @@ Built as a sibling of `description_detector`: same inputs (a camera `stamp` + a 
 
 ### Parameters
 
-Same as `description_detector` (`api_key_path`, `model_id`, `temperature`, `api_timeout`, `thinking_budget`, `prompts_dir`), plus:
+The [common parameters](#common-parameters) (`api_key_path`, `model_id`, `temperature`, `api_timeout`, `thinking_budget`, `prompts_dir`), plus:
 
 | Parameter | Default | Effect |
 |---|---|---|
@@ -247,7 +176,7 @@ Because the prompts belong to the caller, the mission planner keeps them as data
 
 ### Parameters
 
-Parameters are the same as `description_detector` (`api_key_path`, `model_id`,
+The [common parameters](#common-parameters) (`api_key_path`, `model_id`,
 `temperature`, `api_timeout`, `thinking_budget`, `prompts_dir`). For the reasoner's
 narrative-heavy compile you may want a non-zero `thinking_budget`. Plus, mirroring
 `trajectory_generator`:
