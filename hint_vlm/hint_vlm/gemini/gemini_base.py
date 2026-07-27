@@ -53,7 +53,7 @@ class GeminiActionNode(Node):
     ):
         super().__init__(node_name)
 
-        share = get_package_share_directory("gemini_robotics_er")
+        share = get_package_share_directory("hint_vlm")
         self.declare_parameter("api_key_path", "")
         self.declare_parameter("model_id", DEFAULT_MODEL_ID)
         self.declare_parameter("temperature", 0.0)

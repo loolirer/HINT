@@ -1,6 +1,7 @@
-# gemini_robotics_er
+# hint_vlm
 
-ROS2 package of nodes powered by the Gemini Robotics-ER model for HINT.
+ROS2 package of VLM-powered nodes for HINT. The runtime nodes are powered by the Gemini
+Robotics-ER model and live under `hint_vlm/gemini/`.
 
 ## Nodes
 
@@ -11,7 +12,7 @@ ROS2 package of nodes powered by the Gemini Robotics-ER model for HINT.
 | `trajectory_generator` | Plans a ground-restricted trajectory (ordered waypoints + an end-of-move in-place turn) from a text instruction |
 | `visual_reasoner` | Generic text(+optional-image)-in / JSON-out LLM reasoner — the mission planner's director (sees the move's before/after frames) |
 
-Shared plumbing (API-key loading + client, stamped camera ring buffer, timeout-guarded API call, single-goal action lifecycle, **prompt-template loading**) lives in `gemini_robotics_er/gemini_base.py` as `GeminiActionNode`; each executable subclasses it.
+Shared plumbing (API-key loading + client, stamped camera ring buffer, timeout-guarded API call, single-goal action lifecycle, **prompt-template loading**) lives in `hint_vlm/gemini/gemini_base.py` as `GeminiActionNode`; each executable subclasses it.
 
 > **Gemini best practices applied** (per the [image-understanding](https://ai.google.dev/gemini-api/docs/image-understanding) and [robotics](https://ai.google.dev/gemini-api/docs/robotics-overview) docs): the contents list is **text-first, then image(s)** — every node calls `_call_api([prompt, *frames])` (with multi-frame order preserved so the prompt can say "the first / second image"). Coordinates follow the ER convention, `[y, x]` normalized `0–1000`. The ER model is tuned to **sample** for spatial reasoning, so pointing/trajectory nodes (`trajectory_generator`, `description_detector`) run **`temperature 1.0`**, not `0.0`; the `visual_question` verdict and the `visual_reasoner` structured-JSON director stay deterministic.
 >
@@ -24,14 +25,14 @@ Shared plumbing (API-key loading + client, stamped camera ring buffer, timeout-g
 `hint_interfaces` must be built first (or in the same invocation) because the action definitions live there:
 
 ```bash
-colcon build --symlink-install --packages-select hint_interfaces gemini_robotics_er
+colcon build --symlink-install --packages-select hint_interfaces hint_vlm
 source install/setup.bash
 ```
 
 **API key** — place your Gemini API key in `secrets/gemini_api_key.txt` at the repository root, then pass the path as a parameter:
 
 ```bash
-ros2 run gemini_robotics_er description_detector \
+ros2 run hint_vlm trajectory_generator \
   --ros-args -p api_key_path:=/root/turtlebot3_ws/src/../secrets/gemini_api_key.txt
 ```
 
@@ -131,7 +132,7 @@ Built as a sibling of `description_detector`: same inputs (a camera `stamp` + a 
 
 > **The `reasoning` field is a path note — what the model did and why (F2).** Since the
 > `hint_narrative` director sees the frames directly, `reasoning` is not the narrative's eyes, so the
-> prompt (`prompts/trajectory_planner.txt`) asks for a short (1-2 sentence) note of the **path shape**
+> prompt (`prompts/trajectory_generator.txt`) asks for a short (1-2 sentence) note of the **path shape**
 > and any constraint that forced it (e.g. *"a soft curve left around the chair toward the doorway"*),
 > not a full scene report. It rides out on the result `message`; the mission BT logs it, but the
 > director judges the move from the before/after images, not from this note. On an empty `waypoints`

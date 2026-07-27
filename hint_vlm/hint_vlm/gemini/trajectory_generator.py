@@ -8,7 +8,7 @@ from rclpy.executors import MultiThreadedExecutor
 from geometry_msgs.msg import Point
 from hint_interfaces.action import PlanTrajectory
 
-from gemini_robotics_er.gemini_base import GeminiActionNode
+from hint_vlm.gemini.gemini_base import GeminiActionNode
 
 
 class TrajectoryPlannerNode(GeminiActionNode):
@@ -85,7 +85,7 @@ class TrajectoryPlannerNode(GeminiActionNode):
         # current one, so "the last image attached" is my current view.
         hist = self._history_window()
         prompt = self._fill_prompt(
-            "trajectory_planner.txt", description=goal.description,
+            "trajectory_generator.txt", description=goal.description,
             min_row=int(self._p("min_row")), return_spec=self._return_spec(n),
             continuity=self._continuity_text(hist))
         contents = [prompt] + [img for img, _ in hist] + [pil_img]

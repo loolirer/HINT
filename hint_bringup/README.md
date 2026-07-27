@@ -19,8 +19,8 @@ in one place. It has no nodes of its own; `launch/bringup.launch.py` starts the 
 - `trajectory_navigator` (`hint_navigation`) — grounds VLM markers → `odom` path → Nav2 `follow_path`
 - `visual_debug` (`hint_navigation`) — composes one `/debug` image (mask overlay + navigator paths + BT state)
 - the mapless Nav2 stack via `hint_navigation/launch/nav2.launch.py`: `controller_server` (FollowPath + MPPI), `behavior_server` (Spin), `nav2_lifecycle_manager`
-- `trajectory_generator` (`gemini_robotics_er`) — VLM ground-trajectory planner (+ end-of-move turn)
-- `visual_reasoner` (`gemini_robotics_er`) — generic text/vision → JSON reasoner (the narrative director)
+- `trajectory_generator` (`hint_vlm`) — VLM ground-trajectory planner (+ end-of-move turn)
+- `visual_reasoner` (`hint_vlm`) — generic text/vision → JSON reasoner (the narrative director)
 - `narrative_navigation` (`hint_narrative`) — semantic mission planner
 - `behavior_server` (`hint_behavior`; runtime node `hint_behavior_server`) — the BT executor running `RunMission`
 - `rviz2`

@@ -15,7 +15,7 @@
   <exec_depend>hint_narrative</exec_depend>
   <exec_depend>hint_navigation</exec_depend>
   <exec_depend>hint_perception</exec_depend>
-  <exec_depend>gemini_robotics_er</exec_depend>
+  <exec_depend>hint_vlm</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>gemini_robotics_er</name>
+  <name>hint_vlm</name>
   <version>0.0.0</version>
-  <description>Gemini Robotics-ER nodes for HINT</description>
+  <description>VLM-powered nodes for HINT (Gemini Robotics-ER)</description>
   <maintainer email="lorenzo.oliveira@ee.ufcg.edu.br">loolirer</maintainer>
   <license>Apache-2.0</license>
 

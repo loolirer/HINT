@@ -7,7 +7,7 @@ from rclpy.executors import MultiThreadedExecutor
 
 from hint_interfaces.action import Reason
 
-from gemini_robotics_er.gemini_base import GeminiActionNode
+from hint_vlm.gemini.gemini_base import GeminiActionNode
 
 
 class ReasonerNode(GeminiActionNode):
@@ -40,7 +40,7 @@ class ReasonerNode(GeminiActionNode):
         super().__init__("visual_reasoner")
 
         # Output control (quality vs validity) when a schema is requested, same
-        # knob as trajectory_planner, live-adjustable:
+        # knob as trajectory_generator, live-adjustable:
         #   "json"   (default) JSON mode — valid JSON, keeps reasoning freedom;
         #   "off"    unconstrained — best quality, but a reply can be unparseable;
         #   "schema" constrained decoding to the schema (enum-enforced), but the

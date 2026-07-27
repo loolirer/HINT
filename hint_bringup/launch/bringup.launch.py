@@ -115,7 +115,7 @@ def generate_launch_description():
     )
 
     trajectory_generator = Node(
-        package="gemini_robotics_er",
+        package="hint_vlm",
         executable="trajectory_generator",
         output="screen",
         parameters=[
@@ -133,7 +133,7 @@ def generate_launch_description():
     )
 
     visual_reasoner = Node(
-        package="gemini_robotics_er",
+        package="hint_vlm",
         executable="visual_reasoner",
         output="screen",
         parameters=[

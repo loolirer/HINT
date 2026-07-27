@@ -12,9 +12,9 @@ source install/setup.bash
 
 | Interface | Shape | Used by |
 |---|---|---|
-| `action/PlanTrajectory` | goal `{stamp, description}` → result `{success, message, markers, turn_degrees, stamp}` / feedback `{state}` | `gemini_robotics_er/trajectory_generator` — plans ground waypoints **and** an end-of-move turn |
+| `action/PlanTrajectory` | goal `{stamp, description}` → result `{success, message, markers, turn_degrees, stamp}` / feedback `{state}` | `hint_vlm/trajectory_generator` — plans ground waypoints **and** an end-of-move turn |
 | `action/FollowTrajectory` | goal `{waypoints, stamp}` → result `{success, message}` / feedback `{state}` | `hint_navigation/trajectory_navigator` — grounds the waypoints and drives Nav2's `follow_path` |
-| `action/Reason` | goal `{prompt, schema, images}` → result `{success, response}` / feedback `{state}` | `gemini_robotics_er/visual_reasoner` — generic text(+image)-in / JSON-out reasoning |
+| `action/Reason` | goal `{prompt, schema, images}` → result `{success, response}` / feedback `{state}` | `hint_vlm/visual_reasoner` — generic text(+image)-in / JSON-out reasoning |
 | `action/MissionAdvance` | goal `{success, observation, mission_path}` → result `{mission_done, mission_failed, description, area, message}` / feedback `{state}` | `hint_narrative/narrative_navigation` — report-and-advance cycle of the mission loop |
 
 ### `PlanTrajectory` result fields
@@ -32,8 +32,8 @@ removed. Kept in the package but currently unwired:
 - `msg/VisualWaypoints`, `srv/SetTarget`, `srv/SetWaypoints`, `srv/StopTracking`
 - `action/ApproachTarget`, `action/GroundDescription`, `action/VisualQuestion`
 
-`gemini_robotics_er` still ships `description_detector`/`visual_question` nodes (using
-`GroundDescription`/`VisualQuestion`), but they are not launched or wired into the BT.
+The `GroundDescription`/`VisualQuestion`/`ApproachTarget` actions (plus the `msg`/`srv`
+tracking interfaces) are retained for reference but no longer have live nodes in `hint_vlm`.
 
 > The `.action` / `.msg` / `.srv` files under `action/`, `msg/`, `srv/` are the source of
 > truth for exact field definitions.
