@@ -1,13 +1,19 @@
 # Goal
 # Ordered ground waypoints to follow, normalized image space (point.x, point.y in
-# [-1, 1], center = 0; z unused), nearest-first — the PlanPath.markers /
-# SetWaypoints layout. Handed straight to waypoint_tracker's set_waypoints.
+# [-1, 1], center = 0; z unused), nearest-first — the PlanPath.markers layout.
+# hint_navigation/path_projector grounds them into an odom nav_msgs/Path and drives
+# Nav2's follow_path (MPPI).
 geometry_msgs/Point[] waypoints
-# Frame to initialise tracking on; {sec: 0, nanosec: 0} uses the next frame.
+# Stamp of the frame the waypoints were defined on (from PlanPath.stamp): the
+# projector looks up the robot pose at this time to ground the image markers into
+# odom. {sec: 0, nanosec: 0} uses the latest frame.
 builtin_interfaces/Time stamp
 ---
 # Result
-bool success
+# Success/failure is the action's terminal status (SUCCEEDED vs ABORTED) — no
+# redundant `success` bool (matching PlanPath / Reason). Reaching the goal (or a
+# turn-only no-op with no drivable path) SUCCEEDS; a blocked/no-progress follow,
+# a rejected goal, or a grounding failure ABORTS, with the reason in `message`.
 string message
 ---
 # Feedback

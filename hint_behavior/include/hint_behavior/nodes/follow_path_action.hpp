@@ -12,8 +12,9 @@
 namespace hint_behavior
 {
 
-// Follows a ground path via visual_servoing's pursuit_servo FollowPath
-// action (pure pursuit until every waypoint has passed under the robot).
+// Follows a ground path via hint_navigation's path_projector FollowPath action,
+// which grounds the normalized waypoints into an odom nav_msgs/Path and drives
+// Nav2's follow_path (MPPI) until the goal is reached.
 class FollowPathAction
   : public BT::RosActionNode<hint_interfaces::action::FollowPath>
 {
@@ -35,12 +36,10 @@ public:
     return true;
   }
 
-  BT::NodeStatus onResultReceived(const WrappedResult & wr) override
+  BT::NodeStatus onResultReceived(const WrappedResult &) override
   {
-    if (!wr.result->success) {
-      RCLCPP_WARN(logger(), "Follow path failed: %s", wr.result->message.c_str());
-      return BT::NodeStatus::FAILURE;
-    }
+    // Only reached on a SUCCEEDED goal (aborts/cancels go to onFailure), so the
+    // follow completed — no success bool to check.
     return BT::NodeStatus::SUCCESS;
   }
 

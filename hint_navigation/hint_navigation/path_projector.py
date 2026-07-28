@@ -379,7 +379,6 @@ class PathProjectorNode(Node):
             if raw_path is not None:
                 self._publish_path(raw_path, self._raw_path_pub)  # still show the intent
             result = FollowPath.Result()
-            result.success = True
             result.message = "No drivable path (turn-only or clipped off-ground)"
             goal_handle.succeed()
             return result
@@ -439,28 +438,24 @@ class PathProjectorNode(Node):
         if goal_handle.is_cancel_requested or status == GoalStatus.STATUS_CANCELED:
             goal_handle.canceled()
             result = FollowPath.Result()
-            result.success = False
             result.message = "Cancelled by client"
             return result
 
         result = FollowPath.Result()
         if status == GoalStatus.STATUS_SUCCEEDED:
-            result.success = True
             result.message = "Path complete (Nav2 FollowPath reached the goal)"
             goal_handle.succeed()
         else:
-            result.success = False
             result.message = (
                 "Nav2 FollowPath did not reach the goal "
                 f"(status {status}) — path blocked / no progress"
             )
-            goal_handle.abort()
+            goal_handle.abort()   # ABORTED status is the failure signal
         return result
 
     def _abort(self, goal_handle, message):
         goal_handle.abort()
         result = FollowPath.Result()
-        result.success = False
         result.message = message
         self.get_logger().warn(f"FollowPath aborted: {message}")
         return result
