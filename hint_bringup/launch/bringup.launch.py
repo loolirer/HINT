@@ -125,11 +125,9 @@ def generate_launch_description():
                 "thinking_budget": 0,
                 "temperature": 1.0,
                 "n_candidates": 1,
-                "history_frames": 2,
                 "structured_output": "json",
             }
         ],
-        remappings=[camera_remap],
     )
 
     visual_reasoner = Node(
@@ -144,7 +142,6 @@ def generate_launch_description():
                 "structured_output": "json",
             }
         ],
-        remappings=[camera_remap],
     )
 
     narrative_navigation = Node(
@@ -153,7 +150,7 @@ def generate_launch_description():
         output="screen",
         parameters=[
             {
-                "history_frames": 2,
+                "history_frames": 1,
             }
         ],
         remappings=[camera_remap],
