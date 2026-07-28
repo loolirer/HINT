@@ -140,6 +140,23 @@ def _compose_up(child, transforms, ref):
     return x, y, wrap(yaw)
 
 
+def _point_up(px, py, frame, transforms, ref):
+    """A single point ``(px, py)`` expressed in ``frame``, re-expressed in ``ref`` by walking
+    the same parent chain as :func:`_compose_up`. ``None`` if the chain breaks. When
+    ``frame == ref`` the point is returned unchanged."""
+    x, y = px, py
+    seen = set()
+    while frame != ref:
+        if frame in seen or frame not in transforms:
+            return None
+        seen.add(frame)
+        parent, tx, ty, pyaw = transforms[frame]
+        c, s = math.cos(pyaw), math.sin(pyaw)
+        x, y = c * x - s * y + tx, s * x + c * y + ty
+        frame = parent
+    return x, y
+
+
 def read_bag(bag_path):
     """Single pass over the bag. Returns a dict of everything the plot needs."""
     reader, type_map = _open(bag_path)
@@ -192,7 +209,13 @@ def read_bag(bag_path):
                          for ps in pm.poses)
             if poly and poly not in seen_paths[topic]:
                 seen_paths[topic].add(poly)
-                paths[topic].append([(x, y) for x, y in poly])
+                # The path is published in its header frame (``odom``); snapshot the tf state
+                # in effect now (messages arrive in time order, so ``transforms`` already holds
+                # the live map<-odom) so it can be re-expressed in the plot's reference frame
+                # after that frame is known. Values are tuples, so a shallow copy is stable.
+                paths[topic].append({"frame": pm.header.frame_id.lstrip("/"),
+                                     "poly": [(x, y) for x, y in poly],
+                                     "tf": dict(transforms)})
 
         elif topic.endswith("/_action/status"):
             arr = deserialize_message(data, mtype(topic))
@@ -214,6 +237,22 @@ def read_bag(bag_path):
     # Reference frame: map if a map frame was published (or /map exists), else odom.
     ref = "map" if ("map" in parents or has_map) else "odom"
 
+    def resolve_paths(entries):
+        """Re-express each stored path polyline (in its own header frame, e.g. ``odom``) in
+        the plot reference frame, using the tf snapshot taken when it was published. A path
+        already in ``ref`` (or whose chain can't be resolved) is kept as-is."""
+        out = []
+        for e in entries:
+            pts = []
+            for x, y in e["poly"]:
+                q = _point_up(x, y, e["frame"], e["tf"], ref)
+                if q is None:            # chain broke — keep the raw points rather than drop
+                    pts = list(e["poly"])
+                    break
+                pts.append(q)
+            out.append(pts)
+        return out
+
     # Replay /tf to build the actual path in the reference frame.
     running = {}
     for t, step in tf_raw:
@@ -227,8 +266,8 @@ def read_bag(bag_path):
         "ref": ref,
         "occ": occ,
         "actual": tf_samples if tf_samples else odom_samples,
-        "paths": paths[_PATH_TOPIC],
-        "paths_raw": paths[_PATH_RAW_TOPIC],
+        "paths": resolve_paths(paths[_PATH_TOPIC]),
+        "paths_raw": resolve_paths(paths[_PATH_RAW_TOPIC]),
         "status": status,
         "span": (t_min, t_max),
     }
