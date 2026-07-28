@@ -67,6 +67,14 @@ Per goal it:
    robot follows it while it stays put in `odom` (Nav2 tracks the robot against it via the
    `odom → base_link` TF). Prepends the robot's own pose so the path starts at the robot; each
    pose's yaw is the path tangent.
+1. **Smooths + densifies** the grounded points before handing them to MPPI: a **centripetal
+   Catmull-Rom** spline is fit through the (few, far-apart) markers and resampled at
+   `path_resolution` m (default `0.05`, ≈ costmap resolution). MPPI's path critics
+   (`offset_from_furthest`, path-align) are index-based and assume a costmap-resolution path;
+   feeding them the raw sparse markers stalled the optimizer mid-path on long trajectories
+   (the robot slowed and turned in place until `FollowPath` aborted). Centripetal
+   parameterization keeps the smoothed curve close to the polyline (no cusps/overshoot), and
+   the endpoints stay exactly on the robot pose and final marker.
 2. **Calls** `follow_path` (`controller_id: FollowPath`), relays feedback, and maps the
    result: Nav2 `SUCCEEDED` → `success=true`; `ABORTED` (incl. `SimpleProgressChecker` firing
    on an unreachable goal — the "stall" backstop) / `CANCELED` / rejected → `success=false`.
@@ -99,7 +107,8 @@ this package; injected by bringup — see [camera_rig](#camera_rig-camera_rigpy)
 / `image_height` (marker normalization reference, default 640×480); `follow_path_action`
 (default `/follow_path`), `controller_id` (`FollowPath`), `goal_checker_id` (`goal_checker`),
 `progress_checker_id` (`progress_checker`); `odom_topic`, `path_frame` (`odom`),
-`server_timeout`, `control_rate`.
+`server_timeout`, `control_rate`; `path_resolution` (`0.05` m — Catmull-Rom
+smooth-densification spacing for the path handed to MPPI; live-adjustable).
 
 ## obstacle_projector
 

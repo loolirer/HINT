@@ -78,9 +78,11 @@ redirect them anywhere else.)
 ## The loop, in one line
 
 Per cycle there are **two VLM calls** with a clean division of labour — **both see**:
-- **trajectory_generator (executor-with-eyes):** the narrative's `next` + the current frame →
+- **trajectory_generator (executor-with-eyes):** the narrative's `next` + this cycle's frame buffer →
   waypoints **and** a short reasoning `message` (what it did / why). The BT logs that message, but it
-  is **not** fed to the director.
+  is **not** fed to the director. The planner has no camera of its own: it receives the **same** frames
+  the director just judged — this node passes them out on the `advance` result's `images`, and the BT
+  forwards them to `PlanTrajectory.images`. One buffer feeds both calls (no second buffer to drift).
 - **reasoner (director-with-eyes):** one `compile.txt` call that reasons over the **before/after
   frames of the move just executed** (captured by this node and attached to the call) plus the
   narrative — it judges the move from the images, folds it in, and emits the next instruction +
@@ -93,8 +95,10 @@ frame), keeping a rolling buffer of the last **N**. Each `advance` passes those 
 current view (oldest → current) to the reasoner via the `Reason` goal's `images`, so the director sees
 the *sequence* of its recent views and judges its moves against ground truth — closing the old
 **one-action-behind lag**. `N=1` is the before/after pair (default), `N=0` is current-view-only (no
-move comparison), `N=3–4` is deeper history (more image tokens = more latency/cost). Only *images* are
-buffered — the director's text memory (`done`) already carries the narrative history.
+move comparison), `N=3–4` is deeper history (more image tokens = more latency/cost). This **same**
+buffer is handed to the trajectory planner (on the `advance` result's `images`), so `history_frames`
+is the single knob governing frame depth for both VLM calls. Only *images* are buffered — the
+director's text memory (`done`) already carries the narrative history.
 
 ## Data contract 1 — Semantic Plan (`missions/*.yaml`)
 
@@ -226,7 +230,7 @@ mission loaded and none provided fails cleanly (`mission_failed`).
 |---|---|---|
 | `~/advance` | `hint_interfaces/action/MissionAdvance` | Action server |
 | `/visual_reasoner/reason` (see `reasoner_action`) | `hint_interfaces/action/Reason` | Action client — the narrative recompile (with before/after frames) |
-| `/camera/image_raw/compressed` (see `camera_topic`) | `sensor_msgs/CompressedImage` | Sub — latest frame; latched into the director's rolling image buffer (`history_frames`) |
+| `/camera/image_raw/compressed` (see `camera_topic`) | `sensor_msgs/CompressedImage` | Sub — latest frame; latched into the **unified** rolling image buffer (`history_frames`), fed to both the director and (via the `advance` result's `images`) the trajectory planner |
 
 **`advance`** — Goal: `success` (did the last move execute?), `observation` (the planner's VLM
 reasoning, verbatim), `mission_path` (optional — the mission to run; loads/switches it when it
@@ -236,8 +240,11 @@ applies the queue edit + recompiles the narrative (`compile.txt` → reasoner), 
 snapshot, and returns Result:
 `mission_done` (queue empty **or** failed), `mission_failed` (stuck past the cap, or an unrecoverable
 compile/IO error), `description` (= the narrative's `next`), `area` (= the current queue head),
-`message` (= the narrative's `done`, or the failure reason). On the first call nothing has executed
-(`success` defaults true, `observation` empty) so it just emits the opening instruction.
+`message` (= the narrative's `done`, or the failure reason), and `images` (this cycle's unified frame
+buffer, oldest first, last = current view — the BT forwards it to `PlanTrajectory.images` so the
+planner plans over the same frames the director judged; empty when `mission_done`). On the first call
+nothing has executed (`success` defaults true, `observation` empty) so it just emits the opening
+instruction.
 
 ### Parameters
 
