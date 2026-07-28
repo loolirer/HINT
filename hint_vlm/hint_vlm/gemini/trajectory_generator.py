@@ -12,6 +12,17 @@ from hint_vlm.gemini.gemini_base import GeminiActionNode
 
 
 class TrajectoryPlannerNode(GeminiActionNode):
+    """Plans a ground-restricted trajectory from a text instruction + goal frames.
+
+    Like ``visual_reasoner``, it holds no camera buffer of its own: the frames to
+    plan over arrive in the ``PlanTrajectory`` goal's ``images`` list (the single
+    buffer owned by ``hint_narrative``), oldest first — the LAST is the current
+    view the path is planned on, any earlier ones are recent past views attached
+    for continuity. This keeps the planner and the mission director reasoning over
+    exactly the same frames (no buffer to drift out of sync). Buffer depth is set
+    once, on ``hint_narrative``'s ``history_frames``.
+    """
+
     def __init__(self):
         super().__init__("trajectory_generator")
 
@@ -32,16 +43,6 @@ class TrajectoryPlannerNode(GeminiActionNode):
         #   "schema" constrained to the schema — always valid+shaped, but the hard
         #            grammar can cost spatial-reasoning quality.
         self.declare_parameter("structured_output", "json")
-
-        # Continuity buffer: the last N (frame, my-own-reasoning) pairs are attached
-        # ahead of the current frame, so each plan continues my own approach across
-        # the view change instead of starting cold. I store my OWN reasoning (spatial
-        # read + path intent), not the instruction I was fed. N = history_frames,
-        # live-adjustable:
-        #   0 -> stateless (current frame only); 1 -> last step; 3-4 -> deeper history
-        #   (each extra frame is more image tokens = more latency/cost).
-        self.declare_parameter("history_frames", 1)
-        self._history = []   # list of (pil_img, reasoning), oldest first
 
         self._action_server = ActionServer(
             self,
@@ -65,14 +66,25 @@ class TrajectoryPlannerNode(GeminiActionNode):
 
         self._publish_feedback(goal_handle, "RUNNING")
 
-        compressed, stamp = self._resolve_frame(goal.stamp)
-        if compressed is None:
-            return self._abort(goal_handle, "No camera frame received yet.")
-
+        # Frames come from the goal (the unified hint_narrative buffer), oldest
+        # first: the LAST is the current view the path is planned on, the earlier
+        # ones are continuity. The current view must decode — its stamp grounds the
+        # follow — while an unreadable past frame is just dropped.
+        if not goal.images:
+            return self._abort(goal_handle, "No camera frame supplied in the goal.")
+        *past_msgs, current_msg = goal.images
         try:
-            _, pil_img = self._frame_to_pil(compressed)
+            _, pil_img = self._frame_to_pil(current_msg)
         except Exception as e:
             return self._abort(goal_handle, f"Image conversion failed: {e}")
+        stamp = current_msg.header.stamp
+        hist = []
+        for msg in past_msgs:
+            try:
+                _, pil = self._frame_to_pil(msg)
+                hist.append(pil)
+            except Exception as e:  # noqa: BLE001 — skip an unreadable continuity frame
+                self.get_logger().warn(f"Skipping an unreadable continuity frame: {e}")
 
         if goal_handle.is_cancel_requested:
             return self._cancel(goal_handle)
@@ -81,14 +93,11 @@ class TrajectoryPlannerNode(GeminiActionNode):
         # candidate_count>1, so the prompt asks for N paths in a single response
         # (via {return_spec}) and we pick the medoid. n<=1 is the plain single plan.
         n = max(1, int(self._p("n_candidates")))
-        # Continuity buffer: the last N past frames (oldest first) go before the
-        # current one, so "the last image attached" is my current view.
-        hist = self._history_window()
         prompt = self._fill_prompt(
             "trajectory_generator.txt", description=goal.description,
             min_row=int(self._p("min_row")), return_spec=self._return_spec(n),
-            continuity=self._continuity_text(hist))
-        contents = [prompt] + [img for img, _ in hist] + [pil_img]
+            continuity=self._continuity_text(len(hist)))
+        contents = [prompt] + hist + [pil_img]
         mode = str(self._p("structured_output")).lower()
         schema = self._response_schema(n) if mode == "schema" else None
         try:
@@ -137,13 +146,7 @@ class TrajectoryPlannerNode(GeminiActionNode):
             reasoning, markers, points, turn = first_reason, [], [], first_turn
             self.get_logger().info(f"No waypoints — turn-only/no-op move ({turn:+.0f} deg).")
 
-        # Push this frame + the chosen reasoning into the buffer, trimmed to N.
-        self._history.append((pil_img, reasoning))
-        k = max(0, int(self._p("history_frames")))
-        self._history = self._history[-k:] if k else []
-
         result = PlanTrajectory.Result()
-        result.success = True
         # The VLM's brief explanation of the chosen path rides on `message`.
         result.message = reasoning or f"{len(markers)} waypoint(s), turn {turn:+.0f} deg"
         result.markers = markers
@@ -155,33 +158,25 @@ class TrajectoryPlannerNode(GeminiActionNode):
     # ------------------------------------------------------------------
     # Helpers
 
-    def _history_window(self):
-        """The last N (frame, reasoning) pairs to attach as continuity (N =
-        history_frames; empty when 0)."""
-        k = max(0, int(self._p("history_frames")))
-        return self._history[-k:] if k else []
-
     @staticmethod
-    def _continuity_text(hist):
-        """The {continuity} token: the N past frames (oldest first) + what I planned
-        at each, or empty when the buffer is off/empty.
+    def _continuity_text(n_past):
+        """The {continuity} token describing the ``n_past`` past frames attached
+        ahead of the current view (empty when there are none).
 
-        The frames are attached BEFORE the current view; this note labels them and
-        says to continue my own approach across the change — the current instruction
-        still wins.
+        Frames arrive in the goal (the unified hint_narrative buffer), oldest first;
+        the last is the current view, the earlier ``n_past`` are recent past views.
+        Only the images travel — no per-frame reasoning note — so the caption just
+        labels them and says to continue the approach across the view change, with
+        the current instruction still winning.
         """
-        if not hist:
+        if n_past <= 0:
             return ""
-        k = len(hist)
-        lines = [f"{k + 1} images are attached, oldest first; the LAST is my CURRENT view — the "
-                 f"earlier {k} are my recent past view(s), with what I planned at each:"]
-        for i, (_, reasoning) in enumerate(hist, 1):
-            lines.append(f'- view {i}: "{(reasoning or "(no note)").strip()}"')
-        lines.append(
-            "I continue that approach across how the view has changed — build on the progress, do "
-            "not re-plan from scratch. But the CURRENT instruction WINS: if it now points somewhere "
+        return (
+            f"{n_past + 1} images are attached, oldest first; the LAST is my CURRENT view — the "
+            f"earlier {n_past} are my recent past view(s) from the moves that led here. I read how "
+            "the view has changed and CONTINUE my approach across it — build on the progress, do not "
+            "re-plan from scratch. But the CURRENT instruction WINS: if it now points somewhere "
             "different, I follow it and drop the old plan.")
-        return "\n".join(lines)
 
     @staticmethod
     def _response_schema(n):
@@ -342,15 +337,13 @@ class TrajectoryPlannerNode(GeminiActionNode):
     def _abort(self, goal_handle, message):
         self.get_logger().warn(message)
         result = PlanTrajectory.Result()
-        result.success = False
         result.message = message
-        goal_handle.abort()
+        goal_handle.abort()   # ABORTED status is the failure signal
         return result
 
     def _cancel(self, goal_handle):
         goal_handle.canceled()
         result = PlanTrajectory.Result()
-        result.success = False
         result.message = "Cancelled"
         return result
 

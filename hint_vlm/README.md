@@ -10,7 +10,7 @@ Robotics-ER model and live under `hint_vlm/gemini/`.
 | `trajectory_generator` | Plans a ground-restricted trajectory (ordered waypoints + an end-of-move in-place turn) from a text instruction |
 | `visual_reasoner` | Generic text(+optional-image)-in / JSON-out LLM reasoner — the mission planner's director (sees the move's before/after frames) |
 
-Shared plumbing (API-key loading + client, stamped camera ring buffer, timeout-guarded API call, single-goal action lifecycle, **prompt-template loading**) lives in `hint_vlm/gemini/gemini_base.py` as `GeminiActionNode`; each executable subclasses it.
+Shared plumbing (API-key loading + client, per-goal frame decode, timeout-guarded API call, single-goal action lifecycle, **prompt-template loading**) lives in `hint_vlm/gemini/gemini_base.py` as `GeminiActionNode`; each executable subclasses it. Neither node subscribes to a camera — both receive their frames in the action goal (from `hint_narrative`'s single image buffer).
 
 > **Gemini best practices applied** (per the [image-understanding](https://ai.google.dev/gemini-api/docs/image-understanding) and [robotics](https://ai.google.dev/gemini-api/docs/robotics-overview) docs): the contents list is **text-first, then image(s)** — every node calls `_call_api([prompt, *frames])` (with multi-frame order preserved so the prompt can say "the first / second image"). Coordinates follow the ER convention, `[y, x]` normalized `0–1000`. The ER model is tuned to **sample** for spatial reasoning, so the pointing/trajectory node (`trajectory_generator`) runs **`temperature 1.0`**, not `0.0`; the `visual_reasoner` structured-JSON director stays deterministic.
 >
@@ -57,7 +57,7 @@ Every node subclasses `GeminiActionNode`, so they share this base parameter set 
 
 Plans a **ground-restricted trajectory** from a natural-language instruction using Gemini Robotics-ER's point-defining capability. Given a description (e.g. *"walk to the door keeping to the right of the wall"* or *"reach the table without going over the mattress"*), it returns an ordered set of floor waypoints (`markers`) **and** a signed `turn_degrees` (an in-place rotation to apply at the end of the move — including a turn-only "scan" move with empty `markers`). The `FollowPlannedTrajectory` behavior in `hint_behavior` chains plan → follow → turn: `hint_navigation`'s `trajectory_navigator` grounds the markers into a metric `odom` path and drives them via Nav2's `follow_path` (MPPI), then Nav2's Spin behavior applies `turn_degrees`. This opens room for semantic navigation preferences and constraint-aware waypoint generation.
 
-Same stamp-based ring buffer / API plumbing as `visual_reasoner` (both subclass `GeminiActionNode`), with a camera `stamp` + a text field as input. Instead of a single result value it grounds an **ordered marker array in normalized image space** (`geometry_msgs/Point[]`, `x`/`y ∈ [-1, 1]` (center 0), `z` unused, `markers[0]` nearest → `markers[-1]` farthest) plus the frame `stamp`. The model is prompted to keep points on the traversable ground plane, ordered nearest→farthest, and to honor any semantic preference in the instruction.
+Same API plumbing as `visual_reasoner` (both subclass `GeminiActionNode`) — and, like it, **frames arrive in the goal** (`images`) rather than from a camera subscription. The node holds **no buffer of its own**: `hint_narrative` owns the one image buffer and passes it in (last image = current view, earlier ones = continuity), so the planner and the mission director always reason over the *same* frames. Input is thus a text `description` + the `images` list; instead of a single result value it grounds an **ordered marker array in normalized image space** (`geometry_msgs/Point[]`, `x`/`y ∈ [-1, 1]` (center 0), `z` unused, `markers[0]` nearest → `markers[-1]` farthest) plus the current-view frame `stamp` (from `images[-1]`, so `FollowTrajectory` can ground the path). The model is prompted to keep points on the traversable ground plane, ordered nearest→farthest, and to honor any semantic preference in the instruction.
 
 > **The `reasoning` field is a path note — what the model did and why (F2).** Since the
 > `hint_narrative` director sees the frames directly, `reasoning` is not the narrative's eyes, so the
@@ -68,36 +68,35 @@ Same stamp-based ring buffer / API plumbing as `visual_reasoner` (both subclass 
 > list (wall / already there) the node aborts, with the note in the message (via `hint_behavior`'s two-arg
 > `onFailure`).
 >
-> **Continuity buffer (`history_frames` = N).** The node keeps a rolling buffer of the last **N**
-> `(frame, its-own-reasoning)` pairs and attaches those frames (oldest first) ahead of the current one,
-> with a `{continuity}` note listing what it planned at each — so each plan continues its own approach
-> across the view change instead of re-planning cold. It stores its *own* reasoning (spatial read + path
-> intent), not the instruction it was fed — that's redundant with the current one, and prose transfers
-> across frames where raw waypoints would not. **One knob spans the whole spectrum:** `N=0` = stateless
-> (current frame only), `N=1` = last step, `N=3–4` = deeper history — each extra frame is more image
-> tokens, so latency/cost rise with N. The `{continuity}` note also states that the **current
-> instruction wins** if it redirects, so a stale plan can't trap the planner.
+> **Continuity (from the goal's `images`).** When the `images` list carries more than one frame,
+> the earlier ones (oldest first) are recent past views attached ahead of the current view, with a
+> `{continuity}` note that labels them and says to continue the same approach across the view change —
+> so each plan builds on the last instead of re-planning cold. Unlike before, the node keeps no buffer
+> and no per-frame reasoning note travels with the frames (only the images do); the buffer — and its
+> depth — now live in `hint_narrative` (its `history_frames` param), which passes those frames in via
+> `MissionAdvance` → `PlanTrajectory.images`. `history_frames=0` there = current view only (stateless),
+> `1` = last step, `3–4` = deeper history; each extra frame is more image tokens, so latency/cost rise
+> with it. The `{continuity}` note also states that the **current instruction wins** if it redirects, so
+> a stale plan can't trap the planner.
 
 ### Interfaces
 
 | Interface | Type | Direction |
 |---|---|---|
 | `~/plan_trajectory` | `hint_interfaces/action/PlanTrajectory` | Action server |
-| `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Sub — ring buffer of last 30 frames |
 
-> No debug image — visualization is centralized in `hint_perception`'s `visual_debug` node (it projects the navigator's grounded paths onto the frame). This node publishes only its `markers` + `turn_degrees` result.
+> No camera subscription — frames arrive in the goal's `images` (the `hint_narrative` buffer). No debug image either — visualization is centralized in `hint_navigation`'s `visual_debug` node (it projects the navigator's grounded paths onto the frame). This node publishes only its `markers` + `turn_degrees` result.
 
 **`plan_trajectory` action fields**
 
 | Field | Type | Description |
 |---|---|---|
-| **Goal** `stamp` | `builtin_interfaces/Time` | Stamp of the frame to plan on; `{sec: 0, nanosec: 0}` uses the latest received frame |
 | **Goal** `description` | `string` | Natural-language navigation instruction |
-| **Result** `success` | `bool` | Whether a valid ground trajectory was found |
-| **Result** `message` | `string` | The VLM's brief explanation of the chosen path, or the reason no trajectory was found |
+| **Goal** `images` | `sensor_msgs/CompressedImage[]` | Frames to plan over (the `hint_narrative` buffer), oldest first; the **last** is the current view the path is planned on, earlier ones are continuity. Empty → the call aborts |
+| **Result** `message` | `string` | The VLM's brief explanation of the chosen path, or (on `ABORTED`) the reason no trajectory was found. Success/failure is the action's terminal status — no `success` bool |
 | **Result** `markers` | `geometry_msgs/Point[]` | Ordered waypoints in normalized image space (`x`/`y ∈ [-1, 1]` (center 0), `z` unused). May be **empty** for a turn-only move (see `turn_degrees`) |
 | **Result** `turn_degrees` | `float64` | Signed in-place rotation to apply after the path, from the heading the robot ends the path with. **+ = left (CCW)**, **− = right (CW)**, 0 = none. The `hint_behavior` tree feeds this to Nav2's Spin (`SpinAction`) |
-| **Result** `stamp` | `builtin_interfaces/Time` | Stamp of the frame that was planned on |
+| **Result** `stamp` | `builtin_interfaces/Time` | Stamp of the current-view frame that was planned on (`images[-1].header.stamp`) — `FollowTrajectory` grounds the path with the pose at this stamp |
 | **Feedback** `state` | `string` | `"RUNNING"` while the API call is in flight |
 
 ### Parameters
@@ -109,18 +108,25 @@ The [common parameters](#common-parameters) (`api_key_path`, `model_id`, `temper
 | `min_row` | `400` | Farthest image row (of 1000) a waypoint may occupy — caps forward reach. `1000` = right in front, smaller = farther/higher in the frame. The prompt asks the model to keep points at `y ≥ min_row`, and the node **clamps** any that overshoot (far points are where ground grounding is least reliable). Live-adjustable; raise it for shorter, more conservative steps |
 | `n_candidates` | `1` | Consensus sampling in **one** call. `>1` asks the model for N candidate paths in a single reply — a `{"candidates": [...]}` list (this model **rejects** `candidate_count>1`, so N-sampling is done in-prompt, not via the API) — then keeps the **medoid**, the candidate whose arc-length-resampled path is closest to all the others. Robust to the model splitting between routes at `temperature > 0` (and drops spurious "no path" replies as long as one candidate finds a path). `1` = a single plan (today's behaviour). Live-adjustable |
 | `structured_output` | `json` | Output control (quality vs validity), live-adjustable. **`json`** = JSON mode (`response_mime_type=application/json`) — valid JSON without the degenerate-token corruption, while keeping most of the model's reasoning freedom (the recommended default). **`off`** = unconstrained — best free-form quality, but a reply can occasionally be unparseable → that cycle aborts. **`schema`** = full constrained decoding to the waypoint schema — always valid *and* exactly-shaped, but the hard grammar can **cost spatial-reasoning quality** (paths got noticeably worse), so use only when validity matters more than path quality |
-| `history_frames` | `1` | Continuity buffer depth N — how many past `(frame, own-reasoning)` pairs to attach ahead of the current view (see **Continuity buffer** above). `0` = stateless, `1` = last step, `3–4` = deeper history. Each extra frame adds image tokens → more latency/cost. Live-adjustable |
 
 > **Why medoid, not average.** Two valid routes (left vs right of a table) *average* into a path straight through it. The medoid picks the most central *actual* candidate, so it snaps to the majority route instead of interpolating between conflicting ones. Candidates that return no waypoints (wall / already there) don't vote unless **all** of them decline, in which case the node aborts as before. Because the N are drawn in one autoregressive pass they're more **correlated** than independent API samples would be — the prompt asks for genuinely different routes only when the scene is ambiguous, so natural agreement still shows through.
 
 ### Test
 
+The goal now carries the frames to plan over (`images`), so this node is normally driven through
+the mission BT (`hint_narrative` supplies its buffer via `MissionAdvance` → `PlanTrajectory.images`);
+hand-populating a `CompressedImage[]` on the command line is impractical. A bare CLI goal (no images)
+exercises only the abort path:
+
 ```bash
 ros2 action send_goal /trajectory_generator/plan_trajectory \
   hint_interfaces/action/PlanTrajectory \
-  "{stamp: {sec: 0, nanosec: 0}, description: 'walk toward the door keeping to the right side of the hallway'}" \
-  --feedback
+  "{description: 'walk toward the door keeping to the right side of the hallway', images: []}" \
+  --feedback   # aborts: "No camera frame supplied in the goal."
 ```
+
+For an end-to-end test run the mission BT (see `hint_behavior`'s **Run a mission**), which wires the
+narrative buffer into the planner.
 
 ---
 
@@ -170,8 +176,8 @@ Because the prompts belong to the caller, the mission planner keeps them as data
 | **Goal** `prompt` | `string` | Assembled prompt / context to reason over |
 | **Goal** `schema` | `string` | Optional. How it's enforced depends on the `structured_output` param (below). A **real JSON schema** (parses to a dict) *can* drive `response_schema` constrained decoding (mode `schema`); otherwise (or for a loose hint like `'{"x": bool}'`) the shape is appended to the prompt as a hint, gated by JSON mode. Empty → free-form text |
 | **Goal** `images` | `sensor_msgs/CompressedImage[]` | Optional frames to reason over (empty = text-only); order is meaningful (e.g. before, after) |
-| **Result** `success` | `bool` | `true` when the model returned a usable reply (valid JSON when a schema was requested) |
-| **Result** `response` | `string` | The reply — canonical JSON when a schema was requested, else raw text; the failure reason when `success` is `false` |
+| **Result** `response` | `string` | The reply — canonical JSON when a schema was requested, else raw text; on `ABORTED` (failure) the reason. Success/failure is the action's terminal status — no `success` bool |
+| **Result** `stamp` | `builtin_interfaces/Time` | Stamp of the frame reasoned over (`images[-1]`, the current view), mirroring `PlanTrajectory`; `{sec: 0, nanosec: 0}` for a text-only call (no images) |
 | **Feedback** `state` | `string` | `"RUNNING"` while the API call is in flight |
 
 ### Parameters

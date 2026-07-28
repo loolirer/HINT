@@ -1,17 +1,20 @@
 """Shared plumbing for Gemini Robotics-ER action-server nodes.
 
-Every node in this package follows the same pattern: keep a stamped ring
-buffer of camera frames, resolve a goal stamp to one of those frames, ship it
-to the Gemini model with a prompt under a timeout, and expose the whole thing
-as a single-goal-at-a-time action server. This base class factors out that
-plumbing so the concrete nodes only carry their action type, prompt, and
-result mapping.
+Every node in this package follows the same pattern: take the camera frame(s)
+handed to it **in the goal**, ship them to the Gemini model with a prompt under
+a timeout, and expose the whole thing as a single-goal-at-a-time action server.
+This base class factors out that plumbing so the concrete nodes only carry their
+action type, prompt, and result mapping.
+
+Frames arrive in the action goal (``Reason.images`` / ``PlanTrajectory.images``),
+sourced from the one image buffer that lives in ``hint_narrative``. These nodes
+therefore keep **no camera subscription or buffer of their own** — the single
+buffer keeps the director and the planner reasoning over the same frames.
 """
 
 import json
 import os
 import threading
-from collections import deque
 
 import cv2
 from ament_index_python.packages import get_package_share_directory
@@ -21,36 +24,20 @@ from google.genai import types
 from PIL import Image as PILImage
 from rclpy.action import CancelResponse, GoalResponse
 from rclpy.node import Node
-from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
-
-from sensor_msgs.msg import CompressedImage
 
 DEFAULT_MODEL_ID = "gemini-robotics-er-1.6-preview"
-
-# Latest-frame-only camera QoS: keep just the newest frame and drop stale ones
-# rather than queue/retransmit them. best_effort avoids back-pressuring a remote
-# (over-WiFi) publisher; these nodes buffer frames themselves and select by stamp.
-_LATEST_FRAME_QOS = QoSProfile(
-    history=HistoryPolicy.KEEP_LAST,
-    depth=1,
-    reliability=ReliabilityPolicy.BEST_EFFORT,
-)
 
 
 class GeminiActionNode(Node):
     """Base for Gemini Robotics-ER action-server nodes.
 
     Subclasses declare their own action server (bound to :meth:`_execute_cb`,
-    :meth:`_goal_cb`, :meth:`_cancel_cb`) and implement :meth:`_run`.
+    :meth:`_goal_cb`, :meth:`_cancel_cb`) and implement :meth:`_run`. Frames are
+    supplied per-goal and decoded with :meth:`_frame_to_pil`; there is no camera
+    subscription here.
     """
 
-    def __init__(
-        self,
-        node_name,
-        *,
-        buffer_size=30,
-        camera_topic="/camera/image_raw/compressed",
-    ):
+    def __init__(self, node_name):
         super().__init__(node_name)
 
         share = get_package_share_directory("hint_vlm")
@@ -64,13 +51,6 @@ class GeminiActionNode(Node):
         self._client = genai.Client(api_key=self._load_api_key())
         self._bridge = CvBridge()
         self._goal_lock = threading.Lock()
-        # Ring buffer of the last N frames keyed by (sec, nanosec) for
-        # stamp-based lookup.
-        self._frame_buffer: deque = deque(maxlen=buffer_size)
-
-        self.create_subscription(
-            CompressedImage, camera_topic, self._camera_cb, _LATEST_FRAME_QOS
-        )
 
     # ------------------------------------------------------------------
     # Action callbacks — one goal at a time, guarded by _goal_lock.
@@ -96,28 +76,7 @@ class GeminiActionNode(Node):
         raise NotImplementedError
 
     # ------------------------------------------------------------------
-    # Camera subscriber / frame lookup
-
-    def _camera_cb(self, msg):
-        key = (msg.header.stamp.sec, msg.header.stamp.nanosec)
-        self._frame_buffer.append((key, msg))
-
-    def _resolve_frame(self, stamp):
-        """Return ``(CompressedImage, stamp)`` for ``stamp`` (0 → latest)."""
-        if not self._frame_buffer:
-            return None, None
-        target_key = (stamp.sec, stamp.nanosec)
-        if target_key == (0, 0):
-            _, msg = self._frame_buffer[-1]
-            return msg, msg.header.stamp
-        for buf_key, msg in self._frame_buffer:
-            if buf_key == target_key:
-                return msg, msg.header.stamp
-        self.get_logger().warn(
-            f"Frame with stamp {target_key} not in buffer — using latest."
-        )
-        _, msg = self._frame_buffer[-1]
-        return msg, msg.header.stamp
+    # Frame decode
 
     def _frame_to_pil(self, compressed):
         """Decode a CompressedImage into ``(bgr_ndarray, PIL.Image)``."""

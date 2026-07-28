@@ -22,7 +22,7 @@ class ReasonerNode(GeminiActionNode):
     caller still works unchanged.
 
     It inherits ``GeminiActionNode``'s API client, timeout-guarded call and
-    single-goal lifecycle. The inherited camera ring buffer is simply unused.
+    single-goal lifecycle. Frames arrive in the goal (no camera subscription).
 
     Contract: the goal carries a ``prompt`` and an optional ``schema`` (a JSON
     shape the reply must match). When a schema is given the reply is parsed and
@@ -135,8 +135,11 @@ class ReasonerNode(GeminiActionNode):
         self.get_logger().info(f"Reasoned → {response}")
 
         result = Reason.Result()
-        result.success = True
         result.response = response
+        # Report the frame reasoned over (the current view = last image), mirroring
+        # PlanTrajectory. Left as the default zero stamp for a text-only call.
+        if goal.images:
+            result.stamp = goal.images[-1].header.stamp
         goal_handle.succeed()
         return result
 
@@ -162,10 +165,9 @@ class ReasonerNode(GeminiActionNode):
     def _fail(self, goal_handle, message):
         # A reasoning call that could not run is a real failure — abort so the
         # BT leaf sees FAILURE and can retry / branch, with the reason carried
-        # in response.
+        # in response. The ABORTED status is the failure signal (no success bool).
         self.get_logger().warn(message)
         result = Reason.Result()
-        result.success = False
         result.response = message
         goal_handle.abort()
         return result
@@ -173,7 +175,6 @@ class ReasonerNode(GeminiActionNode):
     def _cancel(self, goal_handle):
         goal_handle.canceled()
         result = Reason.Result()
-        result.success = False
         result.response = "Cancelled"
         return result
 
