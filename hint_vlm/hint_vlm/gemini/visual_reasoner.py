@@ -1,8 +1,6 @@
 import json
 
 import rclpy
-from rclpy.action import ActionServer
-from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 
 from hint_interfaces.action import Reason
@@ -21,8 +19,9 @@ class ReasonerNode(GeminiActionNode):
     an empty ``images`` list it degrades to pure text reasoning, so any text-only
     caller still works unchanged.
 
-    It inherits ``GeminiActionNode``'s API client, timeout-guarded call and
-    single-goal lifecycle. Frames arrive in the goal (no camera subscription).
+    It inherits ``GeminiActionNode``'s API client, action server, timeout-guarded
+    call, single-goal lifecycle, and feedback/abort/cancel helpers. Frames arrive
+    in the goal (no camera subscription).
 
     Contract: the goal carries a ``prompt`` and an optional ``schema`` (a JSON
     shape the reply must match). When a schema is given the reply is parsed and
@@ -37,7 +36,7 @@ class ReasonerNode(GeminiActionNode):
     """
 
     def __init__(self):
-        super().__init__("visual_reasoner")
+        super().__init__("visual_reasoner", Reason, "~/reason", "response")
 
         # Output control (quality vs validity) when a schema is requested, same
         # knob as path_planner, live-adjustable:
@@ -46,16 +45,6 @@ class ReasonerNode(GeminiActionNode):
         #   "schema" constrained decoding to the schema (enum-enforced), but the
         #            hard grammar can cost reasoning quality.
         self.declare_parameter("structured_output", "json")
-
-        self._action_server = ActionServer(
-            self,
-            Reason,
-            "~/reason",
-            execute_callback=self._execute_cb,
-            goal_callback=self._goal_cb,
-            cancel_callback=self._cancel_cb,
-            callback_group=ReentrantCallbackGroup(),
-        )
 
         self.get_logger().info("Reasoner node ready — call ~/reason.")
 
@@ -68,7 +57,7 @@ class ReasonerNode(GeminiActionNode):
         self._publish_feedback(goal_handle, "RUNNING")
 
         if not goal.prompt.strip():
-            return self._fail(goal_handle, "Empty prompt.")
+            return self._abort(goal_handle, "Empty prompt.")
 
         want_json = bool(goal.schema.strip())
         mode = str(self._p("structured_output")).lower()
@@ -112,20 +101,20 @@ class ReasonerNode(GeminiActionNode):
             raw = self._call_api(contents, response_schema=response_schema,
                                  json_output=json_output)
         except TimeoutError as e:
-            return self._fail(goal_handle, str(e))
+            return self._abort(goal_handle, str(e))
         except Exception as e:  # noqa: BLE001 — surfaced to caller as FAILURE
-            return self._fail(goal_handle, f"API error: {e}")
+            return self._abort(goal_handle, f"API error: {e}")
 
         if goal_handle.is_cancel_requested:
             return self._cancel(goal_handle)
 
         if raw is None or not raw.strip():
-            return self._fail(goal_handle, "Empty response from model.")
+            return self._abort(goal_handle, "Empty response from model.")
 
         if want_json:
             data = self._parse_json(raw)
             if data is None:
-                return self._fail(
+                return self._abort(
                     goal_handle, f"Unparseable JSON response: {raw!r}"
                 )
             response = json.dumps(data)
@@ -137,7 +126,7 @@ class ReasonerNode(GeminiActionNode):
         result = Reason.Result()
         result.response = response
         # Report the frame reasoned over (the current view = last image), mirroring
-        # PlanPath. Left as the default zero stamp for a text-only call.
+        # PlanVisualPath. Left as the default zero stamp for a text-only call.
         if goal.images:
             result.stamp = goal.images[-1].header.stamp
         goal_handle.succeed()
@@ -156,27 +145,6 @@ class ReasonerNode(GeminiActionNode):
         except (json.JSONDecodeError, TypeError):
             return None
         return obj if isinstance(obj, dict) else None
-
-    def _publish_feedback(self, goal_handle, state):
-        fb = Reason.Feedback()
-        fb.state = state
-        goal_handle.publish_feedback(fb)
-
-    def _fail(self, goal_handle, message):
-        # A reasoning call that could not run is a real failure — abort so the
-        # BT leaf sees FAILURE and can retry / branch, with the reason carried
-        # in response. The ABORTED status is the failure signal (no success bool).
-        self.get_logger().warn(message)
-        result = Reason.Result()
-        result.response = message
-        goal_handle.abort()
-        return result
-
-    def _cancel(self, goal_handle):
-        goal_handle.canceled()
-        result = Reason.Result()
-        result.response = "Cancelled"
-        return result
 
 
 def main(args=None):

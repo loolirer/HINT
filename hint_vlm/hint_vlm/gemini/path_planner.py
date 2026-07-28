@@ -1,12 +1,10 @@
 import numpy as np
 import rclpy
 from google.genai import types
-from rclpy.action import ActionServer
-from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 
 from geometry_msgs.msg import Point
-from hint_interfaces.action import PlanPath
+from hint_interfaces.action import PlanVisualPath
 
 from hint_vlm.gemini.gemini_base import GeminiActionNode
 
@@ -15,7 +13,7 @@ class PathPlannerNode(GeminiActionNode):
     """Plans a ground-restricted path from a text instruction + goal frames.
 
     Like ``visual_reasoner``, it holds no camera buffer of its own: the frames to
-    plan over arrive in the ``PlanPath`` goal's ``images`` list (the single
+    plan over arrive in the ``PlanVisualPath`` goal's ``images`` list (the single
     buffer owned by ``hint_narrative``), oldest first — the LAST is the current
     view the path is planned on, any earlier ones are recent past views attached
     for continuity. This keeps the planner and the mission director reasoning over
@@ -24,7 +22,7 @@ class PathPlannerNode(GeminiActionNode):
     """
 
     def __init__(self):
-        super().__init__("path_planner")
+        super().__init__("path_planner", PlanVisualPath, "~/plan_visual_path", "message")
 
         # Farthest image row (of 1000) a waypoint may occupy — caps how far ahead
         # the path reaches. Smaller row = farther/higher in the frame = more
@@ -44,19 +42,7 @@ class PathPlannerNode(GeminiActionNode):
         #            grammar can cost spatial-reasoning quality.
         self.declare_parameter("structured_output", "json")
 
-        self._action_server = ActionServer(
-            self,
-            PlanPath,
-            "~/plan_path",
-            execute_callback=self._execute_cb,
-            goal_callback=self._goal_cb,
-            cancel_callback=self._cancel_cb,
-            callback_group=ReentrantCallbackGroup(),
-        )
-
-        self.get_logger().info(
-            "Path planner ready — call ~/plan_path."
-        )
+        self.get_logger().info("Path planner ready — call ~/plan_visual_path.")
 
     # ------------------------------------------------------------------
     # Main execution
@@ -146,7 +132,7 @@ class PathPlannerNode(GeminiActionNode):
             reasoning, markers, points, turn = first_reason, [], [], first_turn
             self.get_logger().info(f"No waypoints — turn-only/no-op move ({turn:+.0f} deg).")
 
-        result = PlanPath.Result()
+        result = PlanVisualPath.Result()
         # The VLM's brief explanation of the chosen path rides on `message`.
         result.message = reasoning or f"{len(markers)} waypoint(s), turn {turn:+.0f} deg"
         result.markers = markers
@@ -328,24 +314,6 @@ class PathPlannerNode(GeminiActionNode):
             marker.z = 0.0
             markers.append(marker)
         return markers
-
-    def _publish_feedback(self, goal_handle, state):
-        fb = PlanPath.Feedback()
-        fb.state = state
-        goal_handle.publish_feedback(fb)
-
-    def _abort(self, goal_handle, message):
-        self.get_logger().warn(message)
-        result = PlanPath.Result()
-        result.message = message
-        goal_handle.abort()   # ABORTED status is the failure signal
-        return result
-
-    def _cancel(self, goal_handle):
-        goal_handle.canceled()
-        result = PlanPath.Result()
-        result.message = "Cancelled"
-        return result
 
 
 def main(args=None):

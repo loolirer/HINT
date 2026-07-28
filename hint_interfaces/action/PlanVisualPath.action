@@ -23,7 +23,7 @@ geometry_msgs/Point[] markers
 # non-zero turn_degrees: a turn-only move (scan / re-orient without driving).
 float64 turn_degrees
 # Stamp of the current-view frame the path was planned on (images[-1].header.stamp).
-# FollowPath grounds the markers into odom using the pose at this stamp.
+# FollowVisualPath grounds the markers into odom using the pose at this stamp.
 builtin_interfaces/Time stamp
 ---
 # Feedback

@@ -11,7 +11,7 @@ What the figure shows (all in the reference frame — ``map`` if the bag has one
 - the robot **footprint** (a circle of ``robot_radius``) at each stopped position — a spatial
   cluster of VLM calls — with a centre marker (green at the first stop, red at the last, robot
   colour otherwise) and a label giving the **total** number of VLM calls made there (both the
-  director ``advance`` and the executor ``plan_path``);
+  director ``advance`` and the executor ``plan_visual_path``);
 - heading lines drawn beneath the markers/circle but above the paths: an **arrival**
   line in the robot's colour, plus, when the robot spun in place, a distinct-colour **post-spin**
   line showing where it ended up facing;
@@ -19,8 +19,8 @@ What the figure shows (all in the reference frame — ``map`` if the bag has one
   of spins is counted there; angle magnitudes are not drawn on the map).
 
 The VLM-vs-movement split is derived from the actions' ``_action/status`` topics: the
-``plan_path`` + ``advance`` windows are VLM-thinking (robot stationary), the
-``follow_path`` + ``spin`` windows are movement. No runtime node is modified.
+``plan_visual_path`` + ``advance`` windows are VLM-thinking (robot stationary), the
+``follow_visual_path`` + ``spin`` windows are movement. No runtime node is modified.
 
 Usage:
     ros2 run hint_narrative mission_report /path/to/missions/<name>/mission.bag
@@ -49,14 +49,14 @@ _STATUS_TERMINAL = (4, 5, 6)     # SUCCEEDED, CANCELED, ABORTED
 
 # The four action-status topics, split by what the robot is doing during each window.
 _VLM_STATUS = (
-    "/path_planner/plan_path/_action/status",   # executor VLM
+    "/path_planner/plan_visual_path/_action/status",   # executor VLM
     "/narrative_navigation/advance/_action/status",           # director VLM (wraps reason)
 )
 _MOVE_STATUS = (
-    "/path_projector_node/follow_path/_action/status",
+    "/path_projector_node/follow_visual_path/_action/status",
     "/spin/_action/status",
 )
-_PLAN_STATUS = "/path_planner/plan_path/_action/status"  # footprint anchors
+_PLAN_STATUS = "/path_planner/plan_visual_path/_action/status"  # footprint anchors
 _SPIN_STATUS = "/spin/_action/status"                                  # turn markers
 
 _PATH_TOPIC = "/path_projector_node/path"
@@ -390,7 +390,7 @@ def build_report(bag_path):
     plan_wins = windows(status, _PLAN_STATUS)
     n_plans = len(plan_wins)
     turn_wins = windows(status, _SPIN_STATUS)
-    # Total VLM calls = executor (plan_path) + director (advance) windows.
+    # Total VLM calls = executor (plan_visual_path) + director (advance) windows.
     n_vlm = sum(len(windows(status, t)) for t in _VLM_STATUS)
 
     stats = {
@@ -418,7 +418,7 @@ def build_report(bag_path):
         ax.plot(a[:, 0], a[:, 1], color=_C_ACTUAL, lw=2.4, alpha=0.8, zorder=Z_ACTUAL,
                 label="Actual path")
 
-    # Stopped positions: cluster the VLM calls (executor `plan_path` + director `advance`)
+    # Stopped positions: cluster the VLM calls (executor `plan_visual_path` + director `advance`)
     # in time order by spatial proximity. Each cluster is one place the robot stopped; its
     # number is the TOTAL count of VLM calls made there — both the visual reasoner (advance) and
     # path generation (plan). Consecutive calls within IN_PLACE_EPS are the same place, so

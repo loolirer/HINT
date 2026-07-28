@@ -7,16 +7,16 @@
 #include <builtin_interfaces/msg/time.hpp>
 #include <geometry_msgs/msg/point.hpp>
 
-#include <hint_interfaces/action/follow_path.hpp>
+#include <hint_interfaces/action/follow_visual_path.hpp>
 
 namespace hint_behavior
 {
 
-// Follows a ground path via hint_navigation's path_projector FollowPath action,
+// Follows a ground path via hint_navigation's path_projector FollowVisualPath action,
 // which grounds the normalized waypoints into an odom nav_msgs/Path and drives
 // Nav2's follow_path (MPPI) until the goal is reached.
-class FollowPathAction
-  : public BT::RosActionNode<hint_interfaces::action::FollowPath>
+class FollowVisualPathAction
+  : public BT::RosActionNode<hint_interfaces::action::FollowVisualPath>
 {
 public:
   using RosActionNode::RosActionNode;
@@ -45,7 +45,7 @@ public:
 
   BT::NodeStatus onFailure(BT::ActionNodeErrorCode error) override
   {
-    RCLCPP_ERROR(logger(), "FollowPath action error: %s", BT::toStr(error));
+    RCLCPP_ERROR(logger(), "FollowVisualPath action error: %s", BT::toStr(error));
     return BT::NodeStatus::FAILURE;
   }
 };

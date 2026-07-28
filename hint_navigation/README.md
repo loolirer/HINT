@@ -14,7 +14,7 @@ path in `odom`, and the costmap is a short-lived rolling window.
 | Part | What |
 |---|---|
 | `camera_rig.py` (module) | `CameraRig` — the pinhole+tilt+height rig and both ground↔pixel projections; the single source of truth, imported by the three nodes below |
-| `path_projector` (node) | Exposes the `hint_interfaces/FollowPath` action the BT calls, grounds the VLM's normalized markers into a metric `odom` `nav_msgs/Path`, and drives Nav2's `follow_path` (MPPI) |
+| `path_projector` (node) | Exposes the `hint_interfaces/FollowVisualPath` action the BT calls, grounds the VLM's normalized markers into a metric `odom` `nav_msgs/Path`, and drives Nav2's `follow_path` (MPPI) |
 | `obstacle_projector` (node) | Streams `hint_perception`'s ground mask (`/camera/ground`) → obstacle `PointCloud2` (`/obstacles`) for the local costmap, via the ground-plane BEV homography |
 | `visual_debug` (node) | Composes one `/debug` image from the system's real outputs (mask overlay + projector paths + BT state) |
 | `launch/nav2.launch.py` + `config/nav2_local.yaml` | Brings up the mapless Nav2 stack: `controller_server` (FollowPath + MPPI, rolling local costmap) + `behavior_server` (Spin) + `nav2_lifecycle_manager` |
@@ -47,8 +47,8 @@ dict); the BEV *grid* geometry (`bev_*`) is **not** a rig concern and lives in
 
 ## path_projector
 
-The BT (`hint_behavior`'s `FollowPathAction`) still calls
-`hint_interfaces/FollowPath` with the VLM's **normalized image markers**; this node is
+The BT (`hint_behavior`'s `FollowVisualPathAction`) still calls
+`hint_interfaces/FollowVisualPath` with the VLM's **normalized image markers**; this node is
 a transparent adapter that internally drives Nav2's `nav2_msgs/action/FollowPath`. The whole
 chain stays action-based.
 
@@ -93,7 +93,7 @@ freezing at plan time:
 
 | Interface | Type | Direction |
 |---|---|---|
-| `~/follow_path` | `hint_interfaces/FollowPath` | Action server (BT-facing) |
+| `~/follow_visual_path` | `hint_interfaces/FollowVisualPath` | Action server (BT-facing) |
 | `follow_path` (see `follow_path_action`) | `nav2_msgs/FollowPath` | Action client (Nav2 controller) |
 | `/camera/ground` (see `mask_topic`) | `sensor_msgs/Image` (`mono8`) | Sub — ground mask for clipping the pixel path |
 | `/odom` (see `odom_topic`) | `nav_msgs/Odometry` | Sub — world anchor for grounding |
@@ -126,7 +126,7 @@ not where the robot is now.
 
 > Split out of the old fused segmenter so perception stays purely image-space. Kept a
 > **separate node** from `path_projector` on purpose: the obstacle cloud is
-> safety-critical streaming that must keep flowing while the projector's `follow_path`
+> safety-critical streaming that must keep flowing while the projector's `follow_visual_path`
 > action blocks for a whole path-follow, and separate processes get independent launch respawn.
 
 ### Interfaces

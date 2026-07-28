@@ -82,7 +82,7 @@ Per cycle there are **two VLM calls** with a clean division of labour — **both
   waypoints **and** a short reasoning `message` (what it did / why). The BT logs that message, but it
   is **not** fed to the director. The planner has no camera of its own: it receives the **same** frames
   the director just judged — this node passes them out on the `advance` result's `images`, and the BT
-  forwards them to `PlanPath.images`. One buffer feeds both calls (no second buffer to drift).
+  forwards them to `PlanVisualPath.images`. One buffer feeds both calls (no second buffer to drift).
 - **reasoner (director-with-eyes):** one `compile.txt` call that reasons over the **before/after
   frames of the move just executed** (captured by this node and attached to the call) plus the
   narrative — it judges the move from the images, folds it in, and emits the next instruction +
@@ -170,7 +170,7 @@ Every run auto-records a **minimal MCAP rosbag** (`<mission>.bag`, a sibling of 
 started on a fresh run and closed when the mission ends (or on Ctrl+C). It is **overwritten each
 run**, mirroring the jsonl semantics. The topic set is deliberately small (no images / clouds /
 costmap — just `/tf`, `/tf_static`, `/odom`, the projector's raw + truncated paths, `/map` if
-present, and the `plan_path` / `advance` / `follow_path` / `spin` `_action/status`
+present, and the `plan_visual_path` / `advance` / `follow_visual_path` / `spin` `_action/status`
 topics). Toggle with the `record_bag` param; relocate with `bag_path`. Recording is a controlled
 `ros2 bag record --storage mcap` subprocess (needs `ros-<distro>-rosbag2-storage-mcap`).
 
@@ -185,7 +185,7 @@ Reference frame is `map` if the bag has one, else `odom`. The figure shows the *
 path (continuous), the VLM **raw** and **truncated** paths, the robot **footprint** (circle +
 heading) drawn **only at VLM plan-call poses**, start/end markers, each **turn** as a curved arrow
 labelled with its measured (odometry) magnitude, and a stats box: mission duration, VLM-processing
-time (`plan_path` + `advance` windows) and movement time (`follow_path` + `spin`
+time (`plan_visual_path` + `advance` windows) and movement time (`follow_visual_path` + `spin`
 windows) — all derived from the recorded `_action/status` topics, so no runtime node is touched.
 
 ## Prompt template (`prompts/compile.txt`)
@@ -241,7 +241,7 @@ snapshot, and returns Result:
 `mission_done` (queue empty **or** failed), `mission_failed` (stuck past the cap, or an unrecoverable
 compile/IO error), `description` (= the narrative's `next`), `area` (= the current queue head),
 `message` (= the narrative's `done`, or the failure reason), and `images` (this cycle's unified frame
-buffer, oldest first, last = current view — the BT forwards it to `PlanPath.images` so the
+buffer, oldest first, last = current view — the BT forwards it to `PlanVisualPath.images` so the
 planner plans over the same frames the director judged; empty when `mission_done`). On the first call
 nothing has executed (`success` defaults true, `observation` empty) so it just emits the opening
 instruction.

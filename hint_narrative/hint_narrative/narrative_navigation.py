@@ -100,9 +100,9 @@ _BAG_TOPICS = [
     "/path_projector_node/path",       # truncated (clipped) path handed to MPPI
     "/path_projector_node/path_raw",   # full VLM-intent path
     "/map",                                  # OccupancyGrid if a map exists (else absent)
-    "/path_planner/plan_path/_action/status",         # executor-VLM windows
+    "/path_planner/plan_visual_path/_action/status",         # executor-VLM windows
     "/narrative_navigation/advance/_action/status",                 # director-VLM windows
-    "/path_projector_node/follow_path/_action/status",  # drive windows
+    "/path_projector_node/follow_visual_path/_action/status",  # drive windows
     "/spin/_action/status",                                         # turn windows
 ]
 
@@ -385,7 +385,7 @@ class MissionPlannerNode(Node):
         result.description = self._narrative.get("next", "")
         result.message = self._narrative.get("done", "")
         # Hand the SAME frames the director just judged to the path planner
-        # (via the BT → PlanPath.images): one unified buffer, so the planner
+        # (via the BT → PlanVisualPath.images): one unified buffer, so the planner
         # plans on the same current view (images[-1]) the director reasoned over —
         # no second buffer to drift out of sync.
         result.images = images

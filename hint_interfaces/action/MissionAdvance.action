@@ -12,7 +12,7 @@ string description   # the next instruction to feed path_planner (empty when mis
 string area          # the current environment (from the narrative)
 string message       # the narrative's present intent, closing summary, or the failure reason
 # The unified image buffer for this cycle, owned here (oldest first, last = current
-# view). The BT forwards it to PlanPath.images so the planner plans over the
+# view). The BT forwards it to PlanVisualPath.images so the planner plans over the
 # SAME frames the director just judged — one buffer, no mismatch. Empty when mission_done.
 sensor_msgs/CompressedImage[] images
 ---

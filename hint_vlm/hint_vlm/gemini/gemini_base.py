@@ -6,7 +6,7 @@ a timeout, and expose the whole thing as a single-goal-at-a-time action server.
 This base class factors out that plumbing so the concrete nodes only carry their
 action type, prompt, and result mapping.
 
-Frames arrive in the action goal (``Reason.images`` / ``PlanPath.images``),
+Frames arrive in the action goal (``Reason.images`` / ``PlanVisualPath.images``),
 sourced from the one image buffer that lives in ``hint_narrative``. These nodes
 therefore keep **no camera subscription or buffer of their own** — the single
 buffer keeps the director and the planner reasoning over the same frames.
@@ -22,7 +22,8 @@ from cv_bridge import CvBridge
 from google import genai
 from google.genai import types
 from PIL import Image as PILImage
-from rclpy.action import CancelResponse, GoalResponse
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 
 DEFAULT_MODEL_ID = "gemini-robotics-er-1.6-preview"
@@ -31,13 +32,15 @@ DEFAULT_MODEL_ID = "gemini-robotics-er-1.6-preview"
 class GeminiActionNode(Node):
     """Base for Gemini Robotics-ER action-server nodes.
 
-    Subclasses declare their own action server (bound to :meth:`_execute_cb`,
-    :meth:`_goal_cb`, :meth:`_cancel_cb`) and implement :meth:`_run`. Frames are
-    supplied per-goal and decoded with :meth:`_frame_to_pil`; there is no camera
+    A subclass passes its action type, the server name, and the name of the
+    Result's text field (``message`` / ``response``); the base builds the
+    single-goal action server and provides the shared feedback/abort/cancel
+    helpers, so concrete nodes only implement :meth:`_run`. Frames are supplied
+    per-goal and decoded with :meth:`_frame_to_pil`; there is no camera
     subscription here.
     """
 
-    def __init__(self, node_name):
+    def __init__(self, node_name, action_type, action_name, result_text_field):
         super().__init__(node_name)
 
         share = get_package_share_directory("hint_vlm")
@@ -51,6 +54,19 @@ class GeminiActionNode(Node):
         self._client = genai.Client(api_key=self._load_api_key())
         self._bridge = CvBridge()
         self._goal_lock = threading.Lock()
+
+        # One single-goal action server for every subclass. `result_text_field` is
+        # the Result member the abort/cancel helpers write the reason into
+        # (`message` for PlanVisualPath, `response` for Reason).
+        self._action_type = action_type
+        self._result_text_field = result_text_field
+        self._action_server = ActionServer(
+            self, action_type, action_name,
+            execute_callback=self._execute_cb,
+            goal_callback=self._goal_cb,
+            cancel_callback=self._cancel_cb,
+            callback_group=ReentrantCallbackGroup(),
+        )
 
     # ------------------------------------------------------------------
     # Action callbacks — one goal at a time, guarded by _goal_lock.
@@ -74,6 +90,30 @@ class GeminiActionNode(Node):
 
     def _run(self, goal_handle):
         raise NotImplementedError
+
+    # ------------------------------------------------------------------
+    # Shared result helpers — feedback, abort, cancel (used by every subclass)
+
+    def _publish_feedback(self, goal_handle, state):
+        fb = self._action_type.Feedback()
+        fb.state = state
+        goal_handle.publish_feedback(fb)
+
+    def _result(self, text):
+        """A Result with the node's text field (`message`/`response`) set to `text`."""
+        result = self._action_type.Result()
+        setattr(result, self._result_text_field, text)
+        return result
+
+    def _abort(self, goal_handle, message):
+        """Abort the goal — ABORTED status is the failure signal — with the reason."""
+        self.get_logger().warn(message)
+        goal_handle.abort()
+        return self._result(message)
+
+    def _cancel(self, goal_handle):
+        goal_handle.canceled()
+        return self._result("Cancelled")
 
     # ------------------------------------------------------------------
     # Frame decode

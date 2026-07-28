@@ -43,7 +43,7 @@ public:
       BT::OutputPort<std::string>("area", "the current environment (from the narrative)"),
       BT::OutputPort<bool>("mission_failed", "true when the mission ended stuck (past the cycle cap)"),
       BT::OutputPort<std::vector<sensor_msgs::msg::CompressedImage>>(
-        "images", "unified frame buffer for this cycle — forwarded to PlanPath.images"),
+        "images", "unified frame buffer for this cycle — forwarded to PlanVisualPath.images"),
     });
   }
 
@@ -68,7 +68,7 @@ public:
     setOutput("area", wr.result->area);
     setOutput("mission_failed", wr.result->mission_failed);
     // Forward the cycle's frame buffer so FollowPlannedPath can hand it to
-    // PlanPath.images — one buffer shared by the director and the planner.
+    // PlanVisualPath.images — one buffer shared by the director and the planner.
     setOutput("images", wr.result->images);
 
     if (wr.result->mission_done) {

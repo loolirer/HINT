@@ -1,25 +1,24 @@
 """Path projector — adapter from the VLM path to Nav2's FollowPath.
 
-Exposes the **same** ``hint_interfaces/action/FollowPath`` action the behaviour
+Exposes the **same** ``hint_interfaces/action/FollowVisualPath`` action the behaviour
 tree already calls (so only its action name is repointed), and internally drives Nav2's
 ``nav2_msgs/action/FollowPath`` (MPPI controller). The whole chain stays action-based.
 
 Per goal it:
 
 1. Grounds the normalized image markers (``x``/``y in [-1, 1]``, center 0, nearest-first)
-   onto the ground plane in ``base_link`` via the analytic camera model — the same
-   projection ``odom_waypoint_tracker`` uses.
+   onto the ground plane in ``base_link`` via the analytic camera model.
 2. Re-expresses them in ``odom`` using the odometry pose at the goal's stamp (so the path
-   is anchored in the world, exactly as the odom tracker anchored its reference frame),
-   and builds a ``nav_msgs/Path`` with tangent yaws, prepended by the robot's pose so the
-   path starts at the robot.
-3. Calls ``follow_path`` and relays the outcome: Nav2 SUCCEEDED -> ``success=true``;
-   ABORTED (incl. the ``SimpleProgressChecker`` firing on an unreachable goal — the native
-   equivalent of the old stall watchdog) / CANCELED / rejected -> ``success=false``.
+   is anchored in the world), and builds a ``nav_msgs/Path`` with tangent yaws, prepended
+   by the robot's pose so the path starts at the robot.
+3. Calls Nav2's ``follow_path`` and relays the outcome via this action's terminal status
+   (there is no ``success`` bool — the status carries it, the reason rides on ``message``):
+   Nav2 SUCCEEDED -> SUCCEEDS; ABORTED (incl. the ``SimpleProgressChecker`` firing on an
+   unreachable goal) / CANCELED / rejected -> ABORTS.
 
-Single goal at a time, mirroring ``pursuit_servo``'s lifecycle; a cancel forwards a Nav2
-cancel. Runs under a ``MultiThreadedExecutor`` with a reentrant action server so the
-FollowPath client futures resolve while the execute callback polls them.
+Single goal at a time; a cancel forwards a Nav2 cancel. Runs under a ``MultiThreadedExecutor``
+with a reentrant action server so the Nav2 FollowPath client futures resolve while the execute
+callback polls them.
 """
 
 import math
@@ -39,11 +38,10 @@ from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import Image
-from std_msgs.msg import String
 
 from nav2_msgs.action import FollowPath
 
-from hint_interfaces.action import FollowPath
+from hint_interfaces.action import FollowVisualPath
 
 from hint_navigation.camera_rig import CameraRig
 
@@ -177,8 +175,8 @@ class PathProjectorNode(Node):
 
         self._action_server = ActionServer(
             self,
-            FollowPath,
-            "~/follow_path",
+            FollowVisualPath,
+            "~/follow_visual_path",
             execute_callback=self._execute_cb,
             goal_callback=self._goal_cb,
             cancel_callback=self._cancel_cb,
@@ -186,7 +184,7 @@ class PathProjectorNode(Node):
         )
 
         self.get_logger().info(
-            "Path projector ready — call ~/follow_path (drives Nav2 "
+            "Path projector ready — call ~/follow_visual_path (drives Nav2 "
             f"{self._p('follow_path_action')})."
         )
 
@@ -378,7 +376,7 @@ class PathProjectorNode(Node):
         if not wps:
             if raw_path is not None:
                 self._publish_path(raw_path, self._raw_path_pub)  # still show the intent
-            result = FollowPath.Result()
+            result = FollowVisualPath.Result()
             result.message = "No drivable path (turn-only or clipped off-ground)"
             goal_handle.succeed()
             return result
@@ -437,11 +435,11 @@ class PathProjectorNode(Node):
 
         if goal_handle.is_cancel_requested or status == GoalStatus.STATUS_CANCELED:
             goal_handle.canceled()
-            result = FollowPath.Result()
+            result = FollowVisualPath.Result()
             result.message = "Cancelled by client"
             return result
 
-        result = FollowPath.Result()
+        result = FollowVisualPath.Result()
         if status == GoalStatus.STATUS_SUCCEEDED:
             result.message = "Path complete (Nav2 FollowPath reached the goal)"
             goal_handle.succeed()
@@ -455,9 +453,9 @@ class PathProjectorNode(Node):
 
     def _abort(self, goal_handle, message):
         goal_handle.abort()
-        result = FollowPath.Result()
+        result = FollowVisualPath.Result()
         result.message = message
-        self.get_logger().warn(f"FollowPath aborted: {message}")
+        self.get_logger().warn(f"FollowVisualPath aborted: {message}")
         return result
 
     def _publish_path(self, path, pub):
@@ -472,7 +470,7 @@ class PathProjectorNode(Node):
         pub.publish(path)
 
     def _publish_feedback(self, goal_handle, state):
-        fb = FollowPath.Feedback()
+        fb = FollowVisualPath.Feedback()
         fb.state = state
         goal_handle.publish_feedback(fb)
 
