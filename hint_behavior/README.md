@@ -19,7 +19,7 @@ Every HINT-specific BT leaf type is registered once, in one place: `hint_behavio
 | `PlanVisualPathAction` | `include/hint_behavior/nodes/plan_visual_path_action.hpp` | `/path_planner/plan_visual_path` |
 | `FollowVisualPathAction` | `include/hint_behavior/nodes/follow_visual_path_action.hpp` | `/path_projector_node/follow_visual_path` |
 | `SpinAction` | `include/hint_behavior/nodes/spin_action.hpp` | `/spin` (Nav2 behavior_server) |
-| `ReasonAction` | `include/hint_behavior/nodes/reason_action.hpp` | `/visual_reasoner/reason` |
+| `VisualReasonAction` | `include/hint_behavior/nodes/visual_reason_action.hpp` | `/visual_reasoner/visual_reason` |
 | `MissionAdvance` | `include/hint_behavior/nodes/mission_advance_action.hpp` | `/narrative_navigation/advance` |
 
 The action names are set in `registerHintNodes()`, one `BT::RosNodeParams` per type. Adding a new leaf: drop a `RosActionNode<...>` subclass header under `include/hint_behavior/nodes/`, register it inside `registerHintNodes()`. No executable needs to change — `behavior_server` picks up any tree that references it.
@@ -87,12 +87,12 @@ ros2 run hint_behavior behavior_server --ros-args \
 ros2 action send_goal /hint_behavior_server/execute_behavior_tree btcpp_ros2_interfaces/action/ExecuteTree "$(jq -n --arg tree Mission --arg xml '<root BTCPP_format="4"><BehaviorTree ID="Mission"><SubTree ID="RunMission" mission="/root/turtlebot3_ws/src/hint_narrative/missions/bedroom_to_living_room/mission.yaml"/></BehaviorTree></root>' '{target_tree: $tree, payload: $xml}')" --feedback
 ```
 
-### Reason over text with `ReasonAction`
+### Reason over text with `VisualReasonAction`
 
-`ReasonAction` calls the `visual_reasoner` node (`/visual_reasoner/reason`) — generic text(+optional-image)-in / JSON-out LLM reasoning. `prompt` is the text to reason over; the optional `schema` constrains the reply to a JSON shape; the reply lands on `response` (`SUCCESS`), or the failure reason does (`FAILURE`). It's the reasoning primitive the mission planner leans on, but stands alone for a one-off query (requires the `visual_reasoner` node running):
+`VisualReasonAction` calls the `visual_reasoner` node (`/visual_reasoner/visual_reason`) — generic text(+optional-image)-in / JSON-out LLM reasoning. `prompt` is the text to reason over; the optional `schema` constrains the reply to a JSON shape; the reply lands on `response` (`SUCCESS`), or the failure reason does (`FAILURE`). It's the reasoning primitive the mission planner leans on, but stands alone for a one-off query (requires the `visual_reasoner` node running):
 
 ```bash
-ros2 action send_goal /hint_behavior_server/execute_behavior_tree btcpp_ros2_interfaces/action/ExecuteTree "$(jq -n --arg tree AdHocReason --arg xml '<?xml version="1.0"?><root BTCPP_format="4"><BehaviorTree ID="AdHocReason"><ReasonAction prompt="In one sentence, is a hallway a good place to drive a robot?" response="{reply}"/></BehaviorTree></root>' '{target_tree: $tree, payload: $xml}')" --feedback
+ros2 action send_goal /hint_behavior_server/execute_behavior_tree btcpp_ros2_interfaces/action/ExecuteTree "$(jq -n --arg tree AdHocReason --arg xml '<?xml version="1.0"?><root BTCPP_format="4"><BehaviorTree ID="AdHocReason"><VisualReasonAction prompt="In one sentence, is a hallway a good place to drive a robot?" response="{reply}"/></BehaviorTree></root>' '{target_tree: $tree, payload: $xml}')" --feedback
 ```
 
 Bind `schema` to a JSON shape to force structured output; `{reply}` on `response` makes the JSON available to downstream leaves via the blackboard.

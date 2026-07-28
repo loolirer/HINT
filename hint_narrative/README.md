@@ -92,7 +92,7 @@ The `visual_reasoner` is the director (memory + intent, now grounded in what it 
 planner is the actor-with-eyes. **Frame buffer (`history_frames` = N):** the mission planner subscribes
 to the camera and latches the current view each time it hands out an instruction (a *move-start*
 frame), keeping a rolling buffer of the last **N**. Each `advance` passes those N past frames + the
-current view (oldest → current) to the reasoner via the `Reason` goal's `images`, so the director sees
+current view (oldest → current) to the reasoner via the `VisualReason` goal's `images`, so the director sees
 the *sequence* of its recent views and judges its moves against ground truth — closing the old
 **one-action-behind lag**. `N=1` is the before/after pair (default), `N=0` is current-view-only (no
 move comparison), `N=3–4` is deeper history (more image tokens = more latency/cost). This **same**
@@ -201,7 +201,7 @@ The single reasoner prompt (replacing the old judge/replan/compress). Placeholde
 | `{narrative}` | the memory carried forward — `done` only (`next` is regenerated; its result is read from the before/after images) |
 | `{vision}` | how to read the attached camera image(s): the last is the current view, earlier ones are recent past views (buffer depth `history_frames`); one = current-only, none = no frame |
 
-> The before/after frames themselves are **attached to the reasoner call** (the `Reason` goal's
+> The before/after frames themselves are **attached to the reasoner call** (the `VisualReason` goal's
 > `images`), not substituted into the prompt text; `{vision}` is the caption that tells the model how
 > to read them.
 
@@ -229,7 +229,7 @@ mission loaded and none provided fails cleanly (`mission_failed`).
 | Interface | Type | Direction |
 |---|---|---|
 | `~/advance` | `hint_interfaces/action/MissionAdvance` | Action server |
-| `/visual_reasoner/reason` (see `reasoner_action`) | `hint_interfaces/action/Reason` | Action client — the narrative recompile (with before/after frames) |
+| `/visual_reasoner/visual_reason` (see `reasoner_action`) | `hint_interfaces/action/Reason` | Action client — the narrative recompile (with before/after frames) |
 | `/camera/image_raw/compressed` (see `camera_topic`) | `sensor_msgs/CompressedImage` | Sub — latest frame; latched into the **unified** rolling image buffer (`history_frames`), fed to both the director and (via the `advance` result's `images`) the path planner |
 
 **`advance`** — Goal: `success` (did the last move execute?), `observation` (the planner's VLM
@@ -257,7 +257,7 @@ instruction.
 | `log_path` | `""` | Raw log; empty → sibling of the real mission file (`<mission>.log.jsonl`) |
 | `record_bag` | `true` | Auto-record the per-run minimal MCAP rosbag (start on a fresh run, close on mission end). Set `false` to disable (e.g. tests) |
 | `bag_path` | `""` | Rosbag output dir; empty → sibling of the real mission file (`<mission>.bag`). Overwritten each fresh run |
-| `reasoner_action` | `/visual_reasoner/reason` | Reasoner action name |
+| `reasoner_action` | `/visual_reasoner/visual_reason` | Reasoner action name |
 | `reasoner_timeout` | `30.0` | Seconds to wait on a single reasoner call |
 | `compile_retries` | `-1` | On a compile (reasoner/API) failure the narrative did **not** advance, so instead of re-serving a stale instruction (which would drive the robot on an un-updated belief) the `~/advance` call **waits and retries** — the robot stays put (the BT leaf sits in `RUNNING`; the follow only runs once advance returns). Retries after the first attempt: **`-1` = retry indefinitely** until it succeeds or the BT halts; `0` = one attempt; `N` = N retries. On a *bounded* budget being exhausted the mission **aborts** (`mission_failed` → BT `FAILURE`), never re-serving. Live-adjustable |
 | `compile_retry_delay` | `2.0` | Backoff (s) between compile retries (see `compile_retries`). The wait is cancellable — a BT halt / Ctrl+C breaks out immediately |

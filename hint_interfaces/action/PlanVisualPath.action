@@ -4,7 +4,7 @@ string description
 # passed in the goal — this node keeps NO buffer of its own). Order is meaningful,
 # oldest first: the LAST image is the current view the path is planned on; any
 # earlier ones are recent past views given as continuity. Empty = no frame (the
-# call aborts). Mirrors Reason.images so both VLM nodes reason over one buffer.
+# call aborts). Mirrors VisualReason.images so both VLM nodes reason over one buffer.
 sensor_msgs/CompressedImage[] images
 ---
 # Result

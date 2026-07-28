@@ -6,7 +6,7 @@ a timeout, and expose the whole thing as a single-goal-at-a-time action server.
 This base class factors out that plumbing so the concrete nodes only carry their
 action type, prompt, and result mapping.
 
-Frames arrive in the action goal (``Reason.images`` / ``PlanVisualPath.images``),
+Frames arrive in the action goal (``VisualReason.images`` / ``PlanVisualPath.images``),
 sourced from the one image buffer that lives in ``hint_narrative``. These nodes
 therefore keep **no camera subscription or buffer of their own** — the single
 buffer keeps the director and the planner reasoning over the same frames.
@@ -57,7 +57,7 @@ class GeminiActionNode(Node):
 
         # One single-goal action server for every subclass. `result_text_field` is
         # the Result member the abort/cancel helpers write the reason into
-        # (`message` for PlanVisualPath, `response` for Reason).
+        # (`message` for PlanVisualPath, `response` for VisualReason).
         self._action_type = action_type
         self._result_text_field = result_text_field
         self._action_server = ActionServer(

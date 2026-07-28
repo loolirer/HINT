@@ -49,7 +49,7 @@ from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 
 from action_msgs.msg import GoalStatus
-from hint_interfaces.action import MissionAdvance, Reason
+from hint_interfaces.action import MissionAdvance, VisualReason
 from sensor_msgs.msg import CompressedImage
 
 # Latest-frame-only camera QoS: keep just the newest frame and drop stale ones
@@ -121,7 +121,7 @@ class MissionPlannerNode(Node):
         # fresh run, ends when the mission ends. Overwritten each run (mirrors the jsonl).
         self.declare_parameter("record_bag", True)
         self.declare_parameter("bag_path", "")          # empty -> <mission>.bag (sibling dir)
-        self.declare_parameter("reasoner_action", "/visual_reasoner/reason")
+        self.declare_parameter("reasoner_action", "/visual_reasoner/visual_reason")
         self.declare_parameter("reasoner_timeout", 30.0)
         self.declare_parameter("max_env_cycles", 10)     # stuck backstop per environment
         self.declare_parameter("camera_topic", "/camera/image_raw/compressed")
@@ -166,7 +166,7 @@ class MissionPlannerNode(Node):
 
         cbg = ReentrantCallbackGroup()
         self._reasoner = ActionClient(
-            self, Reason, self._p("reasoner_action"), callback_group=cbg)
+            self, VisualReason, self._p("reasoner_action"), callback_group=cbg)
         self._advance_srv = ActionServer(
             self, MissionAdvance, "~/advance",
             execute_callback=self._advance_cb,
@@ -529,7 +529,7 @@ class MissionPlannerNode(Node):
         if not self._reasoner.wait_for_server(timeout_sec=timeout):
             self.get_logger().warn("Reasoner action server unavailable.")
             return None
-        goal = Reason.Goal()
+        goal = VisualReason.Goal()
         goal.prompt = prompt
         goal.schema = schema
         goal.images = images or []

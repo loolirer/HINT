@@ -7,12 +7,12 @@
 
 #include <builtin_interfaces/msg/time.hpp>
 
-#include <hint_interfaces/action/reason.hpp>
+#include <hint_interfaces/action/visual_reason.hpp>
 
 namespace hint_behavior
 {
 
-// Calls the reasoner's Reason action — generic text-in / JSON-out LLM
+// Calls the reasoner's VisualReason action — generic text-in / JSON-out LLM
 // reasoning with no camera involved. Feeds the assembled "prompt" (optionally
 // constrained to a JSON "schema") to the model and writes the reply to the
 // "response" output port. It is the generic reasoning primitive behind the
@@ -25,8 +25,8 @@ namespace hint_behavior
 // not run (empty prompt, timeout, API error, unparseable JSON) — the reasoner
 // *aborts* those, so they surface through onFailure. Either way the reply (or,
 // on failure, the reason) is written to "response" for the tree to read/log.
-class ReasonAction
-  : public BT::RosActionNode<hint_interfaces::action::Reason>
+class VisualReasonAction
+  : public BT::RosActionNode<hint_interfaces::action::VisualReason>
 {
 public:
   using RosActionNode::RosActionNode;

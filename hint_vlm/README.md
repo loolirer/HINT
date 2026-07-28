@@ -164,7 +164,7 @@ Because the prompts belong to the caller, the mission planner keeps them as data
 
 | Interface | Type | Direction |
 |---|---|---|
-| `~/reason` | `hint_interfaces/action/Reason` | Action server |
+| `~/visual_reason` | `hint_interfaces/action/VisualReason` | Action server |
 
 > No `~/debug` publisher; frames are supplied in the goal rather than pulled from
 > a camera subscription.
@@ -196,8 +196,8 @@ narrative-heavy compile you may want a non-zero `thinking_budget`. Plus, mirrori
 Free-form:
 
 ```bash
-ros2 action send_goal /visual_reasoner/reason \
-  hint_interfaces/action/Reason \
+ros2 action send_goal /visual_reasoner/visual_reason \
+  hint_interfaces/action/VisualReason \
   "{prompt: 'In one sentence, is a hallway a good place to drive a robot?', schema: ''}" \
   --feedback
 ```
@@ -206,8 +206,8 @@ Structured (schema-constrained) — the shape the mission planner's completion
 judge would use:
 
 ```bash
-ros2 action send_goal /visual_reasoner/reason \
-  hint_interfaces/action/Reason \
+ros2 action send_goal /visual_reasoner/visual_reason \
+  hint_interfaces/action/VisualReason \
   "{prompt: 'Log: planned a path to the door, followed it to the last waypoint, VLM confirmed a door is directly ahead. Did the robot reach the door?', schema: '{\"completed\": bool, \"reason\": string, \"summary\": string}'}" \
   --feedback
 ```

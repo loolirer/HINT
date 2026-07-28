@@ -3,7 +3,7 @@ import json
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
 
-from hint_interfaces.action import Reason
+from hint_interfaces.action import VisualReason
 
 from hint_vlm.gemini.gemini_base import GeminiActionNode
 
@@ -36,7 +36,7 @@ class ReasonerNode(GeminiActionNode):
     """
 
     def __init__(self):
-        super().__init__("visual_reasoner", Reason, "~/reason", "response")
+        super().__init__("visual_reasoner", VisualReason, "~/visual_reason", "response")
 
         # Output control (quality vs validity) when a schema is requested, same
         # knob as path_planner, live-adjustable:
@@ -46,7 +46,7 @@ class ReasonerNode(GeminiActionNode):
         #            hard grammar can cost reasoning quality.
         self.declare_parameter("structured_output", "json")
 
-        self.get_logger().info("Reasoner node ready — call ~/reason.")
+        self.get_logger().info("Reasoner node ready — call ~/visual_reason.")
 
     # ------------------------------------------------------------------
     # Main execution

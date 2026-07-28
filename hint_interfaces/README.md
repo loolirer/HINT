@@ -14,12 +14,12 @@ source install/setup.bash
 |---|---|---|
 | `action/PlanVisualPath` | goal `{description, images}` → result `{message, markers, turn_degrees, stamp}` / feedback `{state}` | `hint_vlm/path_planner` — plans ground waypoints **and** an end-of-move turn over the goal's frame buffer |
 | `action/FollowVisualPath` | goal `{waypoints, stamp}` → result `{message}` / feedback `{state}` | `hint_navigation/path_projector` — grounds the waypoints into an `odom` path and drives Nav2's `follow_path` |
-| `action/Reason` | goal `{prompt, schema, images}` → result `{response, stamp}` / feedback `{state}` | `hint_vlm/visual_reasoner` — generic text(+image)-in / JSON-out reasoning |
+| `action/VisualReason` | goal `{prompt, schema, images}` → result `{response, stamp}` / feedback `{state}` | `hint_vlm/visual_reasoner` — generic text(+image)-in / JSON-out reasoning |
 | `action/MissionAdvance` | goal `{success, observation, mission_path, first}` → result `{mission_done, mission_failed, description, area, message, images}` / feedback `{state}` | `hint_narrative/narrative_navigation` — report-and-advance cycle of the mission loop |
 
-> **Result success convention.** `PlanVisualPath`, `FollowVisualPath`, and `Reason` carry **no `success` bool** — success/failure is the action's terminal status (SUCCEEDED vs ABORTED), with the reason in `message`/`response`. `MissionAdvance` instead reports completion via `mission_done`/`mission_failed`.
+> **Result success convention.** `PlanVisualPath`, `FollowVisualPath`, and `VisualReason` carry **no `success` bool** — success/failure is the action's terminal status (SUCCEEDED vs ABORTED), with the reason in `message`/`response`. `MissionAdvance` instead reports completion via `mission_done`/`mission_failed`.
 >
-> **Shared image buffer.** `hint_narrative` owns the one camera-frame buffer and passes it out on `MissionAdvance.images`; the BT forwards it to `PlanVisualPath.images`, and the director gets the same frames on `Reason.images` — so both VLM calls reason over identical frames. `PlanVisualPath`/`Reason` report the current-view frame's `stamp` (`images[-1]`) so the follow can ground the path.
+> **Shared image buffer.** `hint_narrative` owns the one camera-frame buffer and passes it out on `MissionAdvance.images`; the BT forwards it to `PlanVisualPath.images`, and the director gets the same frames on `VisualReason.images` — so both VLM calls reason over identical frames. `PlanVisualPath`/`VisualReason` report the current-view frame's `stamp` (`images[-1]`) so the follow can ground the path.
 
 ### `PlanVisualPath` result fields
 
