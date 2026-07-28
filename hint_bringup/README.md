@@ -31,6 +31,14 @@ The shared camera-rig geometry (`camera_height` / `camera_forward_offset` / `cam
 `camera_rig.CameraRig`) — keep it matching the real rig. `ground_segmenter` no longer takes it
 (perception is image-space only).
 
+Similarly, a single `vlm_timeout` is shared across the VLM-facing nodes: it sets `api_timeout`
+on `path_planner` and `visual_reasoner` and `reasoner_timeout` on `narrative_navigation`, and
+`path_projector`'s `tf_buffer_time` is **derived** from it (`2 × vlm_timeout + margin`). That
+coupling is deliberate: a path frame is captured, then flows through the director (reasoner)
+call **and** the planner call before `path_projector` grounds it, so its stamp can be up to
+~2× a single call old — the TF buffer must be large enough that the stamped `odom ← base_link`
+lookup still resolves. Bumping `vlm_timeout` can't silently outrun the buffer.
+
 ## Usage
 
 ```bash

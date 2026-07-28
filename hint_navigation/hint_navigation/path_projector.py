@@ -8,9 +8,13 @@ Per goal it:
 
 1. Grounds the normalized image markers (``x``/``y in [-1, 1]``, center 0, nearest-first)
    onto the ground plane in ``base_link`` via the analytic camera model.
-2. Re-expresses them in ``odom`` using the odometry pose at the goal's stamp (so the path
-   is anchored in the world), and builds a ``nav_msgs/Path`` with tangent yaws, prepended
-   by the robot's pose so the path starts at the robot.
+2. Re-expresses them in ``odom`` using the robot pose at the goal's stamp — looked up from
+   **TF** (``odom -> base_link`` at that stamp), so the path is anchored in the world — and
+   builds a ``nav_msgs/Path`` with tangent yaws, prepended by the robot's pose so the path
+   starts at the robot. No ``/odom`` subscription: the pose comes from the same TF the
+   costmap and MPPI use. The TF buffer's ``cache_time`` (``tf_buffer_time``) must cover the
+   VLM latency between frame capture and grounding (the director + planner calls), else the
+   stamped lookup falls out of the buffer.
 3. Calls Nav2's ``follow_path`` and relays the outcome via this action's terminal status
    (there is no ``success`` bool — the status carries it, the reason rides on ``message``):
    Nav2 SUCCEEDED -> SUCCEEDS; ABORTED (incl. the ``SimpleProgressChecker`` firing on an
@@ -30,14 +34,18 @@ import rclpy
 from action_msgs.msg import GoalStatus
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
+from rclpy.time import Time as RclpyTime
 
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Odometry, Path
+from nav_msgs.msg import Path
 from sensor_msgs.msg import Image
+
+from tf2_ros import Buffer, TransformException, TransformListener
 
 from nav2_msgs.action import FollowPath
 
@@ -127,8 +135,18 @@ class PathProjectorNode(Node):
         self.declare_parameter("controller_id", "FollowPath")
         self.declare_parameter("goal_checker_id", "goal_checker")
         self.declare_parameter("progress_checker_id", "progress_checker")
-        self.declare_parameter("odom_topic", "/odom")
         self.declare_parameter("path_frame", "odom")
+        # Robot body frame the markers ground into (looked up in path_frame via TF).
+        self.declare_parameter("robot_frame", "base_link")
+        # TF buffer cache_time (s): must be >= the VLM latency between a frame's capture
+        # and this node grounding it — i.e. the director (reasoner) call PLUS the planner
+        # call, since the frame stamp is latched before both. Sized from bringup's
+        # vlm_timeout. Too small -> the stamped odom<-base_link lookup falls out of the
+        # buffer and the path aborts.
+        self.declare_parameter("tf_buffer_time", 90.0)
+        # Brief blocking wait on the TF lookup so a momentarily-late transform resolves
+        # instead of aborting (the stamp is always in the past, so this rarely triggers).
+        self.declare_parameter("tf_lookup_timeout", 0.1)
         # Ground-mask clipping: the VLM pixel path is truncated at the first marker
         # that leaves the segmented ground (that marker and all after it are dropped, so we
         # never follow a path that runs off the floor). No fresh mask -> pass through.
@@ -147,12 +165,14 @@ class PathProjectorNode(Node):
             callback_group=ReentrantCallbackGroup(),
         )
 
-        # --- Odometry (world anchor for the grounded path) ---
-        self._odom_buf = deque(maxlen=200)
-        self._odom_lock = threading.Lock()
-        self.create_subscription(
-            Odometry, str(self._p("odom_topic")), self._odom_cb, 20
+        # --- TF (world anchor for the grounded path) ---
+        # The pose at a frame's stamp comes from the SAME TF the costmap/MPPI use, not a
+        # private /odom sub. cache_time is sized to the VLM latency so a lookup at the
+        # (seconds-old) capture stamp still resolves.
+        self._tf_buffer = Buffer(
+            cache_time=Duration(seconds=float(self._p("tf_buffer_time")))
         )
+        self._tf_listener = TransformListener(self._tf_buffer, self)
 
         # --- Ground mask (image-space, for clipping the pixel path) ---
         self._bridge = CvBridge()
@@ -210,27 +230,34 @@ class PathProjectorNode(Node):
             self._goal_lock.release()
 
     # ------------------------------------------------------------------
-    # Odometry
-
-    def _odom_cb(self, msg):
-        t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        p = msg.pose.pose.position
-        yaw = _yaw_from_quat(msg.pose.pose.orientation)
-        with self._odom_lock:
-            self._odom_buf.append((t, p.x, p.y, yaw))
+    # Pose (via TF)
 
     def _pose_at(self, stamp):
-        """Odom pose (x, y, yaw) nearest ``stamp`` (None/zero -> latest), or None."""
-        with self._odom_lock:
-            buf = list(self._odom_buf) if self._odom_buf else None
-        if buf is None:
-            return None
+        """Robot pose ``(x, y, yaw)`` in ``path_frame`` at ``stamp``, from TF.
+
+        Looks up ``path_frame <- robot_frame`` at the frame's capture ``stamp`` (None/zero
+        -> latest). Returns None (and warns) when TF can't resolve it — most likely the
+        stamp is older than ``tf_buffer_time`` (buffer smaller than the VLM latency) or the
+        transform isn't up yet.
+        """
+        target = str(self._p("path_frame"))
+        source = str(self._p("robot_frame"))
         if stamp is None or (stamp.sec == 0 and stamp.nanosec == 0):
-            s = buf[-1]
+            when = RclpyTime()  # latest available
         else:
-            key = stamp.sec + stamp.nanosec * 1e-9
-            s = min(buf, key=lambda e: abs(e[0] - key))
-        return (s[1], s[2], s[3])
+            when = RclpyTime.from_msg(stamp)
+        timeout = Duration(seconds=float(self._p("tf_lookup_timeout")))
+        try:
+            tf = self._tf_buffer.lookup_transform(target, source, when, timeout)
+        except TransformException as e:
+            self.get_logger().warn(
+                f"TF {target}<-{source} at the frame stamp unavailable ({e}) — the "
+                "buffer may be smaller than the VLM latency (raise tf_buffer_time).",
+                throttle_duration_sec=5.0,
+            )
+            return None
+        t = tf.transform.translation
+        return (t.x, t.y, _yaw_from_quat(tf.transform.rotation))
 
     # ------------------------------------------------------------------
     # Ground mask -> pixel-path clipping
@@ -300,8 +327,7 @@ class PathProjectorNode(Node):
         if not waypoints:
             return None
         ref = self._pose_at(stamp)
-        if ref is None:
-            self.get_logger().warn("No odometry yet — cannot ground the path.")
+        if ref is None:            # _pose_at already warned with the TF-specific reason
             return None
 
         w = int(self._p("image_width"))
@@ -382,10 +408,12 @@ class PathProjectorNode(Node):
             return result
 
         # Reuse the raw grounding when nothing was clipped; else ground the surviving prefix.
-        # (raw_path is None only if odom is missing, in which case the clipped build fails too.)
+        # (raw_path is None only if the pose lookup failed, in which case the clipped build
+        # fails too.)
         path = raw_path if len(wps) == len(goal.waypoints) else self._build_path(wps, goal.stamp)
         if path is None:
-            return self._abort(goal_handle, "Could not ground path (no odometry)")
+            return self._abort(goal_handle, "Could not ground path (no pose at the frame "
+                                            "stamp — TF unavailable / tf_buffer_time too small)")
         self._publish_path(path, self._path_pub)         # RViz: the path handed to MPPI
         self._publish_path(raw_path, self._raw_path_pub)  # RViz: the full VLM intent
 

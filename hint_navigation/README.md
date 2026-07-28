@@ -63,10 +63,14 @@ Per goal it:
    as a no-op so the BT's Spin still runs.
 1. **Grounds** the surviving markers (`x`/`y ∈ [-1, 1]`, nearest-first) onto the ground plane
    in `base_link` via `CameraRig.pixels_to_ground`, then re-expresses them in **`odom`** using
-   the odometry pose at the goal's stamp — so the path is anchored once in the world, and the
-   robot follows it while it stays put in `odom` (Nav2 tracks the robot against it via the
-   `odom → base_link` TF). Prepends the robot's own pose so the path starts at the robot; each
-   pose's yaw is the path tangent.
+   the robot pose at the goal's stamp — looked up from **TF** (`odom → base_link` at that
+   stamp), the same transform the costmap and MPPI use. So the path is anchored once in the
+   world, and the robot follows it while it stays put in `odom`. No `/odom` subscription: the
+   pose source is TF, which also keeps grounding in step with the costmap. Because the frame
+   is captured seconds before grounding (it flows through the director *and* planner VLM
+   calls), the TF buffer's `cache_time` (`tf_buffer_time`) must cover that latency, or the
+   stamped lookup falls out of the buffer and the goal aborts. Prepends the robot's own pose
+   so the path starts at the robot; each pose's yaw is the path tangent.
 1. **Smooths + densifies** the grounded points before handing them to MPPI: a **centripetal
    Catmull-Rom** spline is fit through the (few, far-apart) markers and resampled at
    `path_resolution` m (default `0.05`, ≈ costmap resolution). MPPI's path critics
@@ -96,7 +100,7 @@ freezing at plan time:
 | `~/follow_visual_path` | `hint_interfaces/FollowVisualPath` | Action server (BT-facing) |
 | `follow_path` (see `follow_path_action`) | `nav2_msgs/FollowPath` | Action client (Nav2 controller) |
 | `/camera/ground` (see `mask_topic`) | `sensor_msgs/Image` (`mono8`) | Sub — ground mask for clipping the pixel path |
-| `/odom` (see `odom_topic`) | `nav_msgs/Odometry` | Sub — world anchor for grounding |
+| `/tf`, `/tf_static` | `tf2_msgs/TFMessage` | Sub (TF listener) — `path_frame ← robot_frame` at the goal stamp, the world anchor for grounding |
 | `~/path` | `nav_msgs/Path` (latched) | Pub — the ground-clipped path handed to MPPI, for RViz |
 | `~/path_raw` | `nav_msgs/Path` (latched) | Pub — the full VLM path grounded (debug; never followed) |
 
@@ -106,9 +110,13 @@ Rig: `camera_height` / `camera_forward_offset` / `camera_tilt` / `camera_hfov_de
 this package; injected by bringup — see [camera_rig](#camera_rig-camera_rigpy)); `image_width`
 / `image_height` (marker normalization reference, default 640×480); `follow_path_action`
 (default `/follow_path`), `controller_id` (`FollowPath`), `goal_checker_id` (`goal_checker`),
-`progress_checker_id` (`progress_checker`); `odom_topic`, `path_frame` (`odom`),
-`server_timeout`, `control_rate`; `path_resolution` (`0.05` m — Catmull-Rom
-smooth-densification spacing for the path handed to MPPI; live-adjustable).
+`progress_checker_id` (`progress_checker`); `path_frame` (`odom`) / `robot_frame`
+(`base_link`) — the TF pair grounded against; `tf_buffer_time` (`90.0` s — TF buffer
+`cache_time`; must cover the VLM latency from frame capture to grounding, i.e. the director
++ planner calls, so bringup derives it from `vlm_timeout`) and `tf_lookup_timeout` (`0.1` s —
+brief blocking wait on the stamped lookup); `server_timeout`, `control_rate`;
+`path_resolution` (`0.05` m — Catmull-Rom smooth-densification spacing for the path handed to
+MPPI; live-adjustable).
 
 ## obstacle_projector
 

@@ -23,6 +23,9 @@ def generate_launch_description():
         "camera_hfov_deg": 62.2,
     }
 
+    vlm_timeout = 30.0
+    tf_buffer_time = 2.0 * vlm_timeout + 10.0
+
     camera_remap = (
         "/camera/image_raw/compressed",
         "/camera/image_raw/compressed/throttle",
@@ -111,7 +114,7 @@ def generate_launch_description():
         package="hint_navigation",
         executable="path_projector",
         output="screen",
-        parameters=[camera_rig],
+        parameters=[camera_rig, {"tf_buffer_time": tf_buffer_time}],
     )
 
     path_planner = Node(
@@ -126,6 +129,7 @@ def generate_launch_description():
                 "temperature": 1.0,
                 "n_candidates": 1,
                 "structured_output": "json",
+                "api_timeout": vlm_timeout,
             }
         ],
     )
@@ -140,6 +144,7 @@ def generate_launch_description():
                 "model_id": "gemini-robotics-er-1.6-preview",
                 "thinking_budget": -1,
                 "structured_output": "json",
+                "api_timeout": vlm_timeout,
             }
         ],
     )
@@ -151,6 +156,7 @@ def generate_launch_description():
         parameters=[
             {
                 "history_frames": 1,
+                "reasoner_timeout": vlm_timeout,
             }
         ],
         remappings=[camera_remap],
