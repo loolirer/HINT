@@ -6,7 +6,7 @@ a timeout, and expose the whole thing as a single-goal-at-a-time action server.
 This base class factors out that plumbing so the concrete nodes only carry their
 action type, prompt, and result mapping.
 
-Frames arrive in the action goal (``Reason.images`` / ``PlanTrajectory.images``),
+Frames arrive in the action goal (``Reason.images`` / ``PlanPath.images``),
 sourced from the one image buffer that lives in ``hint_narrative``. These nodes
 therefore keep **no camera subscription or buffer of their own** — the single
 buffer keeps the director and the planner reasoning over the same frames.

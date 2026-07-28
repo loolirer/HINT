@@ -4,7 +4,7 @@
   <name>hint_navigation</name>
   <version>0.0.0</version>
   <description>Nav2 reactive-navigation integration for HINT and the image&lt;-&gt;metric
-    bridge — sole owner of the camera rig (camera_rig.CameraRig). Contains trajectory_navigator
+    bridge — sole owner of the camera rig (camera_rig.CameraRig). Contains path_projector
     (grounds VLM markers into a nav_msgs/Path, drives Nav2 FollowPath/MPPI),
     obstacle_projector (ground mask -> obstacle PointCloud2 for the mapless local costmap),
     and visual_debug (composited /debug view).</description>

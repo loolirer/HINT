@@ -12,12 +12,12 @@ source install/setup.bash
 
 | Interface | Shape | Used by |
 |---|---|---|
-| `action/PlanTrajectory` | goal `{stamp, description}` → result `{success, message, markers, turn_degrees, stamp}` / feedback `{state}` | `hint_vlm/trajectory_generator` — plans ground waypoints **and** an end-of-move turn |
-| `action/FollowTrajectory` | goal `{waypoints, stamp}` → result `{success, message}` / feedback `{state}` | `hint_navigation/trajectory_navigator` — grounds the waypoints and drives Nav2's `follow_path` |
+| `action/PlanPath` | goal `{stamp, description}` → result `{success, message, markers, turn_degrees, stamp}` / feedback `{state}` | `hint_vlm/path_planner` — plans ground waypoints **and** an end-of-move turn |
+| `action/FollowPath` | goal `{waypoints, stamp}` → result `{success, message}` / feedback `{state}` | `hint_navigation/path_projector` — grounds the waypoints and drives Nav2's `follow_path` |
 | `action/Reason` | goal `{prompt, schema, images}` → result `{success, response}` / feedback `{state}` | `hint_vlm/visual_reasoner` — generic text(+image)-in / JSON-out reasoning |
 | `action/MissionAdvance` | goal `{success, observation, mission_path}` → result `{mission_done, mission_failed, description, area, message}` / feedback `{state}` | `hint_narrative/narrative_navigation` — report-and-advance cycle of the mission loop |
 
-### `PlanTrajectory` result fields
+### `PlanPath` result fields
 
 | Field | Type | Notes |
 |---|---|---|

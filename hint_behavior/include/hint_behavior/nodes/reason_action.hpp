@@ -44,7 +44,7 @@ public:
         "failure reason"),
       BT::OutputPort<builtin_interfaces::msg::Time>(
         "stamp",
-        "stamp of the frame reasoned over (mirrors PlanTrajectory); zero for "
+        "stamp of the frame reasoned over (mirrors PlanPath); zero for "
         "this text-only leaf, which sends no images"),
     });
   }

@@ -107,16 +107,16 @@ def generate_launch_description():
         parameters=[camera_rig],
     )
 
-    trajectory_navigator = Node(
+    path_projector = Node(
         package="hint_navigation",
-        executable="trajectory_navigator",
+        executable="path_projector",
         output="screen",
         parameters=[camera_rig],
     )
 
-    trajectory_generator = Node(
+    path_planner = Node(
         package="hint_vlm",
-        executable="trajectory_generator",
+        executable="path_planner",
         output="screen",
         parameters=[
             {
@@ -200,8 +200,8 @@ def generate_launch_description():
             occupancy_grid,
             ground_segmenter,
             obstacle_projector,
-            trajectory_navigator,
-            trajectory_generator,
+            path_projector,
+            path_planner,
             visual_reasoner,
             narrative_navigation,
             bt_executor,

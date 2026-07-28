@@ -7,15 +7,15 @@
 #include <builtin_interfaces/msg/time.hpp>
 #include <geometry_msgs/msg/point.hpp>
 
-#include <hint_interfaces/action/follow_trajectory.hpp>
+#include <hint_interfaces/action/follow_path.hpp>
 
 namespace hint_behavior
 {
 
-// Follows a ground trajectory via visual_servoing's pursuit_servo FollowTrajectory
+// Follows a ground path via visual_servoing's pursuit_servo FollowPath
 // action (pure pursuit until every waypoint has passed under the robot).
-class FollowTrajectoryAction
-  : public BT::RosActionNode<hint_interfaces::action::FollowTrajectory>
+class FollowPathAction
+  : public BT::RosActionNode<hint_interfaces::action::FollowPath>
 {
 public:
   using RosActionNode::RosActionNode;
@@ -38,7 +38,7 @@ public:
   BT::NodeStatus onResultReceived(const WrappedResult & wr) override
   {
     if (!wr.result->success) {
-      RCLCPP_WARN(logger(), "Follow trajectory failed: %s", wr.result->message.c_str());
+      RCLCPP_WARN(logger(), "Follow path failed: %s", wr.result->message.c_str());
       return BT::NodeStatus::FAILURE;
     }
     return BT::NodeStatus::SUCCESS;
@@ -46,7 +46,7 @@ public:
 
   BT::NodeStatus onFailure(BT::ActionNodeErrorCode error) override
   {
-    RCLCPP_ERROR(logger(), "FollowTrajectory action error: %s", BT::toStr(error));
+    RCLCPP_ERROR(logger(), "FollowPath action error: %s", BT::toStr(error));
     return BT::NodeStatus::FAILURE;
   }
 };

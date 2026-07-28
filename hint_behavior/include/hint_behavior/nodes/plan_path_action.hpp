@@ -10,17 +10,17 @@
 #include <geometry_msgs/msg/point.hpp>
 #include <sensor_msgs/msg/compressed_image.hpp>
 
-#include <hint_interfaces/action/plan_trajectory.hpp>
+#include <hint_interfaces/action/plan_path.hpp>
 
 namespace hint_behavior
 {
 
-// Plans a ground trajectory from a text description via trajectory_planner's
-// PlanTrajectory action; outputs the ordered normalized waypoints (markers).
+// Plans a ground path from a text description via path_planner's
+// PlanPath action; outputs the ordered normalized waypoints (markers).
 // The frames to plan over come in via {images} — the unified hint_narrative
 // buffer, forwarded from MissionAdvance — not from a camera buffer in the node.
-class PlanTrajectoryAction
-  : public BT::RosActionNode<hint_interfaces::action::PlanTrajectory>
+class PlanPathAction
+  : public BT::RosActionNode<hint_interfaces::action::PlanPath>
 {
 public:
   using RosActionNode::RosActionNode;
@@ -75,7 +75,7 @@ public:
     if (wr) {
       setOutput("message", wr->result->message);
     }
-    RCLCPP_WARN(logger(), "PlanTrajectory failed (%s)", BT::toStr(error));
+    RCLCPP_WARN(logger(), "PlanPath failed (%s)", BT::toStr(error));
     return BT::NodeStatus::FAILURE;
   }
 };

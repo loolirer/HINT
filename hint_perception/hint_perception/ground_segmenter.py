@@ -8,7 +8,7 @@ off-robot and pulling the raw stream costs more latency than the JPEG decode.
 This node is **purely image-space**: it labels pixels and nothing more. It owns no camera
 geometry (the rig) — anything metric lives on the navigation side (hint_navigation's
 ``obstacle_projector`` turns this mask into the Nav2 obstacle cloud; the
-``trajectory_navigator`` uses it to clip pixel trajectories; ``visual_debug`` overlays it).
+``path_projector`` uses it to clip pixel paths; ``visual_debug`` overlays it).
 
 1. Infer per-pixel ground probability (model-output layout detected at load time), then
    threshold into a binary ground mask on a small camera-aspect processing grid
@@ -144,7 +144,7 @@ class GroundSegmenter(Node):
         )
         # Binary ground mask (255 = ground, 0 = not) at the processing-grid resolution,
         # header inherited from the source frame. Navigation-side consumers use it:
-        # obstacle_projector (BEV -> cloud), trajectory_navigator (clip), visual_debug.
+        # obstacle_projector (BEV -> cloud), path_projector (clip), visual_debug.
         self.pub_mask = self.create_publisher(Image, "/camera/ground", 1)
 
         self.get_logger().info("OpenVINO Ground Segmenter (image -> ground mask) ready!")

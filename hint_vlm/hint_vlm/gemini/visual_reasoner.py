@@ -40,7 +40,7 @@ class ReasonerNode(GeminiActionNode):
         super().__init__("visual_reasoner")
 
         # Output control (quality vs validity) when a schema is requested, same
-        # knob as trajectory_generator, live-adjustable:
+        # knob as path_planner, live-adjustable:
         #   "json"   (default) JSON mode — valid JSON, keeps reasoning freedom;
         #   "off"    unconstrained — best quality, but a reply can be unparseable;
         #   "schema" constrained decoding to the schema (enum-enforced), but the
@@ -137,7 +137,7 @@ class ReasonerNode(GeminiActionNode):
         result = Reason.Result()
         result.response = response
         # Report the frame reasoned over (the current view = last image), mirroring
-        # PlanTrajectory. Left as the default zero stamp for a text-only call.
+        # PlanPath. Left as the default zero stamp for a text-only call.
         if goal.images:
             result.stamp = goal.images[-1].header.stamp
         goal_handle.succeed()

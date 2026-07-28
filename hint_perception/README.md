@@ -31,7 +31,7 @@ source install/setup.bash
 
 > This node is **purely image-space** — no rig, no projection. Its consumers all live in
 > `hint_navigation`: `obstacle_projector` (mask → obstacle `PointCloud2`),
-> `trajectory_navigator` (clips the VLM pixel trajectory to the mask), and `visual_debug`
+> `path_projector` (clips the VLM pixel path to the mask), and `visual_debug`
 > (green/red overlay).
 
 ### Model
@@ -71,7 +71,7 @@ ros2 topic hz /camera/ground                            # mask rate, per inferen
 | Topic | Type | Direction |
 |---|---|---|
 | `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Sub — latest-wins (best effort) |
-| `/camera/ground` | `sensor_msgs/Image` (`mono8`) | Pub — binary ground mask (255 = ground, 0 = not) at processing-grid resolution, header from the source frame. Consumed by `hint_navigation`'s `obstacle_projector`, `trajectory_navigator` (clipping), and `visual_debug` (overlay) |
+| `/camera/ground` | `sensor_msgs/Image` (`mono8`) | Pub — binary ground mask (255 = ground, 0 = not) at processing-grid resolution, header from the source frame. Consumed by `hint_navigation`'s `obstacle_projector`, `path_projector` (clipping), and `visual_debug` (overlay) |
 
 ### Parameters
 
@@ -107,6 +107,6 @@ Resilience is therefore **external**, assembled in `hint_bringup`:
 Net effect: a wedged iGPU self-heals in ~`STALL`+`RESTART_GRACE` seconds with no code inside the
 segmenter. (`device=CPU` sidesteps the hang entirely and is the simplest choice.)
 
-> **Debug view moved.** The composited `/debug` image (mask overlay + navigator paths + BT
+> **Debug view moved.** The composited `/debug` image (mask overlay + projector paths + BT
 > state) is produced by `visual_debug`, which now lives in **`hint_navigation`** (it needs the
-> camera rig to re-project the navigator's odom paths). See that package's README.
+> camera rig to re-project the projector's odom paths). See that package's README.

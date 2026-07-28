@@ -6,7 +6,7 @@ module holds that rig **and** the ground-plane projection math shared by the nav
 nodes, so the two directions can never drift apart (they used to be hand-synced copies
 across three nodes):
 
-- ``trajectory_navigator`` : ``pixels_to_ground``  (VLM markers -> base_link metric path)
+- ``path_projector`` : ``pixels_to_ground``  (VLM markers -> base_link metric path)
 - ``obstacle_projector``   : ``ground_to_pixels``  (ground-mask -> BEV obstacle homography)
 - ``visual_debug``         : ``ground_to_pixels``  (odom paths -> image overlay)
 

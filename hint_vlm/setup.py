@@ -27,7 +27,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "trajectory_generator = hint_vlm.gemini.trajectory_generator:main",
+            "path_planner = hint_vlm.gemini.path_planner:main",
             "visual_reasoner = hint_vlm.gemini.visual_reasoner:main",
         ],
     },

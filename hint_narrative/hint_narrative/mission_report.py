@@ -1,4 +1,4 @@
-"""Compile a mission's minimal MCAP rosbag into one annotated trajectory figure + stats.
+"""Compile a mission's minimal MCAP rosbag into one annotated path figure + stats.
 
 Consumes the ``mission.bag`` that ``narrative_navigation`` records per run (see
 ``_BAG_TOPICS`` there) and writes, **into the mission's own directory** (the bag's parent):
@@ -7,20 +7,20 @@ Consumes the ``mission.bag`` that ``narrative_navigation`` records per run (see
 What the figure shows (all in the reference frame — ``map`` if the bag has one, else ``odom``):
 - the **actual** continuous path the robot drove (``<ref>->base_link`` from ``/tf``, or ``/odom``);
 - the VLM's **raw** paths (full intent) and the **truncated** paths (what was actually followed),
-  from ``trajectory_navigator``'s ``~/path_raw`` / ``~/path``;
+  from ``path_projector``'s ``~/path_raw`` / ``~/path``;
 - the robot **footprint** (a circle of ``robot_radius``) at each stopped position — a spatial
   cluster of VLM calls — with a centre marker (green at the first stop, red at the last, robot
   colour otherwise) and a label giving the **total** number of VLM calls made there (both the
-  director ``advance`` and the executor ``plan_trajectory``);
-- heading lines drawn beneath the markers/circle but above the trajectories: an **arrival**
+  director ``advance`` and the executor ``plan_path``);
+- heading lines drawn beneath the markers/circle but above the paths: an **arrival**
   line in the robot's colour, plus, when the robot spun in place, a distinct-colour **post-spin**
   line showing where it ended up facing;
 - a stats box: mission duration, time spent processing the VLM, time spent moving (the number
   of spins is counted there; angle magnitudes are not drawn on the map).
 
 The VLM-vs-movement split is derived from the actions' ``_action/status`` topics: the
-``plan_trajectory`` + ``advance`` windows are VLM-thinking (robot stationary), the
-``follow_trajectory`` + ``spin`` windows are movement. No runtime node is modified.
+``plan_path`` + ``advance`` windows are VLM-thinking (robot stationary), the
+``follow_path`` + ``spin`` windows are movement. No runtime node is modified.
 
 Usage:
     ros2 run hint_narrative mission_report /path/to/missions/<name>/mission.bag
@@ -49,18 +49,18 @@ _STATUS_TERMINAL = (4, 5, 6)     # SUCCEEDED, CANCELED, ABORTED
 
 # The four action-status topics, split by what the robot is doing during each window.
 _VLM_STATUS = (
-    "/trajectory_generator/plan_trajectory/_action/status",   # executor VLM
+    "/path_planner/plan_path/_action/status",   # executor VLM
     "/narrative_navigation/advance/_action/status",           # director VLM (wraps reason)
 )
 _MOVE_STATUS = (
-    "/trajectory_navigator_node/follow_trajectory/_action/status",
+    "/path_projector_node/follow_path/_action/status",
     "/spin/_action/status",
 )
-_PLAN_STATUS = "/trajectory_generator/plan_trajectory/_action/status"  # footprint anchors
+_PLAN_STATUS = "/path_planner/plan_path/_action/status"  # footprint anchors
 _SPIN_STATUS = "/spin/_action/status"                                  # turn markers
 
-_PATH_TOPIC = "/trajectory_navigator_node/path"
-_PATH_RAW_TOPIC = "/trajectory_navigator_node/path_raw"
+_PATH_TOPIC = "/path_projector_node/path"
+_PATH_RAW_TOPIC = "/path_projector_node/path_raw"
 
 _ROBOT_RADIUS = 0.20   # local_costmap robot_radius (footprint circle)
 
@@ -77,10 +77,10 @@ IN_PLACE_TURN_COLOR = "#c02060"
 ROBOT_FILL = False            # fill the footprint circle? (False = hollow outline)
 ROBOT_FILL_COLOR = "#8a8a8a"  # footprint circle fill — grey (used when ROBOT_FILL)
 
-# z-order layering: trajectories < heading lines < footprint circle < centre marker < label.
+# z-order layering: paths < heading lines < footprint circle < centre marker < label.
 Z_TRAJ = 3.0            # VLM raw / truncated polylines
 Z_ACTUAL = 3.5          # actual driven path
-Z_HEADING = 3.7         # arrival heading line (above trajectories, below the circle)
+Z_HEADING = 3.7         # arrival heading line (above paths, below the circle)
 Z_SPIN_HEADING = 3.8    # in-place post-spin heading line
 Z_CIRCLE = 4.0          # footprint circle
 Z_MARKER = 6.0          # centre marker (always on top of the circle)
@@ -390,7 +390,7 @@ def build_report(bag_path):
     plan_wins = windows(status, _PLAN_STATUS)
     n_plans = len(plan_wins)
     turn_wins = windows(status, _SPIN_STATUS)
-    # Total VLM calls = executor (plan_trajectory) + director (advance) windows.
+    # Total VLM calls = executor (plan_path) + director (advance) windows.
     n_vlm = sum(len(windows(status, t)) for t in _VLM_STATUS)
 
     stats = {
@@ -418,10 +418,10 @@ def build_report(bag_path):
         ax.plot(a[:, 0], a[:, 1], color=_C_ACTUAL, lw=2.4, alpha=0.8, zorder=Z_ACTUAL,
                 label="Actual path")
 
-    # Stopped positions: cluster the VLM calls (executor `plan_trajectory` + director `advance`)
+    # Stopped positions: cluster the VLM calls (executor `plan_path` + director `advance`)
     # in time order by spatial proximity. Each cluster is one place the robot stopped; its
     # number is the TOTAL count of VLM calls made there — both the visual reasoner (advance) and
-    # trajectory generation (plan). Consecutive calls within IN_PLACE_EPS are the same place, so
+    # path generation (plan). Consecutive calls within IN_PLACE_EPS are the same place, so
     # in-place scans/turns accumulate onto one footprint instead of stacking overlapping circles.
     IN_PLACE_EPS = 0.15   # metres; VLM calls within this of the cluster are the "same place"
     vlm_calls = sorted(w for topic in _VLM_STATUS for w in windows(status, topic))
@@ -511,7 +511,7 @@ def build_report(bag_path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Compile a mission's MCAP rosbag into a trajectory report + stats.")
+        description="Compile a mission's MCAP rosbag into a path report + stats.")
     parser.add_argument("bag_path", help="Path to the mission.bag directory")
     args = parser.parse_args()
     if not os.path.isdir(args.bag_path):

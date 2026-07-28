@@ -78,17 +78,17 @@ redirect them anywhere else.)
 ## The loop, in one line
 
 Per cycle there are **two VLM calls** with a clean division of labour — **both see**:
-- **trajectory_generator (executor-with-eyes):** the narrative's `next` + this cycle's frame buffer →
+- **path_planner (executor-with-eyes):** the narrative's `next` + this cycle's frame buffer →
   waypoints **and** a short reasoning `message` (what it did / why). The BT logs that message, but it
   is **not** fed to the director. The planner has no camera of its own: it receives the **same** frames
   the director just judged — this node passes them out on the `advance` result's `images`, and the BT
-  forwards them to `PlanTrajectory.images`. One buffer feeds both calls (no second buffer to drift).
+  forwards them to `PlanPath.images`. One buffer feeds both calls (no second buffer to drift).
 - **reasoner (director-with-eyes):** one `compile.txt` call that reasons over the **before/after
   frames of the move just executed** (captured by this node and attached to the call) plus the
   narrative — it judges the move from the images, folds it in, and emits the next instruction +
   completion.
 
-The `visual_reasoner` is the director (memory + intent, now grounded in what it *sees*); the trajectory
+The `visual_reasoner` is the director (memory + intent, now grounded in what it *sees*); the path
 planner is the actor-with-eyes. **Frame buffer (`history_frames` = N):** the mission planner subscribes
 to the camera and latches the current view each time it hands out an instruction (a *move-start*
 frame), keeping a rolling buffer of the last **N**. Each `advance` passes those N past frames + the
@@ -96,7 +96,7 @@ current view (oldest → current) to the reasoner via the `Reason` goal's `image
 the *sequence* of its recent views and judges its moves against ground truth — closing the old
 **one-action-behind lag**. `N=1` is the before/after pair (default), `N=0` is current-view-only (no
 move comparison), `N=3–4` is deeper history (more image tokens = more latency/cost). This **same**
-buffer is handed to the trajectory planner (on the `advance` result's `images`), so `history_frames`
+buffer is handed to the path planner (on the `advance` result's `images`), so `history_frames`
 is the single knob governing frame depth for both VLM calls. Only *images* are buffered — the
 director's text memory (`done`) already carries the narrative history.
 
@@ -126,7 +126,7 @@ environment.
 ## Data contract 2 — Narrative State (`<mission>.narrative.jsonl`)
 
 The living memory, recompiled every cycle: prose, recency-weighted, lossy by design, and the
-**primary context for the next plan** (`narrative.next` is fed to `trajectory_generator`).
+**primary context for the next plan** (`narrative.next` is fed to `path_planner`).
 
 It is stored as a **versioned, git-like history** — each recompile **appends a full snapshot**
 (one JSON record per line) rather than overwriting, so the whole belief evolution is retained
@@ -146,7 +146,7 @@ the history is self-explaining.
 | `visited` | completed environments (their **enriched** descriptions — the learned map) |
 | `narrative.situation` | my current standing — where I am / what I face **right now**, rewritten fresh each cycle (the present moment, not history) |
 | `narrative.done` | recency-weighted history; older info abstracted, newer sharp |
-| `narrative.next` | the immediate next instruction — fed to `trajectory_generator` |
+| `narrative.next` | the immediate next instruction — fed to `path_planner` |
 
 ```jsonl
 {"version":1,"ts":"…","current_environment":"bedroom","mission_complete":false,"action":"insert","trigger":{"success":true,"observation":"planner: the only door leads to a hallway, not the living room"},"queue":[{"name":"bedroom","description":"a bedroom; door on the far wall opens to a hallway","intent":"pass through to the living room"},{"name":"corridor","description":"a hallway linking the rooms","intent":""},{"name":"living_room","description":"A regular living room","intent":"stop in front of the couch"}],"visited":[],"narrative":{"situation":"I am in the bedroom, facing the far wall; a door to a hallway is directly ahead.","done":"Found the bedroom's only exit is a hallway.","next":"Drive to the doorway on the far wall."}}
@@ -169,8 +169,8 @@ the *compiled belief*.
 Every run auto-records a **minimal MCAP rosbag** (`<mission>.bag`, a sibling of the mission YAML),
 started on a fresh run and closed when the mission ends (or on Ctrl+C). It is **overwritten each
 run**, mirroring the jsonl semantics. The topic set is deliberately small (no images / clouds /
-costmap — just `/tf`, `/tf_static`, `/odom`, the navigator's raw + truncated paths, `/map` if
-present, and the `plan_trajectory` / `advance` / `follow_trajectory` / `spin` `_action/status`
+costmap — just `/tf`, `/tf_static`, `/odom`, the projector's raw + truncated paths, `/map` if
+present, and the `plan_path` / `advance` / `follow_path` / `spin` `_action/status`
 topics). Toggle with the `record_bag` param; relocate with `bag_path`. Recording is a controlled
 `ros2 bag record --storage mcap` subprocess (needs `ros-<distro>-rosbag2-storage-mcap`).
 
@@ -185,7 +185,7 @@ Reference frame is `map` if the bag has one, else `odom`. The figure shows the *
 path (continuous), the VLM **raw** and **truncated** paths, the robot **footprint** (circle +
 heading) drawn **only at VLM plan-call poses**, start/end markers, each **turn** as a curved arrow
 labelled with its measured (odometry) magnitude, and a stats box: mission duration, VLM-processing
-time (`plan_trajectory` + `advance` windows) and movement time (`follow_trajectory` + `spin`
+time (`plan_path` + `advance` windows) and movement time (`follow_path` + `spin`
 windows) — all derived from the recorded `_action/status` topics, so no runtime node is touched.
 
 ## Prompt template (`prompts/compile.txt`)
@@ -230,7 +230,7 @@ mission loaded and none provided fails cleanly (`mission_failed`).
 |---|---|---|
 | `~/advance` | `hint_interfaces/action/MissionAdvance` | Action server |
 | `/visual_reasoner/reason` (see `reasoner_action`) | `hint_interfaces/action/Reason` | Action client — the narrative recompile (with before/after frames) |
-| `/camera/image_raw/compressed` (see `camera_topic`) | `sensor_msgs/CompressedImage` | Sub — latest frame; latched into the **unified** rolling image buffer (`history_frames`), fed to both the director and (via the `advance` result's `images`) the trajectory planner |
+| `/camera/image_raw/compressed` (see `camera_topic`) | `sensor_msgs/CompressedImage` | Sub — latest frame; latched into the **unified** rolling image buffer (`history_frames`), fed to both the director and (via the `advance` result's `images`) the path planner |
 
 **`advance`** — Goal: `success` (did the last move execute?), `observation` (the planner's VLM
 reasoning, verbatim), `mission_path` (optional — the mission to run; loads/switches it when it
@@ -241,7 +241,7 @@ snapshot, and returns Result:
 `mission_done` (queue empty **or** failed), `mission_failed` (stuck past the cap, or an unrecoverable
 compile/IO error), `description` (= the narrative's `next`), `area` (= the current queue head),
 `message` (= the narrative's `done`, or the failure reason), and `images` (this cycle's unified frame
-buffer, oldest first, last = current view — the BT forwards it to `PlanTrajectory.images` so the
+buffer, oldest first, last = current view — the BT forwards it to `PlanPath.images` so the
 planner plans over the same frames the director judged; empty when `mission_done`). On the first call
 nothing has executed (`success` defaults true, `observation` empty) so it just emits the opening
 instruction.
@@ -310,7 +310,7 @@ Fallback
     Sequence
       MissionAdvance(success={last_ok}, observation={plan_message}) → {description}, {area}
       Fallback                                   # capture follow success/failure into {last_ok}
-        Sequence: FollowPlannedTrajectory(description)→{plan_message} ; SetBlackboard(last_ok := true)
+        Sequence: FollowPlannedPath(description)→{plan_message} ; SetBlackboard(last_ok := true)
         SetBlackboard(last_ok := false)
   AlwaysSuccess                                  # completion → overall SUCCESS
 ```
@@ -322,7 +322,7 @@ divergence is absorbed by the narrative, so the loop only ends on completion, an
 `MissionAdvance`; `Fallback`/`KeepRunningUntilFailure`/`SetBlackboard`/`AlwaysSuccess` are stock
 BT.cpp.
 
-> **Future refinements (deferred):** the trajectory planner returning *no* waypoints as an
+> **Future refinements (deferred):** the path planner returning *no* waypoints as an
 > explicit "arrived" signal, and a scan/rotate primitive so the planner can look where the goal
 > isn't currently in view (the current forward-arc action space can't turn around). Movement work
 > is out of scope for now; completion is inferred from the planner's reasoning.

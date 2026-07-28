@@ -1,6 +1,6 @@
-"""Trajectory navigator — adapter from the VLM trajectory to Nav2's FollowPath.
+"""Path projector — adapter from the VLM path to Nav2's FollowPath.
 
-Exposes the **same** ``hint_interfaces/action/FollowTrajectory`` action the behaviour
+Exposes the **same** ``hint_interfaces/action/FollowPath`` action the behaviour
 tree already calls (so only its action name is repointed), and internally drives Nav2's
 ``nav2_msgs/action/FollowPath`` (MPPI controller). The whole chain stays action-based.
 
@@ -43,7 +43,7 @@ from std_msgs.msg import String
 
 from nav2_msgs.action import FollowPath
 
-from hint_interfaces.action import FollowTrajectory
+from hint_interfaces.action import FollowPath
 
 from hint_navigation.camera_rig import CameraRig
 
@@ -110,9 +110,9 @@ def _smooth_resample(pts, spacing, samples_per_seg=24):
                             np.interp(su, s, curve[:, 1])])
 
 
-class TrajectoryNavigatorNode(Node):
+class PathProjectorNode(Node):
     def __init__(self):
-        super().__init__("trajectory_navigator_node")
+        super().__init__("path_projector_node")
 
         # --- Camera rig for the normalized-marker -> ground projection (shared,
         # live-adjustable; re-snapshotted per goal via CameraRig.from_node) ---
@@ -131,7 +131,7 @@ class TrajectoryNavigatorNode(Node):
         self.declare_parameter("progress_checker_id", "progress_checker")
         self.declare_parameter("odom_topic", "/odom")
         self.declare_parameter("path_frame", "odom")
-        # Ground-mask clipping: the VLM pixel trajectory is truncated at the first marker
+        # Ground-mask clipping: the VLM pixel path is truncated at the first marker
         # that leaves the segmented ground (that marker and all after it are dropped, so we
         # never follow a path that runs off the floor). No fresh mask -> pass through.
         self.declare_parameter("mask_topic", "/camera/ground")
@@ -156,7 +156,7 @@ class TrajectoryNavigatorNode(Node):
             Odometry, str(self._p("odom_topic")), self._odom_cb, 20
         )
 
-        # --- Ground mask (image-space, for clipping the pixel trajectory) ---
+        # --- Ground mask (image-space, for clipping the pixel path) ---
         self._bridge = CvBridge()
         self._mask_buf = deque(maxlen=30)  # (header-stamp seconds, mask HxW uint8)
         self._last_mask_recv = None        # local receipt clock, for staleness
@@ -167,7 +167,7 @@ class TrajectoryNavigatorNode(Node):
 
         # Latched debug publishers (RViz: add Path displays, fixed frame = path_frame).
         #   ~/path      — the ground-clipped path actually handed to MPPI
-        #   ~/path_raw  — the FULL VLM trajectory as grounded (debug only, never followed),
+        #   ~/path_raw  — the FULL VLM path as grounded (debug only, never followed),
         #                 so you can see what the VLM intended vs what survived the clip.
         _latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self._path_pub = self.create_publisher(Path, "~/path", _latched)
@@ -177,8 +177,8 @@ class TrajectoryNavigatorNode(Node):
 
         self._action_server = ActionServer(
             self,
-            FollowTrajectory,
-            "~/follow_trajectory",
+            FollowPath,
+            "~/follow_path",
             execute_callback=self._execute_cb,
             goal_callback=self._goal_cb,
             cancel_callback=self._cancel_cb,
@@ -186,7 +186,7 @@ class TrajectoryNavigatorNode(Node):
         )
 
         self.get_logger().info(
-            "Trajectory navigator ready — call ~/follow_trajectory (drives Nav2 "
+            "Path projector ready — call ~/follow_path (drives Nav2 "
             f"{self._p('follow_path_action')})."
         )
 
@@ -198,7 +198,7 @@ class TrajectoryNavigatorNode(Node):
 
     def _goal_cb(self, goal_request):
         if not self._goal_lock.acquire(blocking=False):
-            self.get_logger().warn("Rejecting goal — another trajectory is running.")
+            self.get_logger().warn("Rejecting goal — another path is running.")
             return GoalResponse.REJECT
         return GoalResponse.ACCEPT
 
@@ -235,7 +235,7 @@ class TrajectoryNavigatorNode(Node):
         return (s[1], s[2], s[3])
 
     # ------------------------------------------------------------------
-    # Ground mask -> pixel-trajectory clipping
+    # Ground mask -> pixel-path clipping
 
     def _mask_cb(self, msg):
         try:
@@ -269,7 +269,7 @@ class TrajectoryNavigatorNode(Node):
         off-ground marker and everything after it, so we never follow a broken path.
 
         Markers are normalized image coords (``x``/``y in [-1, 1]``, center 0), mapped into
-        the mask's own pixel grid. No fresh mask -> pass the trajectory through unchanged.
+        the mask's own pixel grid. No fresh mask -> pass the path through unchanged.
         """
         mask = self._mask_at(stamp)
         if mask is None:
@@ -303,7 +303,7 @@ class TrajectoryNavigatorNode(Node):
             return None
         ref = self._pose_at(stamp)
         if ref is None:
-            self.get_logger().warn("No odometry yet — cannot ground the trajectory.")
+            self.get_logger().warn("No odometry yet — cannot ground the path.")
             return None
 
         w = int(self._p("image_width"))
@@ -363,22 +363,22 @@ class TrajectoryNavigatorNode(Node):
     def _run(self, goal_handle):
         goal = goal_handle.request
 
-        # Ground the FULL VLM trajectory once — published on ~/path_raw as a debug so RViz
+        # Ground the FULL VLM path once — published on ~/path_raw as a debug so RViz
         # shows what the VLM intended, even though we only *drive* the ground-clipped path.
         raw_path = self._build_path(goal.waypoints, goal.stamp)
 
-        # Clip the VLM pixel trajectory to the segmented ground: keep the leading run of
+        # Clip the VLM pixel path to the segmented ground: keep the leading run of
         # markers on the mask, drop the first off-ground one and everything after it.
         wps = self._clip_to_ground(goal.waypoints, goal.stamp)
 
         # Nothing left to follow — the planner sent no path (a turn-only move), or the whole
-        # trajectory fell off the ground. Succeed immediately so the BT's SpinAction, which
+        # path fell off the ground. Succeed immediately so the BT's SpinAction, which
         # runs next in the sequence, still performs the rotation. (A real grounding failure
         # with waypoints present still aborts below.)
         if not wps:
             if raw_path is not None:
                 self._publish_path(raw_path, self._raw_path_pub)  # still show the intent
-            result = FollowTrajectory.Result()
+            result = FollowPath.Result()
             result.success = True
             result.message = "No drivable path (turn-only or clipped off-ground)"
             goal_handle.succeed()
@@ -388,7 +388,7 @@ class TrajectoryNavigatorNode(Node):
         # (raw_path is None only if odom is missing, in which case the clipped build fails too.)
         path = raw_path if len(wps) == len(goal.waypoints) else self._build_path(wps, goal.stamp)
         if path is None:
-            return self._abort(goal_handle, "Could not ground trajectory (no odometry)")
+            return self._abort(goal_handle, "Could not ground path (no odometry)")
         self._publish_path(path, self._path_pub)         # RViz: the path handed to MPPI
         self._publish_path(raw_path, self._raw_path_pub)  # RViz: the full VLM intent
 
@@ -438,15 +438,15 @@ class TrajectoryNavigatorNode(Node):
 
         if goal_handle.is_cancel_requested or status == GoalStatus.STATUS_CANCELED:
             goal_handle.canceled()
-            result = FollowTrajectory.Result()
+            result = FollowPath.Result()
             result.success = False
             result.message = "Cancelled by client"
             return result
 
-        result = FollowTrajectory.Result()
+        result = FollowPath.Result()
         if status == GoalStatus.STATUS_SUCCEEDED:
             result.success = True
-            result.message = "Trajectory complete (Nav2 FollowPath reached the goal)"
+            result.message = "Path complete (Nav2 FollowPath reached the goal)"
             goal_handle.succeed()
         else:
             result.success = False
@@ -459,10 +459,10 @@ class TrajectoryNavigatorNode(Node):
 
     def _abort(self, goal_handle, message):
         goal_handle.abort()
-        result = FollowTrajectory.Result()
+        result = FollowPath.Result()
         result.success = False
         result.message = message
-        self.get_logger().warn(f"FollowTrajectory aborted: {message}")
+        self.get_logger().warn(f"FollowPath aborted: {message}")
         return result
 
     def _publish_path(self, path, pub):
@@ -477,14 +477,14 @@ class TrajectoryNavigatorNode(Node):
         pub.publish(path)
 
     def _publish_feedback(self, goal_handle, state):
-        fb = FollowTrajectory.Feedback()
+        fb = FollowPath.Feedback()
         fb.state = state
         goal_handle.publish_feedback(fb)
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = TrajectoryNavigatorNode()
+    node = PathProjectorNode()
     executor = MultiThreadedExecutor()
     executor.add_node(node)
     try:

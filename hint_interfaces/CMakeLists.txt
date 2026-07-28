@@ -14,10 +14,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SetWaypoints.srv"
   "srv/StopTracking.srv"
   "action/ApproachTarget.action"
-  "action/FollowTrajectory.action"
+  "action/FollowPath.action"
   "action/GroundDescription.action"
   "action/VisualQuestion.action"
-  "action/PlanTrajectory.action"
+  "action/PlanPath.action"
   "action/Reason.action"
   "action/MissionAdvance.action"
   DEPENDENCIES builtin_interfaces std_msgs sensor_msgs geometry_msgs

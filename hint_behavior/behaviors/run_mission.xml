@@ -17,7 +17,7 @@
 
     1. MissionAdvance(success, observation) hands out the next instruction, or
        returns FAILURE when the narrative reports the mission complete.
-    2. FollowPlannedTrajectory plans + follows it, surfacing the planner's VLM
+    2. FollowPlannedPath plans + follows it, surfacing the planner's VLM
        reasoning as {plan_message}.
     3. SetBlackboard records whether the execution succeeded into {last_ok}, fed
        back to the next MissionAdvance. (On the first tick {last_ok} is unset;
@@ -40,7 +40,7 @@
                           mission_failed="{mission_failed}" images="{images}"/>
           <Fallback>
             <Sequence>
-              <SubTree ID="FollowPlannedTrajectory" description="{description}"
+              <SubTree ID="FollowPlannedPath" description="{description}"
                        images="{images}" plan_message="{plan_message}"/>
               <SetBlackboard output_key="last_ok" value="true"/>
             </Sequence>

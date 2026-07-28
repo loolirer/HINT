@@ -5,7 +5,7 @@ output data and this node layers those outputs into a **single** `/debug` image:
 
 - the camera frame as the backdrop,
 - the binary ground mask as a green/red overlay,
-- the trajectory navigator's followed (ground-clipped) and raw (full VLM-intent) paths,
+- the path projector's followed (ground-clipped) and raw (full VLM-intent) paths,
   re-projected onto the frame via the current odometry pose so they track as the robot moves,
 - the mission (BT) tree's live state as text, top-left.
 
@@ -13,7 +13,7 @@ Every layer toggles via a `show_*` parameter. Rendering is subscriber-gated: not
 composed or published unless something subscribes to `/debug`.
 
 Lives in hint_navigation (not perception): it needs the camera rig to re-project the
-navigator's odom paths, and most of what it draws (paths, BT state) is navigation state —
+projector's odom paths, and most of what it draws (paths, BT state) is navigation state —
 so it shares the rig (`camera_rig.CameraRig`) with the other navigation nodes.
 """
 
@@ -69,8 +69,8 @@ class VisualDebugNode(Node):
         # --- Input topics ---
         self.declare_parameter("image_topic", "/camera/image_raw/compressed")
         self.declare_parameter("mask_topic", "/camera/ground")
-        self.declare_parameter("path_topic", "/trajectory_navigator_node/path")
-        self.declare_parameter("path_raw_topic", "/trajectory_navigator_node/path_raw")
+        self.declare_parameter("path_topic", "/path_projector_node/path")
+        self.declare_parameter("path_raw_topic", "/path_projector_node/path_raw")
         self.declare_parameter("odom_topic", "/odom")
         self.declare_parameter("bt_state_topic", "/hint_behavior_server/state")
 

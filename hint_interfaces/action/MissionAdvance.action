@@ -8,11 +8,11 @@ bool first          # true on the FIRST advance of a fresh tree run -> wipe any 
 # Result — the next directive
 bool mission_done    # true when the mission is over (complete OR failed)
 bool mission_failed  # true when it ended in failure (stuck in an environment past the cycle cap); false on clean completion
-string description   # the next instruction to feed trajectory_planner (empty when mission_done)
+string description   # the next instruction to feed path_planner (empty when mission_done)
 string area          # the current environment (from the narrative)
 string message       # the narrative's present intent, closing summary, or the failure reason
 # The unified image buffer for this cycle, owned here (oldest first, last = current
-# view). The BT forwards it to PlanTrajectory.images so the planner plans over the
+# view). The BT forwards it to PlanPath.images so the planner plans over the
 # SAME frames the director just judged — one buffer, no mismatch. Empty when mission_done.
 sensor_msgs/CompressedImage[] images
 ---

@@ -39,11 +39,11 @@ public:
                                  "grounded VLM feedback from the execution (verbatim)"),
       BT::InputPort<std::string>("mission", "",
                                  "mission YAML to run; empty keeps the node's current/default"),
-      BT::OutputPort<std::string>("description", "next instruction to feed trajectory_planner"),
+      BT::OutputPort<std::string>("description", "next instruction to feed path_planner"),
       BT::OutputPort<std::string>("area", "the current environment (from the narrative)"),
       BT::OutputPort<bool>("mission_failed", "true when the mission ended stuck (past the cycle cap)"),
       BT::OutputPort<std::vector<sensor_msgs::msg::CompressedImage>>(
-        "images", "unified frame buffer for this cycle — forwarded to PlanTrajectory.images"),
+        "images", "unified frame buffer for this cycle — forwarded to PlanPath.images"),
     });
   }
 
@@ -67,8 +67,8 @@ public:
     setOutput("description", wr.result->description);
     setOutput("area", wr.result->area);
     setOutput("mission_failed", wr.result->mission_failed);
-    // Forward the cycle's frame buffer so FollowPlannedTrajectory can hand it to
-    // PlanTrajectory.images — one buffer shared by the director and the planner.
+    // Forward the cycle's frame buffer so FollowPlannedPath can hand it to
+    // PlanPath.images — one buffer shared by the director and the planner.
     setOutput("images", wr.result->images);
 
     if (wr.result->mission_done) {

@@ -10,8 +10,8 @@
 namespace hint_behavior
 {
 
-// Rotates the robot in place via Nav2's Spin behavior (/spin) — the end-of-trajectory /
-// scan re-orientation appended after FollowTrajectoryAction. yaw_degrees is the VLM's
+// Rotates the robot in place via Nav2's Spin behavior (/spin) — the end-of-path /
+// scan re-orientation appended after FollowPathAction. yaw_degrees is the VLM's
 // turn: + = left (CCW), - = right (CW); 0 completes instantly (a no-op turn).
 class SpinAction : public BT::RosActionNode<nav2_msgs::action::Spin>
 {

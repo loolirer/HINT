@@ -92,17 +92,17 @@ NARRATIVE_SCHEMA = json.dumps({
 ACTIONS = ("stay", "advance", "back", "insert")
 
 # Minimal topic set recorded per mission (no images / clouds / costmap, to keep the bag
-# small). The two paths + odom/tf give trajectory; the action _action/status topics give
+# small). The two paths + odom/tf give path; the action _action/status topics give
 # the VLM-thinking vs movement time windows the mission_report script derives stats from.
 # Missing topics (e.g. /map in the mapless setup) are simply not recorded — harmless.
 _BAG_TOPICS = [
     "/tf", "/tf_static", "/odom",
-    "/trajectory_navigator_node/path",       # truncated (clipped) path handed to MPPI
-    "/trajectory_navigator_node/path_raw",   # full VLM-intent path
+    "/path_projector_node/path",       # truncated (clipped) path handed to MPPI
+    "/path_projector_node/path_raw",   # full VLM-intent path
     "/map",                                  # OccupancyGrid if a map exists (else absent)
-    "/trajectory_generator/plan_trajectory/_action/status",         # executor-VLM windows
+    "/path_planner/plan_path/_action/status",         # executor-VLM windows
     "/narrative_navigation/advance/_action/status",                 # director-VLM windows
-    "/trajectory_navigator_node/follow_trajectory/_action/status",  # drive windows
+    "/path_projector_node/follow_path/_action/status",  # drive windows
     "/spin/_action/status",                                         # turn windows
 ]
 
@@ -384,8 +384,8 @@ class MissionPlannerNode(Node):
         result.mission_failed = False
         result.description = self._narrative.get("next", "")
         result.message = self._narrative.get("done", "")
-        # Hand the SAME frames the director just judged to the trajectory planner
-        # (via the BT → PlanTrajectory.images): one unified buffer, so the planner
+        # Hand the SAME frames the director just judged to the path planner
+        # (via the BT → PlanPath.images): one unified buffer, so the planner
         # plans on the same current view (images[-1]) the director reasoned over —
         # no second buffer to drift out of sync.
         result.images = images

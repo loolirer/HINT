@@ -7,16 +7,16 @@ purely image-space (it only labels pixels into a ground mask); everything metric
 that mask into obstacles, grounding VLM markers into a path, re-projecting paths for the
 debug view — happens on this side.
 
-It bets on Nav2's mature MPPI controller to follow the VLM-planned trajectory while flowing
+It bets on Nav2's mature MPPI controller to follow the VLM-planned path while flowing
 around obstacles in a rolling local costmap. No SLAM, no global map: the robot follows the
 path in `odom`, and the costmap is a short-lived rolling window.
 
 | Part | What |
 |---|---|
 | `camera_rig.py` (module) | `CameraRig` — the pinhole+tilt+height rig and both ground↔pixel projections; the single source of truth, imported by the three nodes below |
-| `trajectory_navigator` (node) | Exposes the `hint_interfaces/FollowTrajectory` action the BT calls, grounds the VLM's normalized markers into a metric `odom` `nav_msgs/Path`, and drives Nav2's `follow_path` (MPPI) |
+| `path_projector` (node) | Exposes the `hint_interfaces/FollowPath` action the BT calls, grounds the VLM's normalized markers into a metric `odom` `nav_msgs/Path`, and drives Nav2's `follow_path` (MPPI) |
 | `obstacle_projector` (node) | Streams `hint_perception`'s ground mask (`/camera/ground`) → obstacle `PointCloud2` (`/obstacles`) for the local costmap, via the ground-plane BEV homography |
-| `visual_debug` (node) | Composes one `/debug` image from the system's real outputs (mask overlay + navigator paths + BT state) |
+| `visual_debug` (node) | Composes one `/debug` image from the system's real outputs (mask overlay + projector paths + BT state) |
 | `launch/nav2.launch.py` + `config/nav2_local.yaml` | Brings up the mapless Nav2 stack: `controller_server` (FollowPath + MPPI, rolling local costmap) + `behavior_server` (Spin) + `nav2_lifecycle_manager` |
 
 ```bash
@@ -33,7 +33,7 @@ Requires the Nav2 stack installed (rosdep pulls it): `nav2_controller`,
 `camera_forward_offset`, `camera_tilt`, `camera_hfov_deg`) and the pinhole + tilt + height
 ground-plane model in **both directions**:
 
-- `pixels_to_ground(pts, w, h)` → metric `base_link` (X fwd, Y left) — used by `trajectory_navigator`.
+- `pixels_to_ground(pts, w, h)` → metric `base_link` (X fwd, Y left) — used by `path_projector`.
 - `ground_to_pixels(gxy, w, h)` → `(pixels, in_front)` — used by `obstacle_projector` (to build
   the BEV homography) and `visual_debug` (to re-project odom paths).
 
@@ -45,20 +45,20 @@ picks it up. The rig geometry is injected once by `hint_bringup` (the shared `ca
 dict); the BEV *grid* geometry (`bev_*`) is **not** a rig concern and lives in
 `obstacle_projector`.
 
-## trajectory_navigator
+## path_projector
 
-The BT (`hint_behavior`'s `FollowTrajectoryAction`) still calls
-`hint_interfaces/FollowTrajectory` with the VLM's **normalized image markers**; this node is
+The BT (`hint_behavior`'s `FollowPathAction`) still calls
+`hint_interfaces/FollowPath` with the VLM's **normalized image markers**; this node is
 a transparent adapter that internally drives Nav2's `nav2_msgs/action/FollowPath`. The whole
 chain stays action-based.
 
 Per goal it:
 
-0. **Ground-clips** the VLM pixel trajectory: each normalized marker is tested against
+0. **Ground-clips** the VLM pixel path: each normalized marker is tested against
    `hint_perception`'s binary ground mask (`/camera/ground`, matched to the goal's frame
    stamp); the **leading run** of on-ground markers is kept, and the **first marker that
    leaves the ground is dropped along with every marker after it** — so the robot never
-   follows a path that runs off the floor. No fresh mask → the trajectory passes through
+   follows a path that runs off the floor. No fresh mask → the path passes through
    unclipped. If nothing survives (all off-ground, or the VLM sent none), the goal succeeds
    as a no-op so the BT's Spin still runs.
 1. **Grounds** the surviving markers (`x`/`y ∈ [-1, 1]`, nearest-first) onto the ground plane
@@ -71,7 +71,7 @@ Per goal it:
    Catmull-Rom** spline is fit through the (few, far-apart) markers and resampled at
    `path_resolution` m (default `0.05`, ≈ costmap resolution). MPPI's path critics
    (`offset_from_furthest`, path-align) are index-based and assume a costmap-resolution path;
-   feeding them the raw sparse markers stalled the optimizer mid-path on long trajectories
+   feeding them the raw sparse markers stalled the optimizer mid-path on long paths
    (the robot slowed and turned in place until `FollowPath` aborted). Centripetal
    parameterization keeps the smoothed curve close to the polyline (no cusps/overshoot), and
    the endpoints stay exactly on the robot pose and final marker.
@@ -85,7 +85,7 @@ It also republishes two grounded paths (re-stamped, at control rate) purely for 
 re-stamping is what lets them render correctly in an **ego (`base_link`) view** instead of
 freezing at plan time:
 - **`~/path`** — the ground-clipped path actually handed to MPPI.
-- **`~/path_raw`** — the **full VLM trajectory** as grounded (never followed), so you can
+- **`~/path_raw`** — the **full VLM path** as grounded (never followed), so you can
   see what the model intended vs what survived the clip. When nothing is clipped the two
   coincide.
 
@@ -93,12 +93,12 @@ freezing at plan time:
 
 | Interface | Type | Direction |
 |---|---|---|
-| `~/follow_trajectory` | `hint_interfaces/FollowTrajectory` | Action server (BT-facing) |
+| `~/follow_path` | `hint_interfaces/FollowPath` | Action server (BT-facing) |
 | `follow_path` (see `follow_path_action`) | `nav2_msgs/FollowPath` | Action client (Nav2 controller) |
-| `/camera/ground` (see `mask_topic`) | `sensor_msgs/Image` (`mono8`) | Sub — ground mask for clipping the pixel trajectory |
+| `/camera/ground` (see `mask_topic`) | `sensor_msgs/Image` (`mono8`) | Sub — ground mask for clipping the pixel path |
 | `/odom` (see `odom_topic`) | `nav_msgs/Odometry` | Sub — world anchor for grounding |
 | `~/path` | `nav_msgs/Path` (latched) | Pub — the ground-clipped path handed to MPPI, for RViz |
-| `~/path_raw` | `nav_msgs/Path` (latched) | Pub — the full VLM trajectory grounded (debug; never followed) |
+| `~/path_raw` | `nav_msgs/Path` (latched) | Pub — the full VLM path grounded (debug; never followed) |
 
 ### Key parameters
 
@@ -125,8 +125,8 @@ TF-transforms `base_link → odom` at capture time — landing the points where 
 not where the robot is now.
 
 > Split out of the old fused segmenter so perception stays purely image-space. Kept a
-> **separate node** from `trajectory_navigator` on purpose: the obstacle cloud is
-> safety-critical streaming that must keep flowing while the navigator's `follow_trajectory`
+> **separate node** from `path_projector` on purpose: the obstacle cloud is
+> safety-critical streaming that must keep flowing while the projector's `follow_path`
 > action blocks for a whole path-follow, and separate processes get independent launch respawn.
 
 ### Interfaces
@@ -154,12 +154,12 @@ The single place for live visualization. Instead of every node shipping its own 
 each node publishes only its **real output**, and this node layers those into one **`/debug`**
 image (`sensor_msgs/Image`, `bgr8`). Rendering is **subscriber-gated** — nothing is composed
 or published unless something subscribes to `/debug`. It lives here (not in perception)
-because it needs the rig to re-project the navigator's odom paths onto the frame.
+because it needs the rig to re-project the projector's odom paths onto the frame.
 
 Layers (each toggled by a `show_*` param):
 1. **Backdrop** — the camera frame.
 2. **Ground overlay** — the binary mask tinted (muted green = ground, coral = not), alpha-blended.
-3. **Paths** — the navigator's `~/path_raw` (full VLM intent) and `~/path` (followed, ground-clipped),
+3. **Paths** — the projector's `~/path_raw` (full VLM intent) and `~/path` (followed, ground-clipped),
    each transformed `odom → current base_link` (via `CameraRig.ground_to_pixels`) and projected
    onto the frame, so they track as the robot moves. Amber = intent, teal = followed.
 4. **BT state** — the mission tree's live state (`/hint_behavior_server/state`) as text, top-left.
@@ -175,8 +175,8 @@ ros2 param set /visual_debug_node show_mask false        # toggle any layer live
 |---|---|---|
 | `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Sub — backdrop, drives the render |
 | `/camera/ground` (see `mask_topic`) | `sensor_msgs/Image` (`mono8`) | Sub — ground overlay |
-| `/trajectory_navigator_node/path` | `nav_msgs/Path` | Sub — followed (clipped) path |
-| `/trajectory_navigator_node/path_raw` | `nav_msgs/Path` | Sub — full VLM-intent path |
+| `/path_projector_node/path` | `nav_msgs/Path` | Sub — followed (clipped) path |
+| `/path_projector_node/path_raw` | `nav_msgs/Path` | Sub — full VLM-intent path |
 | `/odom` | `nav_msgs/Odometry` | Sub — pose for re-projecting the paths |
 | `/hint_behavior_server/state` | `std_msgs/String` | Sub — mission-tree state text |
 | `/debug` | `sensor_msgs/Image` (`bgr8`) | Pub — the single composited debug image |

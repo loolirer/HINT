@@ -6,16 +6,16 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 
 from geometry_msgs.msg import Point
-from hint_interfaces.action import PlanTrajectory
+from hint_interfaces.action import PlanPath
 
 from hint_vlm.gemini.gemini_base import GeminiActionNode
 
 
-class TrajectoryPlannerNode(GeminiActionNode):
-    """Plans a ground-restricted trajectory from a text instruction + goal frames.
+class PathPlannerNode(GeminiActionNode):
+    """Plans a ground-restricted path from a text instruction + goal frames.
 
     Like ``visual_reasoner``, it holds no camera buffer of its own: the frames to
-    plan over arrive in the ``PlanTrajectory`` goal's ``images`` list (the single
+    plan over arrive in the ``PlanPath`` goal's ``images`` list (the single
     buffer owned by ``hint_narrative``), oldest first — the LAST is the current
     view the path is planned on, any earlier ones are recent past views attached
     for continuity. This keeps the planner and the mission director reasoning over
@@ -24,14 +24,14 @@ class TrajectoryPlannerNode(GeminiActionNode):
     """
 
     def __init__(self):
-        super().__init__("trajectory_generator")
+        super().__init__("path_planner")
 
         # Farthest image row (of 1000) a waypoint may occupy — caps how far ahead
-        # the trajectory reaches. Smaller row = farther/higher in the frame = more
+        # the path reaches. Smaller row = farther/higher in the frame = more
         # error-prone; larger = nearer/more conservative. Live-adjustable.
         self.declare_parameter("min_row", 500)
 
-        # Consensus sampling: ask for N candidate trajectories in ONE reply (this
+        # Consensus sampling: ask for N candidate paths in ONE reply (this
         # model rejects candidate_count>1, so the prompt requests a candidates list)
         # and keep the medoid — the path closest to all the others — robust to the
         # model splitting between routes at temperature > 0. 1 = a single plan.
@@ -46,8 +46,8 @@ class TrajectoryPlannerNode(GeminiActionNode):
 
         self._action_server = ActionServer(
             self,
-            PlanTrajectory,
-            "~/plan_trajectory",
+            PlanPath,
+            "~/plan_path",
             execute_callback=self._execute_cb,
             goal_callback=self._goal_cb,
             cancel_callback=self._cancel_cb,
@@ -55,7 +55,7 @@ class TrajectoryPlannerNode(GeminiActionNode):
         )
 
         self.get_logger().info(
-            "Trajectory planner ready — call ~/plan_trajectory."
+            "Path planner ready — call ~/plan_path."
         )
 
     # ------------------------------------------------------------------
@@ -94,7 +94,7 @@ class TrajectoryPlannerNode(GeminiActionNode):
         # (via {return_spec}) and we pick the medoid. n<=1 is the plain single plan.
         n = max(1, int(self._p("n_candidates")))
         prompt = self._fill_prompt(
-            "trajectory_generator.txt", description=goal.description,
+            "path_planner.txt", description=goal.description,
             min_row=int(self._p("min_row")), return_spec=self._return_spec(n),
             continuity=self._continuity_text(len(hist)))
         contents = [prompt] + hist + [pil_img]
@@ -146,7 +146,7 @@ class TrajectoryPlannerNode(GeminiActionNode):
             reasoning, markers, points, turn = first_reason, [], [], first_turn
             self.get_logger().info(f"No waypoints — turn-only/no-op move ({turn:+.0f} deg).")
 
-        result = PlanTrajectory.Result()
+        result = PlanPath.Result()
         # The VLM's brief explanation of the chosen path rides on `message`.
         result.message = reasoning or f"{len(markers)} waypoint(s), turn {turn:+.0f} deg"
         result.markers = markers
@@ -330,27 +330,27 @@ class TrajectoryPlannerNode(GeminiActionNode):
         return markers
 
     def _publish_feedback(self, goal_handle, state):
-        fb = PlanTrajectory.Feedback()
+        fb = PlanPath.Feedback()
         fb.state = state
         goal_handle.publish_feedback(fb)
 
     def _abort(self, goal_handle, message):
         self.get_logger().warn(message)
-        result = PlanTrajectory.Result()
+        result = PlanPath.Result()
         result.message = message
         goal_handle.abort()   # ABORTED status is the failure signal
         return result
 
     def _cancel(self, goal_handle):
         goal_handle.canceled()
-        result = PlanTrajectory.Result()
+        result = PlanPath.Result()
         result.message = "Cancelled"
         return result
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = TrajectoryPlannerNode()
+    node = PathPlannerNode()
     executor = MultiThreadedExecutor()
     executor.add_node(node)
     try:
