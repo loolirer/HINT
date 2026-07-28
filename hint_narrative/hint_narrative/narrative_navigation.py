@@ -1,11 +1,14 @@
 """Semantic mission planner — the narrative director for HINT missions.
 
 Consumes a Semantic Plan (environments to visit, in order, each a brief intent) and
-drives navigation by maintaining a rolling Narrative State, recompiled every cycle
-by one reasoner call. Exposes one BT-facing action server, ``~/advance``: the caller
-reports the outcome of the move it just executed (``success`` + the planner's VLM
-``observation``); the node folds it in and returns the next instruction, or
-``mission_done``.
+drives navigation by maintaining a rolling Narrative State. This node is the mission's
+**cognition** layer: each ``~/mission_advance`` cycle it makes BOTH per-cycle VLM calls
+over the frame buffer it owns — it recompiles the narrative (director, via
+``visual_reasoner``) AND plans the path (executor, via ``path_planner``) — and returns a
+ready-to-drive **trajectory** (``markers`` + ``turn_degrees`` + ``stamp``) to the BT. The
+BT is then a thin executive over motor skills (follow + spin); the caller only reports
+whether the last move ``success``-ed. The node folds that outcome in and returns the next
+trajectory, or ``mission_done``.
 
 **The environment queue.** Order is owned by *code*, not the model. The node holds a
 FIFO queue of environments (head = current) plus a stack of visited ones. The model
@@ -49,7 +52,7 @@ from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 
 from action_msgs.msg import GoalStatus
-from hint_interfaces.action import MissionAdvance, VisualReason
+from hint_interfaces.action import MissionAdvance, PlanVisualPath, VisualReason
 from sensor_msgs.msg import CompressedImage
 
 # Latest-frame-only camera QoS: keep just the newest frame and drop stale ones
@@ -101,7 +104,7 @@ _BAG_TOPICS = [
     "/path_projector_node/path_raw",   # full VLM-intent path
     "/map",                                  # OccupancyGrid if a map exists (else absent)
     "/path_planner/plan_visual_path/_action/status",         # executor-VLM windows
-    "/narrative_navigation/advance/_action/status",                 # director-VLM windows
+    "/narrative_navigation/mission_advance/_action/status",                 # director-VLM windows
     "/path_projector_node/follow_visual_path/_action/status",  # drive windows
     "/spin/_action/status",                                         # turn windows
 ]
@@ -112,7 +115,7 @@ class MissionPlannerNode(Node):
         super().__init__("narrative_navigation")
 
         share = get_package_share_directory("hint_narrative")
-        self.declare_parameter("mission_path", "")   # empty = start idle; pick a mission per ~/advance call
+        self.declare_parameter("mission_path", "")   # empty = start idle; pick a mission per ~/mission_advance call
         self.declare_parameter("brief_path", os.path.join(share, "prompts", "brief.txt"))
         self.declare_parameter("prompts_dir", os.path.join(share, "prompts"))
         self.declare_parameter("narrative_path", "")   # empty -> <mission>.narrative.jsonl
@@ -123,6 +126,8 @@ class MissionPlannerNode(Node):
         self.declare_parameter("bag_path", "")          # empty -> <mission>.bag (sibling dir)
         self.declare_parameter("reasoner_action", "/visual_reasoner/visual_reason")
         self.declare_parameter("reasoner_timeout", 30.0)
+        self.declare_parameter("planner_action", "/path_planner/plan_visual_path")
+        self.declare_parameter("planner_timeout", 30.0)
         self.declare_parameter("max_env_cycles", 10)     # stuck backstop per environment
         self.declare_parameter("camera_topic", "/camera/image_raw/compressed")
         # Director vision buffer depth N: how many PAST move-start frames to attach
@@ -130,11 +135,12 @@ class MissionPlannerNode(Node):
         # 1 = before/after of the last move (the default); 3-4 = deeper history. Each
         # extra frame is more image tokens = more latency/cost. Live-adjustable.
         self.declare_parameter("history_frames", 1)
-        # Compile resilience. On a reasoner/API failure the narrative did NOT
-        # advance, so rather than re-serving a stale instruction (which would drive
-        # the robot on an un-updated belief), the advance call WAITS and retries the
-        # compile. `compile_retries` = retries after the first attempt: -1 = retry
-        # indefinitely until it succeeds or the BT halts; 0 = one attempt; N = N
+        # Cognition resilience — governs BOTH per-cycle VLM calls (the narrative
+        # compile AND the path plan). On a reasoner/planner/API failure the move did
+        # NOT advance, so rather than re-serving a stale instruction (which would drive
+        # the robot on an un-updated belief) or driving on no plan, the advance call
+        # WAITS and retries. `compile_retries` = retries after the first attempt: -1 =
+        # retry indefinitely until it succeeds or the BT halts; 0 = one attempt; N = N
         # retries. On a *bounded* budget being exhausted the mission aborts (BT
         # FAILURE), never re-serving. `compile_retry_delay` = backoff between
         # attempts. The robot never moves while waiting — the follow only runs once
@@ -159,6 +165,10 @@ class MissionPlannerNode(Node):
         # past frames + the current one are the image history handed to the director.
         self._latest_frame = None
         self._frame_history = []          # move-start frames, oldest first, trimmed to N
+        # The planner's reasoning from the LAST cycle's plan — recorded as the
+        # observation on the next cycle's trigger (the node owns this now; it is no
+        # longer round-tripped through the BT as a goal field).
+        self._last_plan_message = ""
 
         self._brief = self._read(self._p("brief_path"))
         if self._mission_path:
@@ -167,8 +177,10 @@ class MissionPlannerNode(Node):
         cbg = ReentrantCallbackGroup()
         self._reasoner = ActionClient(
             self, VisualReason, self._p("reasoner_action"), callback_group=cbg)
+        self._planner = ActionClient(
+            self, PlanVisualPath, self._p("planner_action"), callback_group=cbg)
         self._advance_srv = ActionServer(
-            self, MissionAdvance, "~/advance",
+            self, MissionAdvance, "~/mission_advance",
             execute_callback=self._advance_cb,
             cancel_callback=self._cancel_cb, callback_group=cbg)
         # Camera on the same reentrant group so frames keep arriving while an
@@ -306,38 +318,38 @@ class MissionPlannerNode(Node):
 
         trigger = None
         if self._served:
-            trigger = {"success": bool(req.success), "observation": req.observation}
+            # The move just executed was planned by THIS node last cycle, so its
+            # reasoning is ours (self._last_plan_message) — no longer round-tripped
+            # through the BT. `success` is the only outcome the BT reports back.
+            trigger = {"success": bool(req.success),
+                       "observation": self._last_plan_message}
             self._append_log("follow",
                              result="success" if req.success else "failure",
-                             observation=req.observation)
+                             observation=self._last_plan_message)
 
-        # Image history for the director-VLM. `after` = the current view (where
-        # the last move ended); the buffer holds the starts of recent moves. The
-        # director reads the move outcomes from these frames — the planner's text
-        # note is no longer fed in. Depth is `history_frames`.
+        # Frame buffer for BOTH VLM calls this cycle. `after` = the current view
+        # (where the last move ended); the buffer holds the starts of recent moves.
+        # The director reads move outcomes from these frames, and the SAME frames are
+        # planned over — one buffer, no drift. Depth is `history_frames`.
         after = self._latest_frame
         history = self._history_window()
         images, vision = self._vision_inputs(history, after)
 
+        # --- Cognition call 1: recompile the narrative (director) ---
         data = self._compile(vision, images, goal_handle)
 
         if goal_handle.is_cancel_requested:
-            goal_handle.canceled()
-            cancelled = MissionAdvance.Result()
-            cancelled.message = "Cancelled."
-            self.get_logger().info("Advance cancelled (BT halt).")
-            return cancelled
+            return self._cancelled_result(goal_handle)
 
         result = MissionAdvance.Result()
         if data is None:
-            # Compile failed past the retry budget: the narrative did NOT
-            # advance, so we never fabricate progress by re-serving a stale
-            # instruction (which would drive the robot on an un-updated belief).
-            # Abort cleanly — mission_failed -> BT FAILURE. With
-            # compile_retries = -1 the compile waits indefinitely, so this is
-            # only reached once a *bounded* budget is exhausted; a BT halt is
-            # handled by the cancel check above, not here. Record a `fail`
-            # snapshot first so the narrative history explains why the run stopped.
+            # Compile failed past the retry budget: the narrative did NOT advance, so
+            # we never fabricate progress by re-serving a stale instruction (which
+            # would drive the robot on an un-updated belief). Abort cleanly —
+            # mission_failed -> BT FAILURE. With compile_retries = -1 the compile waits
+            # indefinitely, so this is only reached once a *bounded* budget is
+            # exhausted; a BT halt is handled by the cancel check above. Record a
+            # `fail` snapshot (exactly one per cycle) so the history explains the stop.
             self._failed = True
             self._append_snapshot(trigger, "fail")
             cur = self._current()
@@ -352,16 +364,20 @@ class MissionPlannerNode(Node):
             self.get_logger().warn(result.message)
             return result
 
+        # Apply the queue edit + stuck-cap and fold the fresh narrative in (in memory).
+        # The snapshot is DEFERRED until this cycle's outcome — mission-end or a planned
+        # move — is known, so exactly one snapshot is written per cycle.
         action = self._apply(data)
         self._narrative = {"situation": str(data.get("situation", "")),
                            "done": str(data.get("done", "")),
                            "next": str(data.get("next", ""))}
-        self._append_snapshot(trigger, action)
 
         cur = self._current()
         result.area = cur["name"] if cur else ""
 
+        # --- Mission-end branches (no move to plan) ---
         if self._failed:
+            self._append_snapshot(trigger, action)   # action == "fail" (stuck cap)
             result.mission_done = True
             result.mission_failed = True
             result.message = (
@@ -372,6 +388,7 @@ class MissionPlannerNode(Node):
             return result
 
         if self._complete():
+            self._append_snapshot(trigger, action)
             result.mission_done = True
             result.mission_failed = False
             result.message = self._narrative.get("done", "") or "Mission complete."
@@ -380,22 +397,51 @@ class MissionPlannerNode(Node):
             self.get_logger().info(f"Mission complete (v{self._version}).")
             return result
 
+        # --- Cognition call 2: plan the move (executor) over the SAME frames ---
+        plan = self._plan(self._narrative.get("next", ""), images, goal_handle)
+
+        if goal_handle.is_cancel_requested:
+            return self._cancelled_result(goal_handle)
+
+        if plan is None:
+            # Plan failed past the retry budget — same rule as a failed compile: we do
+            # not drive without a plan. Fail the mission (one `fail` snapshot).
+            self._failed = True
+            self._append_snapshot(trigger, "fail")
+            result.mission_done = True
+            result.mission_failed = True
+            result.message = (
+                "Path plan failed past the retry budget — aborting "
+                "(no trajectory to drive).")
+            self._stop_recording()
+            goal_handle.succeed()
+            self.get_logger().warn(result.message)
+            return result
+
+        # A move to execute: commit the cycle's snapshot and return the trajectory.
+        self._append_snapshot(trigger, action)
         result.mission_done = False
         result.mission_failed = False
-        result.description = self._narrative.get("next", "")
-        result.message = self._narrative.get("done", "")
-        # Hand the SAME frames the director just judged to the path planner
-        # (via the BT → PlanVisualPath.images): one unified buffer, so the planner
-        # plans on the same current view (images[-1]) the director reasoned over —
-        # no second buffer to drift out of sync.
-        result.images = images
-        # This instruction will now be executed — push the current view into the
-        # frame buffer as a move-start frame for the director's next comparison.
+        result.markers = list(plan.markers)
+        result.turn_degrees = float(plan.turn_degrees)
+        result.stamp = plan.stamp
+        result.message = plan.message
+        self._last_plan_message = plan.message
+        # The move will now be executed — latch the current view as a move-start frame
+        # for the director's next before/after comparison.
         self._push_frame()
         self._served = True
         goal_handle.succeed()
         self.get_logger().info(
-            f"v{self._version} [{result.area}] ({action}) next: {result.description}")
+            f"v{self._version} [{result.area}] ({action}) "
+            f"{len(result.markers)} wpt, turn {result.turn_degrees:+.0f}: {plan.message}")
+        return result
+
+    def _cancelled_result(self, goal_handle):
+        goal_handle.canceled()
+        result = MissionAdvance.Result()
+        result.message = "Cancelled."
+        self.get_logger().info("Advance cancelled (BT halt).")
         return result
 
     def _apply(self, data):
@@ -494,6 +540,41 @@ class MissionPlannerNode(Node):
             if not self._interruptible_sleep(delay, goal_handle):
                 return None   # cancelled during the backoff
 
+    def _plan(self, description, images, goal_handle=None):
+        """Plan the move via one path_planner call, WAITING through failures.
+
+        Mirrors ``_compile``: the same retry-and-wait resilience (the robot stays put
+        in RUNNING) governs both cognition calls. Returns the ``PlanVisualPath`` result
+        (``markers`` / ``turn_degrees`` / ``stamp`` / ``message``) on success, or None
+        when a *bounded* budget is exhausted (-> the caller aborts the mission) or a BT
+        halt cancels the wait (-> the caller's cancel check).
+
+        An empty ``markers`` list is a valid SUCCESS (turn-only / no path visible) — only
+        a call that could not run (timeout / API error / unparseable reply) is a failure
+        and is retried.
+        """
+        retries = int(self._p("compile_retries"))     # -1 = retry indefinitely
+        delay = max(0.0, float(self._p("compile_retry_delay")))
+        attempt = 0
+        while True:
+            res = self._call_planner(description, images, goal_handle)
+            if res is not None:
+                return res
+            if goal_handle is not None and goal_handle.is_cancel_requested:
+                return None
+            attempt += 1
+            if retries >= 0 and attempt > retries:
+                self.get_logger().warn(
+                    f"Path plan failed after {attempt} attempt(s) — "
+                    "giving up (aborting the mission).")
+                return None
+            budget = f"{attempt}/{retries + 1}" if retries >= 0 else f"{attempt}, indefinite"
+            self.get_logger().warn(
+                f"Path plan failed (attempt {budget}) — the robot waits; "
+                f"retrying in {delay:.1f}s.")
+            if not self._interruptible_sleep(delay, goal_handle):
+                return None   # cancelled during the backoff
+
     def _context_text(self):
         """Only the current environment + a one-line peek — bounded regardless of
         how long or refined the queue is."""
@@ -553,6 +634,36 @@ class MissionPlannerNode(Node):
             self.get_logger().warn(f"Reasoner returned non-JSON: {res.response!r}")
             return None
 
+    # ------------------------------------------------------------------
+    # Planner client
+
+    def _call_planner(self, description, images, goal_handle=None):
+        """One path_planner call. Returns the PlanVisualPath result on SUCCESS, or None
+        on abort/timeout/cancel. Shares ``_await``'s cancel/timeout polling and the same
+        reentrant group as the reasoner client, so it composes under the executor."""
+        timeout = float(self._p("planner_timeout"))
+        if not self._planner.wait_for_server(timeout_sec=timeout):
+            self.get_logger().warn("Planner action server unavailable.")
+            return None
+        goal = PlanVisualPath.Goal()
+        goal.description = description
+        goal.images = images or []
+        handle = self._await(self._planner.send_goal_async(goal), timeout, goal_handle)
+        if handle is None or not handle.accepted:
+            self.get_logger().warn("Planner rejected the goal or timed out.")
+            return None
+        wrapped = self._await(handle.get_result_async(), timeout, goal_handle, handle)
+        if wrapped is None:
+            self.get_logger().warn("Planner result timed out or cancelled.")
+            return None
+        # Failure is the goal's terminal status (the planner ABORTs a call that could not
+        # run — no frame / timeout / API error / unparseable). On abort `message` carries
+        # the reason; an empty-markers SUCCESS is a valid turn-only move.
+        if wrapped.status != GoalStatus.STATUS_SUCCEEDED:
+            self.get_logger().warn(f"Planner failed: {wrapped.result.message}")
+            return None
+        return wrapped.result
+
     @staticmethod
     def _await(future, timeout, goal_handle=None, reasoner_handle=None):
         # Block the current server thread on a client future, polling so we can bail
@@ -589,7 +700,7 @@ class MissionPlannerNode(Node):
 
     def _load_mission(self, path):
         """(Re)load the mission at ``path`` and reset runtime state — or resume it
-        if that mission's narrative already exists. Switchable per ~/advance call.
+        if that mission's narrative already exists. Switchable per ~/mission_advance call.
 
         Parses the plan BEFORE committing any state, so a bad path / malformed YAML
         raises without corrupting ``_mission_path`` / ``_plan`` (leaving the current

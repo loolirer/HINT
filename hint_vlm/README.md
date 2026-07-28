@@ -55,7 +55,7 @@ Every node subclasses `GeminiActionNode`, so they share this base parameter set 
 
 ## path_planner
 
-Plans a **ground-restricted path** from a natural-language instruction using Gemini Robotics-ER's point-defining capability. Given a description (e.g. *"walk to the door keeping to the right of the wall"* or *"reach the table without going over the mattress"*), it returns an ordered set of floor waypoints (`markers`) **and** a signed `turn_degrees` (an in-place rotation to apply at the end of the move — including a turn-only "scan" move with empty `markers`). The `FollowPlannedPath` behavior in `hint_behavior` chains plan → follow → turn: `hint_navigation`'s `path_projector` grounds the markers into a metric `odom` path and drives them via Nav2's `follow_path` (MPPI), then Nav2's Spin behavior applies `turn_degrees`. This opens room for semantic navigation preferences and constraint-aware waypoint generation.
+Plans a **ground-restricted path** from a natural-language instruction using Gemini Robotics-ER's point-defining capability. Given a description (e.g. *"walk to the door keeping to the right of the wall"* or *"reach the table without going over the mattress"*), it returns an ordered set of floor waypoints (`markers`) **and** a signed `turn_degrees` (an in-place rotation to apply at the end of the move — including a turn-only "scan" move with empty `markers`). This node is called by `hint_narrative`'s `narrative_navigation` (the cognition layer, as one of its two per-cycle VLM calls) — **not** by the BT; the resulting trajectory rides out on `MissionAdvance`, and the BT then drives it: `hint_navigation`'s `path_projector` grounds the markers into a metric `odom` path and follows them via Nav2's `follow_path` (MPPI), then Nav2's Spin behavior applies `turn_degrees`. This opens room for semantic navigation preferences and constraint-aware waypoint generation.
 
 Same API plumbing as `visual_reasoner` (both subclass `GeminiActionNode`) — and, like it, **frames arrive in the goal** (`images`) rather than from a camera subscription. The node holds **no buffer of its own**: `hint_narrative` owns the one image buffer and passes it in (last image = current view, earlier ones = continuity), so the planner and the mission director always reason over the *same* frames. Input is thus a text `description` + the `images` list; instead of a single result value it grounds an **ordered marker array in normalized image space** (`geometry_msgs/Point[]`, `x`/`y ∈ [-1, 1]` (center 0), `z` unused, `markers[0]` nearest → `markers[-1]` farthest) plus the current-view frame `stamp` (from `images[-1]`, so `FollowVisualPath` can ground the path). The model is prompted to keep points on the traversable ground plane, ordered nearest→farthest, and to honor any semantic preference in the instruction.
 
@@ -63,18 +63,21 @@ Same API plumbing as `visual_reasoner` (both subclass `GeminiActionNode`) — an
 > `hint_narrative` director sees the frames directly, `reasoning` is not the narrative's eyes, so the
 > prompt (`prompts/path_planner.txt`) asks for a short (1-2 sentence) note of the **path shape**
 > and any constraint that forced it (e.g. *"a soft curve left around the chair toward the doorway"*),
-> not a full scene report. It rides out on the result `message`; the mission BT logs it, but the
-> director judges the move from the before/after images, not from this note. On an empty `waypoints`
-> list (wall / already there) the node aborts, with the note in the message (via `hint_behavior`'s two-arg
-> `onFailure`).
+> not a full scene report. It rides out on the result `message`; `hint_narrative` records it (as the
+> next cycle's trigger `observation`), but the director judges the move from the before/after images,
+> not from this note. An empty `waypoints` list is a valid **success** (a turn-only / no-op move); only
+> a call that genuinely can't run (no frame / timeout / API error / unparseable reply) **aborts**, with
+> the reason in `message` — which `hint_narrative` treats as a retryable cognition failure (it waits and
+> retries; the robot stays put).
 >
 > **Continuity (from the goal's `images`).** When the `images` list carries more than one frame,
 > the earlier ones (oldest first) are recent past views attached ahead of the current view, with a
 > `{continuity}` note that labels them and says to continue the same approach across the view change —
 > so each plan builds on the last instead of re-planning cold. Unlike before, the node keeps no buffer
 > and no per-frame reasoning note travels with the frames (only the images do); the buffer — and its
-> depth — now live in `hint_narrative` (its `history_frames` param), which passes those frames in via
-> `MissionAdvance` → `PlanVisualPath.images`. `history_frames=0` there = current view only (stateless),
+> depth — now live in `hint_narrative` (its `history_frames` param), which attaches those frames to
+> **both** its per-cycle VLM calls internally (`VisualReason.images` and this node's `PlanVisualPath.images`).
+> `history_frames=0` there = current view only (stateless),
 > `1` = last step, `3–4` = deeper history; each extra frame is more image tokens, so latency/cost rise
 > with it. The `{continuity}` note also states that the **current instruction wins** if it redirects, so
 > a stale plan can't trap the planner.
@@ -113,10 +116,10 @@ The [common parameters](#common-parameters) (`api_key_path`, `model_id`, `temper
 
 ### Test
 
-The goal now carries the frames to plan over (`images`), so this node is normally driven through
-the mission BT (`hint_narrative` supplies its buffer via `MissionAdvance` → `PlanVisualPath.images`);
-hand-populating a `CompressedImage[]` on the command line is impractical. A bare CLI goal (no images)
-exercises only the abort path:
+The goal now carries the frames to plan over (`images`), so this node is normally driven by
+`hint_narrative`'s `narrative_navigation` (its cognition layer calls this action each cycle with the
+buffer it owns); hand-populating a `CompressedImage[]` on the command line is impractical. A bare CLI
+goal (no images) exercises only the abort path:
 
 ```bash
 ros2 action send_goal /path_planner/plan_visual_path \
@@ -125,8 +128,8 @@ ros2 action send_goal /path_planner/plan_visual_path \
   --feedback   # aborts: "No camera frame supplied in the goal."
 ```
 
-For an end-to-end test run the mission BT (see `hint_behavior`'s **Run a mission**), which wires the
-narrative buffer into the planner.
+For an end-to-end test run the mission BT (see `hint_behavior`'s **Run a mission**); `narrative_navigation`
+drives this planner with the buffer it owns.
 
 ---
 

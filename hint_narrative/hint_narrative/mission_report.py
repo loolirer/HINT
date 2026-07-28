@@ -19,8 +19,11 @@ What the figure shows (all in the reference frame — ``map`` if the bag has one
   of spins is counted there; angle magnitudes are not drawn on the map).
 
 The VLM-vs-movement split is derived from the actions' ``_action/status`` topics: the
-``plan_visual_path`` + ``advance`` windows are VLM-thinking (robot stationary), the
-``follow_visual_path`` + ``spin`` windows are movement. No runtime node is modified.
+``mission_advance`` window — which now WRAPS a nested ``plan_visual_path`` call, since the
+cognition node plans internally — is VLM-thinking (robot stationary), the
+``follow_visual_path`` + ``spin`` windows are movement. ``_union_windows`` merges the nested
+plan window into the enclosing advance window, so VLM time is counted once. No runtime node
+is modified.
 
 Usage:
     ros2 run hint_narrative mission_report /path/to/missions/<name>/mission.bag
@@ -49,8 +52,8 @@ _STATUS_TERMINAL = (4, 5, 6)     # SUCCEEDED, CANCELED, ABORTED
 
 # The four action-status topics, split by what the robot is doing during each window.
 _VLM_STATUS = (
-    "/path_planner/plan_visual_path/_action/status",   # executor VLM
-    "/narrative_navigation/advance/_action/status",           # director VLM (wraps reason)
+    "/path_planner/plan_visual_path/_action/status",   # executor VLM (nested inside advance)
+    "/narrative_navigation/mission_advance/_action/status",           # cognition VLM (wraps the compile AND the nested plan)
 )
 _MOVE_STATUS = (
     "/path_projector_node/follow_visual_path/_action/status",
@@ -390,7 +393,8 @@ def build_report(bag_path):
     plan_wins = windows(status, _PLAN_STATUS)
     n_plans = len(plan_wins)
     turn_wins = windows(status, _SPIN_STATUS)
-    # Total VLM calls = executor (plan_visual_path) + director (advance) windows.
+    # Total VLM calls = executor (plan_visual_path) + director (mission_advance) windows —
+    # still two distinct API calls per cycle, now the plan nested inside the advance.
     n_vlm = sum(len(windows(status, t)) for t in _VLM_STATUS)
 
     stats = {
