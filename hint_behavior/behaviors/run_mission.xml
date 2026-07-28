@@ -37,11 +37,11 @@
         <Sequence>
           <MissionAdvance mission="{mission}" success="{last_ok}" observation="{plan_message}"
                           description="{description}" area="{area}"
-                          mission_failed="{mission_failed}"/>
+                          mission_failed="{mission_failed}" images="{images}"/>
           <Fallback>
             <Sequence>
               <SubTree ID="FollowPlannedTrajectory" description="{description}"
-                       plan_message="{plan_message}"/>
+                       images="{images}" plan_message="{plan_message}"/>
               <SetBlackboard output_key="last_ok" value="true"/>
             </Sequence>
             <SetBlackboard output_key="last_ok" value="false"/>

@@ -4,8 +4,14 @@ string schema   # optional JSON shape/schema hint the reply must match; empty = 
 sensor_msgs/CompressedImage[] images   # optional frames to reason over (empty = text-only); order is meaningful (e.g. before, after)
 ---
 # Result
-bool success    # true when the model returned a usable reply (valid JSON when a schema was requested)
-string response # the model's reply: canonical JSON when a schema was requested, else raw text; the failure reason when success is false
+# Success/failure is the action's terminal status (SUCCEEDED vs ABORTED) — no
+# redundant `success` bool. A usable reply SUCCEEDS; a call that could not run
+# (empty prompt / timeout / API error / unparseable JSON) ABORTS, with the reason
+# in `response`.
+string response # the model's reply: canonical JSON when a schema was requested, else raw text; the failure reason on ABORTED
+# Stamp of the frame reasoned over (images[-1].header.stamp — the current view),
+# mirroring PlanTrajectory. {sec: 0, nanosec: 0} when the call was text-only (no images).
+builtin_interfaces/Time stamp
 ---
 # Feedback
 string state    # "RUNNING" while the API call is in flight

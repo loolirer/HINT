@@ -8,6 +8,7 @@
 
 #include <builtin_interfaces/msg/time.hpp>
 #include <geometry_msgs/msg/point.hpp>
+#include <sensor_msgs/msg/compressed_image.hpp>
 
 #include <hint_interfaces/action/plan_trajectory.hpp>
 
@@ -16,6 +17,8 @@ namespace hint_behavior
 
 // Plans a ground trajectory from a text description via trajectory_planner's
 // PlanTrajectory action; outputs the ordered normalized waypoints (markers).
+// The frames to plan over come in via {images} — the unified hint_narrative
+// buffer, forwarded from MissionAdvance — not from a camera buffer in the node.
 class PlanTrajectoryAction
   : public BT::RosActionNode<hint_interfaces::action::PlanTrajectory>
 {
@@ -26,6 +29,8 @@ public:
   {
     return providedBasicPorts({
       BT::InputPort<std::string>("description"),
+      BT::InputPort<std::vector<sensor_msgs::msg::CompressedImage>>(
+        "images", "frames to plan over (unified narrative buffer, last = current view)"),
       BT::OutputPort<std::vector<geometry_msgs::msg::Point>>("markers"),
       BT::OutputPort<double>(
         "turn_degrees", "in-place turn to apply after the path (+left / -right, deg)"),
@@ -37,21 +42,22 @@ public:
 
   bool setGoal(Goal & goal) override
   {
-    goal.description   = getInput<std::string>("description").value();
-    goal.stamp.sec     = 0;
-    goal.stamp.nanosec = 0;   // 0 → latest frame in the ring buffer
+    goal.description = getInput<std::string>("description").value();
+    // Frames to plan over ride in on the goal (the unified narrative buffer);
+    // the node keeps no camera buffer of its own. Missing/empty is allowed here
+    // (the server aborts on empty), so tolerate an unbound port.
+    goal.images =
+      getInput<std::vector<sensor_msgs::msg::CompressedImage>>("images").value_or(
+        std::vector<sensor_msgs::msg::CompressedImage>{});
     return true;
   }
 
   BT::NodeStatus onResultReceived(const WrappedResult & wr) override
   {
-    // Surface the VLM's path reasoning on every path (success or planner-reported
-    // failure) so the mission log captures it as grounded visual feedback.
-    setOutput("message", wr.result->message);
-    if (!wr.result->success) {
-      RCLCPP_WARN(logger(), "Trajectory planning failed: %s", wr.result->message.c_str());
-      return BT::NodeStatus::FAILURE;
-    }
+    // Only reached on a SUCCEEDED goal (aborts go to onFailure), so this is always
+    // a valid plan — no success bool to check. Surface the VLM's path reasoning so
+    // the mission log captures it as grounded visual feedback.
+    setOutput("message",      wr.result->message);
     setOutput("markers",      wr.result->markers);
     setOutput("turn_degrees", wr.result->turn_degrees);
     setOutput("stamp",        wr.result->stamp);

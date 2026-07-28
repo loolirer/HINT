@@ -48,6 +48,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 
+from action_msgs.msg import GoalStatus
 from hint_interfaces.action import MissionAdvance, Reason
 from sensor_msgs.msg import CompressedImage
 
@@ -383,6 +384,11 @@ class MissionPlannerNode(Node):
         result.mission_failed = False
         result.description = self._narrative.get("next", "")
         result.message = self._narrative.get("done", "")
+        # Hand the SAME frames the director just judged to the trajectory planner
+        # (via the BT → PlanTrajectory.images): one unified buffer, so the planner
+        # plans on the same current view (images[-1]) the director reasoned over —
+        # no second buffer to drift out of sync.
+        result.images = images
         # This instruction will now be executed — push the current view into the
         # frame buffer as a move-start frame for the director's next comparison.
         self._push_frame()
@@ -536,7 +542,9 @@ class MissionPlannerNode(Node):
             self.get_logger().warn("Reasoner result timed out or cancelled.")
             return None
         res = wrapped.result
-        if not res.success:
+        # Failure is the goal's terminal status (the reasoner ABORTs a call that
+        # could not run), not a result bool. On abort `response` carries the reason.
+        if wrapped.status != GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().warn(f"Reasoner failed: {res.response}")
             return None
         try:

@@ -2,7 +2,7 @@
 <root BTCPP_format="4">
     <BehaviorTree ID="FollowPlannedTrajectory">
       <Sequence>
-        <PlanTrajectoryAction description="{description}" markers="{markers}" turn_degrees="{turn_degrees}" stamp="{stamp}" message="{plan_message}"/>
+        <PlanTrajectoryAction description="{description}" images="{images}" markers="{markers}" turn_degrees="{turn_degrees}" stamp="{stamp}" message="{plan_message}"/>
         <FollowTrajectoryAction waypoints="{markers}" stamp="{stamp}"/>
         <!-- Always spin by the VLM's turn. 0deg completes instantly (Nav2 Spin succeeds
              on the first cycle when target == 0), so any turn value is a success; only

@@ -5,6 +5,8 @@
 
 #include <behaviortree_ros2/bt_action_node.hpp>
 
+#include <builtin_interfaces/msg/time.hpp>
+
 #include <hint_interfaces/action/reason.hpp>
 
 namespace hint_behavior
@@ -40,6 +42,10 @@ public:
         "response",
         "the model reply (canonical JSON when a schema was given), or the "
         "failure reason"),
+      BT::OutputPort<builtin_interfaces::msg::Time>(
+        "stamp",
+        "stamp of the frame reasoned over (mirrors PlanTrajectory); zero for "
+        "this text-only leaf, which sends no images"),
     });
   }
 
@@ -52,13 +58,12 @@ public:
 
   BT::NodeStatus onResultReceived(const WrappedResult & wr) override
   {
+    // Only reached on a SUCCEEDED goal (aborts go to onFailure), so the reply is
+    // always usable — no success bool to check.
     setOutput("response", wr.result->response);
-    if (wr.result->success) {
-      RCLCPP_INFO(logger(), "Reasoner replied: %s", wr.result->response.c_str());
-      return BT::NodeStatus::SUCCESS;
-    }
-    RCLCPP_WARN(logger(), "Reasoner failed: %s", wr.result->response.c_str());
-    return BT::NodeStatus::FAILURE;
+    setOutput("stamp", wr.result->stamp);
+    RCLCPP_INFO(logger(), "Reasoner replied: %s", wr.result->response.c_str());
+    return BT::NodeStatus::SUCCESS;
   }
 
   // A reasoning call that could not run (aborted, cancelled, server
