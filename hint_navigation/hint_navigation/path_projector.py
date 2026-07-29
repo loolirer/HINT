@@ -6,7 +6,7 @@ tree already calls (so only its action name is repointed), and internally drives
 
 Per goal it:
 
-1. Grounds the normalized image markers (``x``/``y in [-1, 1]``, center 0, nearest-first)
+1. Grounds the normalized image waypoints (``x``/``y in [-1, 1]``, center 0, nearest-first)
    onto the ground plane in ``base_link`` via the analytic camera model.
 2. Re-expresses them in ``odom`` using the robot pose at the goal's stamp — looked up from
    **TF** (``odom -> base_link`` at that stamp), so the path is anchored in the world — and
@@ -68,7 +68,7 @@ def _smooth_resample(pts, spacing, samples_per_seg=24):
     """Densify a sparse polyline into a smooth, uniformly-spaced curve.
 
     Nav2's MPPI path critics (``offset_from_furthest``, path-align) assume a path sampled
-    near costmap resolution; the raw VLM markers are far too sparse (a handful of points
+    near costmap resolution; the raw VLM waypoints are far too sparse (a handful of points
     over metres), which stalls the optimizer mid-path. This fits a **centripetal**
     Catmull-Rom spline (alpha=0.5) through ``pts`` (an ``(N, 2)`` array, in order) and
     resamples it at ~``spacing`` m arc-length steps. Centripetal parameterization keeps the
@@ -123,7 +123,7 @@ class PathProjectorNode(Node):
         # --- Camera rig for the normalized-marker -> ground projection (shared,
         # live-adjustable; re-snapshotted per goal via CameraRig.from_node) ---
         CameraRig.declare(self)
-        # Image size the markers are normalized against — only the aspect ratio and hfov
+        # Image size the waypoints are normalized against — only the aspect ratio and hfov
         # actually affect grounding, so the camera's nominal resolution is enough.
         self.declare_parameter("image_width", 640)
         self.declare_parameter("image_height", 480)
@@ -136,7 +136,7 @@ class PathProjectorNode(Node):
         self.declare_parameter("goal_checker_id", "goal_checker")
         self.declare_parameter("progress_checker_id", "progress_checker")
         self.declare_parameter("path_frame", "odom")
-        # Robot body frame the markers ground into (looked up in path_frame via TF).
+        # Robot body frame the waypoints ground into (looked up in path_frame via TF).
         self.declare_parameter("robot_frame", "base_link")
         # TF buffer cache_time (s): must be >= the VLM latency between a frame's capture
         # and this node grounding it — i.e. the director (reasoner) call PLUS the planner
@@ -154,7 +154,7 @@ class PathProjectorNode(Node):
         self.declare_parameter("mask_timeout", 5.0)  # s; older mask -> skip clipping
         self.declare_parameter("server_timeout", 10.0)  # s to wait for controller_server
         self.declare_parameter("control_rate", 20.0)  # Hz feedback/poll loop
-        # Smooth-densification spacing (m): the grounded VLM markers are resampled onto a
+        # Smooth-densification spacing (m): the grounded VLM waypoints are resampled onto a
         # centripetal Catmull-Rom spline at this arc-length step before FollowPath, so MPPI's
         # path critics see a dense path (≈ costmap resolution). Live-adjustable.
         self.declare_parameter("path_resolution", 0.05)
@@ -290,7 +290,7 @@ class PathProjectorNode(Node):
         return min(buf, key=lambda e: abs(e[0] - key))[1]
 
     def _clip_to_ground(self, waypoints, stamp):
-        """Keep the leading run of markers that lie on the segmented ground; drop the first
+        """Keep the leading run of waypoints that lie on the segmented ground; drop the first
         off-ground marker and everything after it, so we never follow a broken path.
 
         Markers are normalized image coords (``x``/``y in [-1, 1]``, center 0), mapped into
@@ -318,10 +318,10 @@ class PathProjectorNode(Node):
         return kept
 
     # ------------------------------------------------------------------
-    # Grounding: normalized markers -> ground (base_link) -> odom Path
+    # Grounding: normalized waypoints -> ground (base_link) -> odom Path
 
     def _build_path(self, waypoints, stamp):
-        """Ground ``waypoints`` (normalized image markers) into a ``nav_msgs/Path`` in
+        """Ground ``waypoints`` (normalized image space) into a ``nav_msgs/Path`` in
         ``path_frame``. Returns the Path, or None (no usable waypoints / no odom).
         """
         if not waypoints:
@@ -340,7 +340,7 @@ class PathProjectorNode(Node):
         ground = CameraRig.from_node(self).pixels_to_ground(pix, w, h)
 
         # base_link (ref pose) -> odom. Prepend the robot's own pose so the path starts
-        # at the robot, then the grounded markers nearest-first.
+        # at the robot, then the grounded waypoints nearest-first.
         rx, ry, ryaw = ref
         c, s = math.cos(ryaw), math.sin(ryaw)
         odom_pts = [(rx, ry)]
@@ -357,7 +357,7 @@ class PathProjectorNode(Node):
         if len(odom_pts) < 2:
             return None
 
-        # Smooth + densify: fit a centripetal Catmull-Rom through the sparse markers and
+        # Smooth + densify: fit a centripetal Catmull-Rom through the sparse waypoints and
         # resample at ~path_resolution m, so MPPI's path critics get a costmap-resolution
         # path instead of a few far-apart points (which stalled the optimizer mid-path).
         odom_pts = _smooth_resample(odom_pts, float(self._p("path_resolution")))
@@ -392,7 +392,7 @@ class PathProjectorNode(Node):
         raw_path = self._build_path(goal.waypoints, goal.stamp)
 
         # Clip the VLM pixel path to the segmented ground: keep the leading run of
-        # markers on the mask, drop the first off-ground one and everything after it.
+        # waypoints on the mask, drop the first off-ground one and everything after it.
         wps = self._clip_to_ground(goal.waypoints, goal.stamp)
 
         # Nothing left to follow — the planner sent no path (a turn-only move), or the whole

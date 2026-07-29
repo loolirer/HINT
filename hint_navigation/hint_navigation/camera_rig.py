@@ -6,7 +6,7 @@ module holds that rig **and** the ground-plane projection math shared by the nav
 nodes, so the two directions can never drift apart (they used to be hand-synced copies
 across three nodes):
 
-- ``path_projector`` : ``pixels_to_ground``  (VLM markers -> base_link metric path)
+- ``path_projector`` : ``pixels_to_ground``  (VLM waypoints -> base_link metric path)
 - ``obstacle_projector``   : ``ground_to_pixels``  (ground-mask -> BEV obstacle homography)
 - ``visual_debug``         : ``ground_to_pixels``  (odom paths -> image overlay)
 
@@ -14,7 +14,7 @@ across three nodes):
 height model. Ground points are ``base_link`` metric (x forward, y left, z = 0 implied);
 pixels are ``(u, v)`` in an image of size ``(w, h)``. The model is resolution-invariant
 (focal length and principal point scale with ``w``/``h``), so callers pass whatever image
-size their pixels are expressed in (full-res markers, or the coarse processing-grid mask).
+size their pixels are expressed in (full-res waypoints, or the coarse processing-grid mask).
 
 Pure and stateless — no ROS, no node. ``CameraRig.from_node(node)`` reads the four rig
 parameters (declaring them if absent) and returns a snapshot; call it at the point of use

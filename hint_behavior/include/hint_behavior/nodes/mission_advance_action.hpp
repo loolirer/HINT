@@ -24,10 +24,10 @@ public:
   {
     return providedBasicPorts({
       BT::InputPort<std::string>("success", "true", "did the move just executed succeed?"),
-      BT::InputPort<std::string>("mission", "",
+      BT::InputPort<std::string>("mission_path", "",
                                  "mission YAML to run; empty keeps the node's current/default"),
       BT::OutputPort<std::vector<geometry_msgs::msg::Point>>(
-        "markers", "next ground path (normalized image space) for FollowVisualPath"),
+        "waypoints", "next ground path (normalized image space) for FollowVisualPath"),
       BT::OutputPort<double>(
         "turn_degrees", "in-place turn to apply after the path (+left / -right, deg)"),
       BT::OutputPort<builtin_interfaces::msg::Time>(
@@ -40,7 +40,7 @@ public:
   bool setGoal(Goal & goal) override
   {
     goal.success      = (getInput<std::string>("success").value_or("true") != "false");
-    goal.mission_path = getInput<std::string>("mission").value_or("");
+    goal.mission_path = getInput<std::string>("mission_path").value_or("");
     goal.first  = first_run_;
     first_run_  = false;
     return true;
@@ -50,7 +50,7 @@ public:
   {
     setOutput("area", wr.result->area);
     setOutput("mission_failed", wr.result->mission_failed);
-    setOutput("markers", wr.result->markers);
+    setOutput("waypoints", wr.result->waypoints);
     setOutput("turn_degrees", wr.result->turn_degrees);
     setOutput("stamp", wr.result->stamp);
 
@@ -63,7 +63,7 @@ public:
       return BT::NodeStatus::FAILURE;
     }
     RCLCPP_INFO(logger(), "[%s] %zu wpt, turn %+.0f: %s",
-                wr.result->area.c_str(), wr.result->markers.size(),
+                wr.result->area.c_str(), wr.result->waypoints.size(),
                 wr.result->turn_degrees, wr.result->message.c_str());
     return BT::NodeStatus::SUCCESS;
   }

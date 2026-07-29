@@ -4,12 +4,12 @@
     <Fallback>
       <KeepRunningUntilFailure>
         <Sequence>
-          <MissionAdvance mission="{mission}" success="{last_ok}"
-                          markers="{markers}" turn_degrees="{turn_degrees}" stamp="{stamp}"
+          <MissionAdvance mission_path="{mission_path}" success="{last_ok}"
+                          waypoints="{waypoints}" turn_degrees="{turn_degrees}" stamp="{stamp}"
                           area="{area}" mission_failed="{mission_failed}"/>
           <Fallback>
             <Sequence>
-              <FollowVisualPathAction waypoints="{markers}" stamp="{stamp}"/>
+              <FollowVisualPathAction waypoints="{waypoints}" stamp="{stamp}"/>
               <SpinAction yaw_degrees="{turn_degrees}"/>
               <SetBlackboard output_key="last_ok" value="true"/>
             </Sequence>

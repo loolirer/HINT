@@ -16,7 +16,7 @@ in one place. It has no nodes of its own; `launch/bringup.launch.py` starts the 
 - `teleop_twist_joy`
 - `ground_segmenter` (`hint_perception`) — semantic ground ONNX → binary ground mask on `/camera/ground` (image space only, no rig)
 - `obstacle_projector` (`hint_navigation`) — ground mask → obstacle `PointCloud2` on `/obstacles`
-- `path_projector` (`hint_navigation`) — grounds VLM markers → `odom` path → Nav2 `follow_path`
+- `path_projector` (`hint_navigation`) — grounds VLM waypoints → `odom` path → Nav2 `follow_path`
 - `visual_debug` (`hint_navigation`) — composes one `/debug` image (mask overlay + projector paths + BT state)
 - the mapless Nav2 stack via `hint_navigation/launch/nav2.launch.py`: `controller_server` (FollowPath + MPPI), `behavior_server` (Spin), `nav2_lifecycle_manager`
 - `path_planner` (`hint_vlm`) — VLM ground-path planner (+ end-of-move turn)

@@ -88,10 +88,10 @@ Per cycle, in order:
   over the **before/after frames of the move just executed** plus the narrative — it judges the
   move from the images, folds it in, and emits the next instruction (`next`) + completion.
 - **path_planner (executor-with-eyes):** the narrative's `next` + the **same** frame buffer →
-  ordered `markers` + a signed `turn_degrees` + a short reasoning `message`. This node is now
+  ordered `waypoints` + a signed `turn_degrees` + a short reasoning `message`. This node is now
   `path_planner`'s **client** (mirroring the reasoner relationship), so both cognition calls run
   over one buffer with no cross-process routing — the trajectory rides out on the `advance`
-  result (`markers` / `turn_degrees` / `stamp`).
+  result (`waypoints` / `turn_degrees` / `stamp`).
 
 If the compile reports the mission complete/stuck, no plan is made and `mission_done` is
 returned. Both calls share the **retry-and-wait** resilience: a transient reasoner/planner/API
@@ -245,7 +245,7 @@ first `~/mission_advance` that carries a `mission_path` loads that mission (and 
 |---|---|---|
 | `~/mission_advance` | `hint_interfaces/action/MissionAdvance` | Action server |
 | `/visual_reasoner/visual_reason` (see `reasoner_action`) | `hint_interfaces/action/VisualReason` | Action client — the narrative recompile (with before/after frames) |
-| `/path_planner/plan_visual_path` (see `planner_action`) | `hint_interfaces/action/PlanVisualPath` | Action client — the path plan (`next` + the same frame buffer → `markers` + `turn_degrees`) |
+| `/path_planner/plan_visual_path` (see `planner_action`) | `hint_interfaces/action/PlanVisualPath` | Action client — the path plan (`next` + the same frame buffer → `waypoints` + `turn_degrees`) |
 | `/camera/image_raw/compressed` (see `camera_topic`) | `sensor_msgs/CompressedImage` | Sub — latest frame; latched into the **unified** rolling image buffer (`history_frames`), attached to **both** VLM calls |
 
 **`advance`** — Goal: `success` (did the last move execute?), `mission_path` (optional — the mission
@@ -256,7 +256,7 @@ edit, then — if the mission is not over — **plans the move** (`next` + the f
 appends **one** snapshot for the cycle, and returns Result:
 `mission_done` (queue empty **or** failed), `mission_failed` (stuck past the cap, an unrecoverable
 compile/IO error, or a cognition call failed past its retry budget), `area` (= the current queue head),
-`markers` / `turn_degrees` / `stamp` (the trajectory to drive — `markers` may be empty for a turn-only
+`waypoints` / `turn_degrees` / `stamp` (the trajectory to drive — `waypoints` may be empty for a turn-only
 move; empty/zero when `mission_done`), and `message` (the planner's brief path reasoning, or the
 failure/closing text on `mission_done`). The planner's reasoning is recorded internally as the next
 cycle's trigger `observation` — no longer round-tripped through the BT. On the first call nothing has
@@ -294,7 +294,7 @@ ros2 run hint_narrative narrative_navigation
 
 Drive the loop manually. The first call plans and returns the opening move; each subsequent call
 reports whether the previous move succeeded and returns the next trajectory
-(`markers` / `turn_degrees` / `stamp`):
+(`waypoints` / `turn_degrees` / `stamp`):
 
 ```bash
 # cycle 0 — load a mission (via mission_path); first:true wipes any prior narrative
@@ -322,7 +322,7 @@ Delete the `.narrative.jsonl` to restart the mission from scratch.
 The loop is **visible in the BT** — `hint_behavior/behaviors/run_mission.xml` (tree ID `RunMission`),
 ticked by `behavior_server`. `MissionAdvance` (→ `~/mission_advance`) is the whole **cognition**
 interface: each tick it reports whether the last move succeeded and returns the next move as a
-trajectory (`markers` + `turn_degrees` + `stamp`). The BT is a thin executive over motor skills —
+trajectory (`waypoints` + `turn_degrees` + `stamp`). The BT is a thin executive over motor skills —
 it drives that trajectory with `FollowVisualPathAction` + `SpinAction`. There is **no**
 `PlanVisualPath` leaf; planning happens inside the node.
 
@@ -330,10 +330,10 @@ it drives that trajectory with `FollowVisualPathAction` + `SpinAction`. There is
 Fallback
   KeepRunningUntilFailure                       # ends when MissionAdvance reports mission over
     Sequence
-      MissionAdvance(success={last_ok}) → {markers}, {turn_degrees}, {stamp}, {area}
+      MissionAdvance(success={last_ok}) → {waypoints}, {turn_degrees}, {stamp}, {area}
       Fallback                                   # capture follow/spin success into {last_ok}
         Sequence:
-          FollowVisualPathAction(waypoints={markers}, stamp={stamp})
+          FollowVisualPathAction(waypoints={waypoints}, stamp={stamp})
           SpinAction(yaw_degrees={turn_degrees})
           SetBlackboard(last_ok := true)
         SetBlackboard(last_ok := false)

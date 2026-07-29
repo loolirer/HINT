@@ -1,29 +1,21 @@
-# Goal — report the outcome of the move just executed, then get the next move.
-# (On the first call nothing has executed yet: success defaults true.)
-bool success        # did the move just executed (follow + spin) succeed? (ignored on the first call)
-string mission_path # optional: load this mission YAML before advancing; empty keeps the current one
-bool first          # true on the FIRST advance of a fresh tree run -> wipe any prior narrative and reseed. The MissionAdvance BT leaf latches this per run (fresh leaf instance per ExecuteTree goal); an explicit signal, NOT inferred from an empty observation (a mid-run move can legitimately report nothing)
+# Goal
+bool success        # Did the move just executed (follow + spin) succeed? First call success defaults true.
+string mission_path # Optional: load this mission YAML before advancing.
+bool first          # True on the FIRST advance of a fresh tree run -> wipe any prior narrative and reseed.
 ---
-# Result — the next move to execute (a grounded trajectory), or the mission's end.
-# One cycle of this node now performs BOTH cognition calls: it recompiles the
-# narrative (director, via visual_reasoner) AND plans the path (executor, via
-# path_planner) over the same frame buffer it owns, and returns the ready-to-drive
-# trajectory. mission_done => no trajectory (markers empty, turn 0).
-bool mission_done    # true when the mission is over (complete OR failed)
-bool mission_failed  # true when it ended in failure (stuck past the cycle cap, or a cognition call failed past its retry budget); false on clean completion
-string area          # the current environment (from the narrative)
-string message       # on a move: the planner's brief path reasoning; on mission_done: the closing summary or failure reason
-# The grounded ground path in normalized image space: point.x, point.y in [-1, 1]
-# (center = 0; left/top = -1, right/bottom = +1); z unused. markers[0] is the first
-# (nearest) waypoint, markers[-1] the farthest. May be empty for a turn-only move.
-geometry_msgs/Point[] markers
+# Result
+bool mission_done
+bool mission_failed  # True when stuck past the cycle cap, or a cognition call failed past its retry budget.
+string area          # The current environment (from the narrative)
+string message       # On a move: the planner's brief path reasoning; on mission_done: the closing summary or failure reason
+# Ordered ground waypoints to follow, normalized image space (point.x, point.y in
+# [-1, 1], center = 0; z unused), nearest-first. May be empty.
+geometry_msgs/Point[] waypoints
 # Signed in-place rotation to apply after following the path (degrees), measured from
 # the heading the robot ends the path with. + = left (CCW), - = right (CW), 0 = none.
-# Executed by the Nav2 Spin behavior.
 float64 turn_degrees
-# Stamp of the current-view frame the path was planned on (the frame buffer's last
-# image). FollowVisualPath grounds the markers into odom using the pose at this stamp.
+# Stamp of the current-view frame the path was planned on.
 builtin_interfaces/Time stamp
 ---
 # Feedback
-string state         # "RUNNING" while judging / (re)planning
+string state

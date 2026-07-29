@@ -115,27 +115,27 @@ class PathPlannerNode(GeminiActionNode):
             reasoning, points, turn = self._parse_reasoning_points(cd)
             if i == 0:
                 first_reason, first_turn = reasoning, turn
-            markers = self._points_to_markers(points)
-            if markers:
-                path_cands.append((reasoning, markers, points, turn))
+            waypoints = self._points_to_waypoints(points)
+            if waypoints:
+                path_cands.append((reasoning, waypoints, points, turn))
 
         if path_cands:
             # Consensus: the medoid path — the candidate closest to all the others —
             # carrying its own end-of-path turn.
-            reasoning, markers, points, turn = self._select_medoid(path_cands)
+            reasoning, waypoints, points, turn = self._select_medoid(path_cands)
             if len(cand_dicts) > 1:
                 self.get_logger().info(
                     f"Chose medoid of {len(path_cands)}/{len(cand_dicts)} candidate paths.")
         else:
             # No waypoints in any candidate: a turn-only (scan / re-orient) or a no-op
             # move — still a valid response. Relay the first candidate's turn verbatim.
-            reasoning, markers, points, turn = first_reason, [], [], first_turn
+            reasoning, waypoints, points, turn = first_reason, [], [], first_turn
             self.get_logger().info(f"No waypoints — turn-only/no-op move ({turn:+.0f} deg).")
 
         result = PlanVisualPath.Result()
         # The VLM's brief explanation of the chosen path rides on `message`.
-        result.message = reasoning or f"{len(markers)} waypoint(s), turn {turn:+.0f} deg"
-        result.markers = markers
+        result.message = reasoning or f"{len(waypoints)} waypoint(s), turn {turn:+.0f} deg"
+        result.waypoints = waypoints
         result.turn_degrees = float(turn)
         result.stamp = stamp
         goal_handle.succeed()
@@ -235,7 +235,7 @@ class PathPlannerNode(GeminiActionNode):
         """Return the consensus candidate — the one whose (arc-length-resampled)
         path is closest, summed, to all the others.
 
-        ``cands`` is a list of ``(reasoning, markers, points, turn)`` tuples (the whole
+        ``cands`` is a list of ``(reasoning, waypoints, points, turn)`` tuples (the whole
         tuple is returned, so the chosen path keeps its own turn). Averaging whole paths
         is wrong (two valid routes average to a path between them), so this picks the
         most central *actual* candidate instead. A single candidate is returned as-is.
@@ -291,14 +291,14 @@ class PathPlannerNode(GeminiActionNode):
             turn = 0.0
         return str(reasoning), points, turn
 
-    def _points_to_markers(self, points):
-        """Convert Gemini ``[{"point": [y, x], ...}]`` to normalized markers.
+    def _points_to_waypoints(self, points):
+        """Convert Gemini ``[{"point": [y, x], ...}]`` to normalized waypoints.
 
         Each returned ``Point`` has ``x``/``y`` in ``[-1, 1]`` (image space,
         center = 0), ``z`` unused. Malformed entries are skipped.
         """
         min_row = int(self._p("min_row"))
-        markers = []
+        waypoints = []
         for p in points:
             pt = p.get("point") if isinstance(p, dict) else None
             if not (isinstance(pt, (list, tuple)) and len(pt) == 2):
@@ -308,12 +308,12 @@ class PathPlannerNode(GeminiActionNode):
             # too high in the frame) down to min_row. Far points are where the VLM's
             # ground grounding is least reliable; this backstops the prompt.
             y = max(float(y), float(min_row))
-            marker = Point()
-            marker.x = float(min(max(2.0 * x / 1000.0 - 1.0, -1.0), 1.0))
-            marker.y = float(min(max(2.0 * y / 1000.0 - 1.0, -1.0), 1.0))
-            marker.z = 0.0
-            markers.append(marker)
-        return markers
+            waypoint = Point()
+            waypoint.x = float(min(max(2.0 * x / 1000.0 - 1.0, -1.0), 1.0))
+            waypoint.y = float(min(max(2.0 * y / 1000.0 - 1.0, -1.0), 1.0))
+            waypoint.z = 0.0
+            waypoints.append(waypoint)
+        return waypoints
 
 
 def main(args=None):

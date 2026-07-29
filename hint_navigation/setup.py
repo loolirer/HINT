@@ -21,7 +21,7 @@ setup(
     maintainer_email="lorenzo.oliveira@ee.ufcg.edu.br",
     description="Nav2 reactive-navigation integration for HINT and the image<->metric "
                 "bridge (sole owner of the camera rig, camera_rig.CameraRig): path_projector "
-                "(VLM markers -> nav_msgs/Path -> Nav2 FollowPath/MPPI), obstacle_projector "
+                "(VLM waypoints -> nav_msgs/Path -> Nav2 FollowPath/MPPI), obstacle_projector "
                 "(ground mask -> obstacle PointCloud2), and visual_debug (composited /debug).",
     license="Apache-2.0",
     extras_require={

@@ -12,20 +12,20 @@ source install/setup.bash
 
 | Interface | Shape | Used by |
 |---|---|---|
-| `action/PlanVisualPath` | goal `{description, images}` → result `{message, markers, turn_degrees, stamp}` / feedback `{state}` | `hint_vlm/path_planner` — plans ground waypoints **and** an end-of-move turn over the goal's frame buffer |
+| `action/PlanVisualPath` | goal `{description, images}` → result `{message, waypoints, turn_degrees, stamp}` / feedback `{state}` | `hint_vlm/path_planner` — plans ground waypoints **and** an end-of-move turn over the goal's frame buffer |
 | `action/FollowVisualPath` | goal `{waypoints, stamp}` → result `{message}` / feedback `{state}` | `hint_navigation/path_projector` — grounds the waypoints into an `odom` path and drives Nav2's `follow_path` |
 | `action/VisualReason` | goal `{prompt, schema, images}` → result `{response, stamp}` / feedback `{state}` | `hint_vlm/visual_reasoner` — generic text(+image)-in / JSON-out reasoning |
-| `action/MissionAdvance` | goal `{success, mission_path, first}` → result `{mission_done, mission_failed, area, message, markers, turn_degrees, stamp}` / feedback `{state}` | `hint_narrative/narrative_navigation` — one cognition cycle of the mission loop: recompiles the narrative **and** plans the path, returning the next move as a trajectory |
+| `action/MissionAdvance` | goal `{success, mission_path, first}` → result `{mission_done, mission_failed, area, message, waypoints, turn_degrees, stamp}` / feedback `{state}` | `hint_narrative/narrative_navigation` — one cognition cycle of the mission loop: recompiles the narrative **and** plans the path, returning the next move as a trajectory |
 
 > **Result success convention.** `PlanVisualPath`, `FollowVisualPath`, and `VisualReason` carry **no `success` bool** — success/failure is the action's terminal status (SUCCEEDED vs ABORTED), with the reason in `message`/`response`. `MissionAdvance` instead reports completion via `mission_done`/`mission_failed`.
 >
-> **Shared image buffer.** `hint_narrative` owns the one camera-frame buffer and, each `MissionAdvance` cycle, attaches it to **both** VLM calls it makes internally — the director (`VisualReason.images`) and the planner (`PlanVisualPath.images`) — so both reason over identical frames. The buffer no longer crosses the BT boundary; `MissionAdvance` returns the resulting trajectory (`markers`/`turn_degrees`/`stamp`) directly. `PlanVisualPath`/`VisualReason` report the current-view frame's `stamp` (`images[-1]`), which `MissionAdvance` passes through so the follow can ground the path.
+> **Shared image buffer.** `hint_narrative` owns the one camera-frame buffer and, each `MissionAdvance` cycle, attaches it to **both** VLM calls it makes internally — the director (`VisualReason.images`) and the planner (`PlanVisualPath.images`) — so both reason over identical frames. The buffer no longer crosses the BT boundary; `MissionAdvance` returns the resulting trajectory (`waypoints`/`turn_degrees`/`stamp`) directly. `PlanVisualPath`/`VisualReason` report the current-view frame's `stamp` (`images[-1]`), which `MissionAdvance` passes through so the follow can ground the path.
 
 ### `PlanVisualPath` result fields
 
 | Field | Type | Notes |
 |---|---|---|
-| `markers` | `geometry_msgs/Point[]` | Ordered waypoints, normalized image space `x`/`y ∈ [-1, 1]` (center 0), nearest-first. **May be empty** for a turn-only (scan / re-orient) move |
+| `waypoints` | `geometry_msgs/Point[]` | Ordered waypoints, normalized image space `x`/`y ∈ [-1, 1]` (center 0), nearest-first. **May be empty** for a turn-only (scan / re-orient) move |
 | `turn_degrees` | `float64` | Signed in-place rotation after the path, from the path's end heading. **+ = left (CCW)**, **− = right (CW)**, 0 = none |
 
 ## Removed interfaces (historical note)

@@ -4,7 +4,7 @@ Nav2 reactive-navigation integration for HINT — **mapless** — **and the imag
 bridge**. This package is the **sole owner of the camera rig** (`camera_rig.CameraRig`):
 anything that needs the camera's physical placement lives here. `hint_perception` stays
 purely image-space (it only labels pixels into a ground mask); everything metric — turning
-that mask into obstacles, grounding VLM markers into a path, re-projecting paths for the
+that mask into obstacles, grounding VLM waypoints into a path, re-projecting paths for the
 debug view — happens on this side.
 
 It bets on Nav2's mature MPPI controller to follow the VLM-planned path while flowing
@@ -14,7 +14,7 @@ path in `odom`, and the costmap is a short-lived rolling window.
 | Part | What |
 |---|---|
 | `camera_rig.py` (module) | `CameraRig` — the pinhole+tilt+height rig and both ground↔pixel projections; the single source of truth, imported by the three nodes below |
-| `path_projector` (node) | Exposes the `hint_interfaces/FollowVisualPath` action the BT calls, grounds the VLM's normalized markers into a metric `odom` `nav_msgs/Path`, and drives Nav2's `follow_path` (MPPI) |
+| `path_projector` (node) | Exposes the `hint_interfaces/FollowVisualPath` action the BT calls, grounds the VLM's normalized waypoints into a metric `odom` `nav_msgs/Path`, and drives Nav2's `follow_path` (MPPI) |
 | `obstacle_projector` (node) | Streams `hint_perception`'s ground mask (`/camera/ground`) → obstacle `PointCloud2` (`/obstacles`) for the local costmap, via the ground-plane BEV homography |
 | `visual_debug` (node) | Composes one `/debug` image from the system's real outputs (mask overlay + projector paths + BT state) |
 | `launch/nav2.launch.py` + `config/nav2_local.yaml` | Brings up the mapless Nav2 stack: `controller_server` (FollowPath + MPPI, rolling local costmap) + `behavior_server` (Spin) + `nav2_lifecycle_manager` |
@@ -48,20 +48,20 @@ dict); the BEV *grid* geometry (`bev_*`) is **not** a rig concern and lives in
 ## path_projector
 
 The BT (`hint_behavior`'s `FollowVisualPathAction`) still calls
-`hint_interfaces/FollowVisualPath` with the VLM's **normalized image markers**; this node is
+`hint_interfaces/FollowVisualPath` with the VLM's **normalized image waypoints**; this node is
 a transparent adapter that internally drives Nav2's `nav2_msgs/action/FollowPath`. The whole
 chain stays action-based.
 
 Per goal it:
 
-0. **Ground-clips** the VLM pixel path: each normalized marker is tested against
+0. **Ground-clips** the VLM pixel path: each normalized waypoint is tested against
    `hint_perception`'s binary ground mask (`/camera/ground`, matched to the goal's frame
-   stamp); the **leading run** of on-ground markers is kept, and the **first marker that
-   leaves the ground is dropped along with every marker after it** — so the robot never
+   stamp); the **leading run** of on-ground waypoints is kept, and the **first waypoint that
+   leaves the ground is dropped along with every waypoint after it** — so the robot never
    follows a path that runs off the floor. No fresh mask → the path passes through
    unclipped. If nothing survives (all off-ground, or the VLM sent none), the goal succeeds
    as a no-op so the BT's Spin still runs.
-1. **Grounds** the surviving markers (`x`/`y ∈ [-1, 1]`, nearest-first) onto the ground plane
+1. **Grounds** the surviving waypoints (`x`/`y ∈ [-1, 1]`, nearest-first) onto the ground plane
    in `base_link` via `CameraRig.pixels_to_ground`, then re-expresses them in **`odom`** using
    the robot pose at the goal's stamp — looked up from **TF** (`odom → base_link` at that
    stamp), the same transform the costmap and MPPI use. So the path is anchored once in the
@@ -72,13 +72,13 @@ Per goal it:
    stamped lookup falls out of the buffer and the goal aborts. Prepends the robot's own pose
    so the path starts at the robot; each pose's yaw is the path tangent.
 1. **Smooths + densifies** the grounded points before handing them to MPPI: a **centripetal
-   Catmull-Rom** spline is fit through the (few, far-apart) markers and resampled at
+   Catmull-Rom** spline is fit through the (few, far-apart) waypoints and resampled at
    `path_resolution` m (default `0.05`, ≈ costmap resolution). MPPI's path critics
    (`offset_from_furthest`, path-align) are index-based and assume a costmap-resolution path;
-   feeding them the raw sparse markers stalled the optimizer mid-path on long paths
+   feeding them the raw sparse waypoints stalled the optimizer mid-path on long paths
    (the robot slowed and turned in place until `FollowPath` aborted). Centripetal
    parameterization keeps the smoothed curve close to the polyline (no cusps/overshoot), and
-   the endpoints stay exactly on the robot pose and final marker.
+   the endpoints stay exactly on the robot pose and final waypoint.
 2. **Calls** `follow_path` (`controller_id: FollowPath`), relays feedback, and maps the
    result: Nav2 `SUCCEEDED` → `success=true`; `ABORTED` (incl. `SimpleProgressChecker` firing
    on an unreachable goal — the "stall" backstop) / `CANCELED` / rejected → `success=false`.
@@ -108,7 +108,7 @@ freezing at plan time:
 
 Rig: `camera_height` / `camera_forward_offset` / `camera_tilt` / `camera_hfov_deg` (owned by
 this package; injected by bringup — see [camera_rig](#camera_rig-camera_rigpy)); `image_width`
-/ `image_height` (marker normalization reference, default 640×480); `follow_path_action`
+/ `image_height` (waypoint normalization reference, default 640×480); `follow_path_action`
 (default `/follow_path`), `controller_id` (`FollowPath`), `goal_checker_id` (`goal_checker`),
 `progress_checker_id` (`progress_checker`); `path_frame` (`odom`) / `robot_frame`
 (`base_link`) — the TF pair grounded against; `tf_buffer_time` (`90.0` s — TF buffer
