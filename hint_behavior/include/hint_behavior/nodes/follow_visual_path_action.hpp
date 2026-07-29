@@ -12,9 +12,6 @@
 namespace hint_behavior
 {
 
-// Follows a ground path via hint_navigation's path_projector FollowVisualPath action,
-// which grounds the normalized waypoints into an odom nav_msgs/Path and drives
-// Nav2's follow_path (MPPI) until the goal is reached.
 class FollowVisualPathAction
   : public BT::RosActionNode<hint_interfaces::action::FollowVisualPath>
 {
@@ -38,8 +35,6 @@ public:
 
   BT::NodeStatus onResultReceived(const WrappedResult &) override
   {
-    // Only reached on a SUCCEEDED goal (aborts/cancels go to onFailure), so the
-    // follow completed — no success bool to check.
     return BT::NodeStatus::SUCCESS;
   }
 

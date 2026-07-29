@@ -8,20 +8,12 @@
 
 #include "hint_behavior/register_nodes.hpp"
 
-// Thin HINT-specific wrapper around behaviortree_ros2's TreeExecutionServer:
-// registers the HINT leaf node types, and treats each goal's `payload` as
-// the tree's raw XML text so a caller can send an arbitrary, freshly
-// composed tree per goal instead of only invoking trees preloaded at
-// startup from the `behavior_trees` ROS param.
 class HintBtExecutorNode : public BT::TreeExecutionServer
 {
 public:
   explicit HintBtExecutorNode(const rclcpp::Node::SharedPtr & node)
     : BT::TreeExecutionServer(node)
   {
-    // Republish the tree's live feedback (running-leaf name) on a latched topic, so
-    // observers (e.g. visual_debug) can show mission state without being the goal client
-    // that ExecuteTree action feedback goes to.
     state_pub_ = node->create_publisher<std_msgs::msg::String>(
       "~/state", rclcpp::QoS(1).transient_local());
     publishState("IDLE");
@@ -33,10 +25,6 @@ protected:
     hint_behavior::registerHintNodes(factory, node());
   }
 
-  // `payload` is expected to be a full BTCPP_format="4" document containing
-  // a <BehaviorTree ID="..."> that matches `tree_name`. Registering it here
-  // makes it available to the base class's subsequent factory.createTree()
-  // call. An empty payload falls back to a tree already preloaded from disk.
   bool onGoalReceived(const std::string & tree_name, const std::string & payload) override
   {
     if (payload.empty()) {
@@ -52,8 +40,6 @@ protected:
     return true;
   }
 
-  // Narrates progress: name of the currently RUNNING leaf (action) node. Also mirrored
-  // onto the ~/state topic for observers.
   std::optional<std::string> onLoopFeedback() override
   {
     std::string name;
@@ -71,7 +57,6 @@ protected:
     return std::nullopt;
   }
 
-  // Back to idle once a tree finishes (success/failure/cancel).
   std::optional<std::string> onTreeExecutionCompleted(BT::NodeStatus, bool) override
   {
     publishState("IDLE");

@@ -12,7 +12,6 @@ namespace hint_behavior
 
 void registerHintNodes(BT::BehaviorTreeFactory & factory, std::shared_ptr<rclcpp::Node> node)
 {
-  // Each node type gets its own params so default_port_value can differ.
   BT::RosNodeParams follow_params(node, "/path_projector_node/follow_visual_path");
   BT::RosNodeParams spin_params(node, "/spin");
   BT::RosNodeParams visual_reason_params(node, "/visual_reasoner/visual_reason");

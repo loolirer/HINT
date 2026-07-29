@@ -12,19 +12,6 @@
 namespace hint_behavior
 {
 
-// Calls the reasoner's VisualReason action — generic text-in / JSON-out LLM
-// reasoning with no camera involved. Feeds the assembled "prompt" (optionally
-// constrained to a JSON "schema") to the model and writes the reply to the
-// "response" output port. It is the generic reasoning primitive behind the
-// mission planner (which uses it directly, not via this leaf, to recompile its
-// narrative each cycle) and available to any tree that needs a text→JSON step.
-// Prompts belong to the caller, so build the "prompt" string upstream (e.g. from
-// a template) and bind it here.
-//
-// SUCCESS when the model returned a usable reply; FAILURE when the call could
-// not run (empty prompt, timeout, API error, unparseable JSON) — the reasoner
-// *aborts* those, so they surface through onFailure. Either way the reply (or,
-// on failure, the reason) is written to "response" for the tree to read/log.
 class VisualReasonAction
   : public BT::RosActionNode<hint_interfaces::action::VisualReason>
 {
@@ -58,17 +45,12 @@ public:
 
   BT::NodeStatus onResultReceived(const WrappedResult & wr) override
   {
-    // Only reached on a SUCCEEDED goal (aborts go to onFailure), so the reply is
-    // always usable — no success bool to check.
     setOutput("response", wr.result->response);
     setOutput("stamp", wr.result->stamp);
-    RCLCPP_INFO(logger(), "Reasoner replied: %s", wr.result->response.c_str());
+    RCLCPP_INFO(logger(), "Visual Reasoner replied: %s", wr.result->response.c_str());
     return BT::NodeStatus::SUCCESS;
   }
 
-  // A reasoning call that could not run (aborted, cancelled, server
-  // unreachable, send timeout) never yields a reply — surface FAILURE and pass
-  // through whatever reason the reasoner managed to send.
   BT::NodeStatus onFailure(BT::ActionNodeErrorCode error,
                            const std::optional<WrappedResult> & wr) override
   {

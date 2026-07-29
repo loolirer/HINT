@@ -1,35 +1,4 @@
 <?xml version="1.0"?>
-<!--
-  RunMission — drive a mission to completion.
-
-  One custom leaf, MissionAdvance, is the whole cognition interface: each tick it
-  reports whether the last move succeeded ({last_ok}) and the mission_planner node
-  makes BOTH per-cycle VLM calls — it recompiles its rolling narrative (director)
-  AND plans the path (executor) over the same frames — returning the next move as a
-  ready-to-drive trajectory ({markers} + {turn_degrees} + {stamp}). The BT is then a
-  thin executive over motor skills: Follow the path, then Spin. No PlanVisualPath
-  leaf — planning lives in the cognition node.
-
-  Which mission runs is chosen at the call: {mission} is the mission YAML path.
-  There is no default mission — send a payload that binds it, e.g.
-    <SubTree ID="RunMission" mission="/abs/path/to/mission.yaml"/>
-  The node reloads only when the path changes (and resumes that mission's
-  narrative). An empty {mission} with nothing loaded fails cleanly (FAILURE).
-
-    1. MissionAdvance(success) hands out the next move (markers + turn), or returns
-       FAILURE when the narrative reports the mission over.
-    2. FollowVisualPathAction drives the markers (empty = turn-only no-op), then
-       SpinAction applies the turn.
-    3. SetBlackboard records whether the execution succeeded into {last_ok}, fed
-       back to the next MissionAdvance. (On the first tick {last_ok} is unset;
-       MissionAdvance defaults success=true and just plans + serves the first move.)
-
-  Divergence from the plan is normal and absorbed by the narrative, so the loop
-  usually ends on completion. The failure paths are the stuck backstop (never leaves
-  an environment within the cycle cap) and a cognition call failing past its retry
-  budget; either sets mission_failed. When the loop ends the outer Fallback runs the
-  Precondition — a clean finish maps to overall SUCCESS, a failure to FAILURE.
--->
 <root BTCPP_format="4">
   <BehaviorTree ID="RunMission">
     <Fallback>
@@ -41,9 +10,6 @@
           <Fallback>
             <Sequence>
               <FollowVisualPathAction waypoints="{markers}" stamp="{stamp}"/>
-              <!-- Always spin by the VLM's turn. 0deg completes instantly (Nav2 Spin
-                   succeeds on the first cycle when target == 0), so any turn value is a
-                   success; only the physical spin failing (robot stuck) fails the move. -->
               <SpinAction yaw_degrees="{turn_degrees}"/>
               <SetBlackboard output_key="last_ok" value="true"/>
             </Sequence>
