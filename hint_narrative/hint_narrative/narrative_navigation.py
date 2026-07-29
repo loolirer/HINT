@@ -95,16 +95,16 @@ NARRATIVE_SCHEMA = json.dumps({
 ACTIONS = ("stay", "advance", "back", "insert")
 
 # Minimal topic set recorded per mission (no images / clouds / costmap, to keep the bag
-# small). The two paths + odom/tf give path; the action _action/status topics give
-# the VLM-thinking vs movement time windows the mission_report script derives stats from.
+# small). The followed path + odom/tf give the driven path; the action _action/status topics
+# give the VLM-thinking vs movement time windows the mission_report script derives stats from.
 # Missing topics (e.g. /map in the mapless setup) are simply not recorded — harmless.
 _BAG_TOPICS = [
     "/tf", "/tf_static", "/odom",
     "/path_projector_node/path",       # truncated (clipped) path handed to MPPI
-    "/path_projector_node/path_raw",   # full VLM-intent path
     "/map",                                  # OccupancyGrid if a map exists (else absent)
-    "/path_planner/plan_visual_path/_action/status",         # executor-VLM windows
-    "/narrative_navigation/mission_advance/_action/status",                 # director-VLM windows
+    "/visual_reasoner/visual_reason/_action/status",         # director VLM call (compile)
+    "/path_planner/plan_visual_path/_action/status",         # executor VLM call (plan)
+    "/narrative_navigation/mission_advance/_action/status",  # cognition wrapper (VLM-time window)
     "/path_projector_node/follow_visual_path/_action/status",  # drive windows
     "/spin/_action/status",                                         # turn windows
 ]
