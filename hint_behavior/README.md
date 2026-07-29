@@ -27,11 +27,14 @@ The action names are set in `registerHintNodes()`, one `BT::RosNodeParams` per t
 
 ## behavior_server
 
-`HintBtExecutorNode` (`src/behavior_server.cpp`) is a small subclass of `behaviortree_ros2`'s `BT::TreeExecutionServer` — rather than hand-rolling an action server, goal/cancel handling, thread lifecycle, and tick loop, we reuse the upstream implementation and only override three hooks:
+`HintBtExecutorNode` (`src/behavior_server.cpp`) is a small subclass of `behaviortree_ros2`'s `BT::TreeExecutionServer` — rather than hand-rolling an action server, goal/cancel handling, thread lifecycle, and tick loop, we reuse the upstream implementation and only override four hooks:
 
 - `registerNodesIntoFactory(factory)` — calls `hint_behavior::registerHintNodes(factory, node())`.
 - `onGoalReceived(tree_name, payload)` — treats `payload` as a full tree XML document and calls `factory().registerBehaviorTreeFromText(payload)` before the base class's `createTree(tree_name, ...)` runs. This is what lets a caller send an **arbitrary, freshly composed tree per goal** instead of only invoking trees preloaded at startup from the `behavior_trees` ROS param. An empty `payload` falls back to a preloaded tree. The `<BehaviorTree ID="...">` inside `payload` must match `target_tree` in the goal, or `createTree` won't find it.
-- `onLoopFeedback()` — reports the name of the currently `RUNNING` action leaf, via `tree().applyVisitor(...)`.
+- `onLoopFeedback()` — reports the name of the currently `RUNNING` action leaf, via `tree().applyVisitor(...)`, and mirrors it to `~/state`.
+- `onTreeExecutionCompleted(...)` — resets `~/state` to `IDLE` when a tree finishes.
+
+Alongside the `ExecuteTree` feedback, the node publishes the running leaf name (or `IDLE`) on `~/state` (`/hint_behavior_server/state`, `std_msgs/String`, transient-local so late subscribers get the last value) — the BT-state source for `hint_navigation`'s `visual_debug` overlay.
 
 Everything else (malformed-XML handling, single-goal-at-a-time execution, cancellation via `tree.haltTree()`, exception safety) is the base class's behavior — see `BehaviorTree.ROS2/behaviortree_ros2/tree_execution_server.md`.
 
