@@ -157,6 +157,7 @@ def generate_launch_description():
             {
                 "history_frames": 1,
                 "reasoner_timeout": vlm_timeout,
+                "planner_timeout": vlm_timeout,
             }
         ],
         remappings=[camera_remap],
