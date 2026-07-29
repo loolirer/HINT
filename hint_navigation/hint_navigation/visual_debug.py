@@ -1,22 +1,3 @@
-"""visual_debug — one composited /debug image for HINT live visualization.
-
-Instead of every node shipping its own debug image, each node publishes only its real
-output data and this node layers those outputs into a **single** `/debug` image:
-
-- the camera frame as the backdrop,
-- the binary ground mask as a green/red overlay,
-- the path projector's followed (ground-clipped) and raw (full VLM-intent) paths,
-  re-projected onto the frame via the current odometry pose so they track as the robot moves,
-- the mission (BT) tree's live state as text, top-left.
-
-Every layer toggles via a `show_*` parameter. Rendering is subscriber-gated: nothing is
-composed or published unless something subscribes to `/debug`.
-
-Lives in hint_navigation (not perception): it needs the camera rig to re-project the
-projector's odom paths, and most of what it draws (paths, BT state) is navigation state —
-so it shares the rig (`camera_rig.CameraRig`) with the other navigation nodes.
-"""
-
 import math
 import threading
 
@@ -34,12 +15,10 @@ from std_msgs.msg import String
 
 from hint_navigation.camera_rig import CameraRig
 
-# Latest-wins for the streaming inputs; latched for the once-published state/paths.
 _LATEST = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1,
                      reliability=ReliabilityPolicy.BEST_EFFORT)
 _LATCHED = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
-# Muted palette (BGR) — deliberately no full green / full red.
 _C_GROUND = (120, 190, 120)      # soft green
 _C_NONGROUND = (110, 110, 215)   # soft coral
 _C_PATH_RAW = (70, 170, 235)     # amber — the full VLM intent
@@ -58,15 +37,12 @@ class VisualDebugNode(Node):
         super().__init__("visual_debug_node")
         self.bridge = CvBridge()
 
-        # --- Camera rig (shared with the other navigation nodes; live-adjustable) ---
         CameraRig.declare(self)
-        # --- Layer toggles ---
         self.declare_parameter("show_mask", True)
         self.declare_parameter("show_path", True)
         self.declare_parameter("show_path_raw", True)
         self.declare_parameter("show_bt_state", True)
         self.declare_parameter("overlay_alpha", 0.35)
-        # --- Input topics ---
         self.declare_parameter("image_topic", "/camera/image_raw/compressed")
         self.declare_parameter("mask_topic", "/camera/ground")
         self.declare_parameter("path_topic", "/path_projector_node/path")
@@ -97,9 +73,6 @@ class VisualDebugNode(Node):
     def _p(self, name):
         return self.get_parameter(name).value
 
-    # ------------------------------------------------------------------
-    # Caching subscriptions
-
     def _mask_cb(self, msg):
         try:
             mask = self.bridge.imgmsg_to_cv2(msg, desired_encoding="mono8")
@@ -128,11 +101,7 @@ class VisualDebugNode(Node):
         with self._lock:
             self._bt_state = msg.data
 
-    # ------------------------------------------------------------------
-    # Projection: odom path -> current base_link -> image pixels
-
     def _project_path(self, rig, pts_odom, pose, w, h):
-        """odom (x, y) points -> in-front image (u, v) via the current robot pose."""
         if not pts_odom or pose is None:
             return []
         rx, ry, ryaw = pose
@@ -142,9 +111,6 @@ class VisualDebugNode(Node):
         base = np.stack([c * dx + s * dy, -s * dx + c * dy], axis=1)  # base_link (X fwd, Y left)
         pix, infront = rig.ground_to_pixels(base, w, h)
         return [tuple(np.round(pix[i]).astype(int)) for i in range(len(pix)) if infront[i]]
-
-    # ------------------------------------------------------------------
-    # Render
 
     def _image_cb(self, msg):
         if self.pub_debug.get_subscription_count() == 0:
@@ -166,7 +132,7 @@ class VisualDebugNode(Node):
             a = float(np.clip(self._p("overlay_alpha"), 0.0, 1.0))
             frame[:] = ((1.0 - a) * frame.astype(np.float32) + a * tint).astype(np.uint8)
 
-        rig = CameraRig.from_node(self)  # snapshot current rig (live-adjustable)
+        rig = CameraRig.from_node(self)
         # Raw (intent) first, followed (clipped) on top.
         if bool(self._p("show_path_raw")) and path_raw:
             self._draw_polyline(frame, self._project_path(rig, path_raw, pose, w, h), _C_PATH_RAW)

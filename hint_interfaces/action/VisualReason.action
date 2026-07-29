@@ -1,11 +1,10 @@
 # Goal
-string prompt   # Assembled prompt / context to reason over
-string schema   # Optional JSON shape/schema hint the reply must match; empty = free-form text
-sensor_msgs/CompressedImage[] images   # Optional frames to reason over (empty = text-only); order is meaningful (e.g. before, after)
+string prompt
+string schema
+sensor_msgs/CompressedImage[] images
 ---
 # Result
 string response
-# Stamp of the current-view frame reasoned over (images[-1]); zero when text-only.
 builtin_interfaces/Time stamp
 ---
 # Feedback

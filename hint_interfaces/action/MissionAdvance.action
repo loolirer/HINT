@@ -1,20 +1,15 @@
 # Goal
-bool success        # Did the move just executed (follow + spin) succeed? First call success defaults true.
-string mission_path # Optional: load this mission YAML before advancing.
-bool first          # True on the FIRST advance of a fresh tree run -> wipe any prior narrative and reseed.
+bool success
+string mission_path
+bool first
 ---
 # Result
 bool mission_done
-bool mission_failed  # True when stuck past the cycle cap, or a cognition call failed past its retry budget.
-string area          # The current environment (from the narrative)
-string message       # On a move: the planner's brief path reasoning; on mission_done: the closing summary or failure reason
-# Ordered ground waypoints to follow, normalized image space (point.x, point.y in
-# [-1, 1], center = 0; z unused), nearest-first. May be empty.
+bool mission_failed
+string area
+string message
 geometry_msgs/Point[] waypoints
-# Signed in-place rotation to apply after following the path (degrees), measured from
-# the heading the robot ends the path with. + = left (CCW), - = right (CW), 0 = none.
 float64 turn_degrees
-# Stamp of the current-view frame the path was planned on.
 builtin_interfaces/Time stamp
 ---
 # Feedback

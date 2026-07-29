@@ -80,24 +80,20 @@ class MissionPlannerNode(Node):
         super().__init__("narrative_navigation")
 
         share = get_package_share_directory("hint_narrative")
-        self.declare_parameter(
-            "mission_path", ""
-        )  # empty = start idle; pick a mission per ~/mission_advance call
+        self.declare_parameter("mission_path", "")
         self.declare_parameter(
             "brief_path", os.path.join(share, "prompts", "brief.txt")
         )
         self.declare_parameter("prompts_dir", os.path.join(share, "prompts"))
-        self.declare_parameter(
-            "narrative_path", ""
-        )  # empty -> <mission>.narrative.jsonl
-        self.declare_parameter("log_path", "")  # empty -> <mission>.log.jsonl
+        self.declare_parameter("narrative_path", "")
+        self.declare_parameter("log_path", "")
         self.declare_parameter("record_bag", True)
-        self.declare_parameter("bag_path", "")  # empty -> <mission>.bag (sibling dir)
+        self.declare_parameter("bag_path", "")
         self.declare_parameter("reasoner_action", "/visual_reasoner/visual_reason")
         self.declare_parameter("reasoner_timeout", 30.0)
         self.declare_parameter("planner_action", "/path_planner/plan_visual_path")
         self.declare_parameter("planner_timeout", 30.0)
-        self.declare_parameter("max_env_cycles", 10)  # stuck backstop per environment
+        self.declare_parameter("max_env_cycles", 10)
         self.declare_parameter("camera_topic", "/camera/image_raw/compressed")
         self.declare_parameter("history_frames", 1)
         self.declare_parameter("compile_retries", -1)
@@ -106,17 +102,17 @@ class MissionPlannerNode(Node):
         self._lock = threading.Lock()
         _mp = self._p("mission_path")
         self._mission_path = os.path.abspath(_mp) if _mp else ""
-        self._plan = None  # loaded mission (None = idle, no mission)
-        self._queue = []  # remaining environments (head = current)
-        self._visited = []  # completed environments (for `back`)
+        self._plan = None
+        self._queue = []
+        self._visited = []
         self._narrative = {"situation": "", "done": "", "next": ""}
-        self._env_cycles = 0  # cycles spent on the current head
-        self._failed = False  # mission stuck past the cycle cap
+        self._env_cycles = 0
+        self._failed = False
         self._version = -1
         self._served = False
-        self._bag_proc = None  # running `ros2 bag record` subprocess, or None
+        self._bag_proc = None
         self._latest_frame = None
-        self._frame_history = []  # move-start frames, oldest first, trimmed to N
+        self._frame_history = []
         self._last_plan_message = ""
 
         self._brief = self._read(self._p("brief_path"))
@@ -202,9 +198,7 @@ class MissionPlannerNode(Node):
         with self._lock:
             try:
                 return self._advance_locked(goal_handle)
-            except (
-                Exception
-            ) as e:  # noqa: BLE001 — deliberately broad: this is the backstop
+            except Exception as e:  # noqa: BLE001
                 self.get_logger().error(f"Advance failed, aborting mission: {e!r}")
                 try:
                     self._stop_recording()
@@ -263,7 +257,6 @@ class MissionPlannerNode(Node):
         history = self._history_window()
         images, vision = self._vision_inputs(history, after)
 
-        # --- Cognition call 1: recompile the narrative (director) ---
         data = self._compile(vision, images, goal_handle)
 
         if goal_handle.is_cancel_requested:
@@ -297,7 +290,7 @@ class MissionPlannerNode(Node):
         result.area = cur["name"] if cur else ""
 
         if self._failed:
-            self._append_snapshot(trigger, action)  # action == "fail" (stuck cap)
+            self._append_snapshot(trigger, action)
             result.mission_done = True
             result.mission_failed = True
             result.message = (
@@ -447,7 +440,7 @@ class MissionPlannerNode(Node):
                 return None
 
     def _plan_move(self, description, images, goal_handle=None):
-        retries = int(self._p("compile_retries"))  # -1 = retry indefinitely
+        retries = int(self._p("compile_retries"))
         delay = max(0.0, float(self._p("compile_retry_delay")))
         attempt = 0
         while True:
@@ -471,7 +464,7 @@ class MissionPlannerNode(Node):
                 f"retrying in {delay:.1f}s."
             )
             if not self._interruptible_sleep(delay, goal_handle):
-                return None  # cancelled during the backoff
+                return None
 
     def _context_text(self):
         lines = [f"My mission: {self._plan.get('mission', '')}"]
@@ -570,7 +563,7 @@ class MissionPlannerNode(Node):
 
     def _load_mission(self, path):
         abspath = os.path.abspath(path)
-        plan = self._load_plan(abspath)  # may raise — before any state is committed
+        plan = self._load_plan(abspath)  # may raise — load before committing any state
         self._mission_path = abspath
         self._plan = plan
         self._load_or_seed()
@@ -583,10 +576,10 @@ class MissionPlannerNode(Node):
                     os.remove(path)
             except OSError as e:
                 self.get_logger().warn(f"Could not delete {path}: {e}")
-        self._load_or_seed()  # narrative now absent -> seeds a fresh plan
+        self._load_or_seed()
         self._env_cycles = 0
         self._frame_history = []
-        self._start_recording()  # fresh run -> fresh bag (overwrites the previous)
+        self._start_recording()
 
     def _load_plan(self, path):
         with open(path, "r") as f:
@@ -629,7 +622,7 @@ class MissionPlannerNode(Node):
                 "next": nar.get("next", ""),
             }
             self._failed = bool(last.get("mission_failed", False))
-            self._served = True  # resuming mid-mission
+            self._served = True
             self.get_logger().info(f"Resumed from {path} at v{self._version}.")
         else:
             self._queue = self._seed_queue()
@@ -638,14 +631,9 @@ class MissionPlannerNode(Node):
             self._version = -1
             self._served = False
             self._failed = False
-            self._start_recording()  # fresh seed (no narrative on disk) -> start the bag
+            self._start_recording()
 
     def _append_snapshot(self, trigger, action):
-        """Append a full snapshot — the versioned, git-like history (queue included).
-
-        ``_version`` is bumped only AFTER the write succeeds, so an IO failure can't
-        leave the in-memory counter ahead of what's on disk (a later resume reads the
-        tail, so the two must agree)."""
         next_version = self._version + 1
         cur = self._current()
         rec = {
@@ -656,8 +644,8 @@ class MissionPlannerNode(Node):
             "mission_failed": self._failed,
             "action": action,
             "trigger": trigger,
-            "queue": self._queue,  # remaining environments (order shows inserts)
-            "visited": self._visited,  # completed environments (enriched descriptions)
+            "queue": self._queue,
+            "visited": self._visited,
             "narrative": {
                 "situation": self._narrative.get("situation", ""),
                 "done": self._narrative.get("done", ""),
@@ -738,9 +726,6 @@ class MissionPlannerNode(Node):
 
     @staticmethod
     def _interruptible_sleep(seconds, goal_handle=None):
-        """Sleep up to `seconds`, returning False early if a BT-halt cancel arrives
-        (True if it slept the full duration). Lets the compile backoff bail out the
-        instant the tree halts, mirroring `_await`'s cancel polling."""
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             if goal_handle is not None and goal_handle.is_cancel_requested:
@@ -765,7 +750,6 @@ class MissionPlannerNode(Node):
             return f.read()
 
     def _cancel_cb(self, _goal_handle):
-        # Accept BT-halt cancellations so an in-flight advance can bail out.
         return CancelResponse.ACCEPT
 
     @staticmethod
@@ -785,7 +769,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node._stop_recording()  # flush the mission bag if a run was interrupted
+        node._stop_recording()
         executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()

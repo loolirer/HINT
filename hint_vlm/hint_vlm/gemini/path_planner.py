@@ -10,52 +10,20 @@ from hint_vlm.gemini.gemini_base import GeminiActionNode
 
 
 class PathPlannerNode(GeminiActionNode):
-    """Plans a ground-restricted path from a text instruction + goal frames.
-
-    Like ``visual_reasoner``, it holds no camera buffer of its own: the frames to
-    plan over arrive in the ``PlanVisualPath`` goal's ``images`` list (the single
-    buffer owned by ``hint_narrative``), oldest first — the LAST is the current
-    view the path is planned on, any earlier ones are recent past views attached
-    for continuity. This keeps the planner and the mission director reasoning over
-    exactly the same frames (no buffer to drift out of sync). Buffer depth is set
-    once, on ``hint_narrative``'s ``history_frames``.
-    """
-
     def __init__(self):
         super().__init__("path_planner", PlanVisualPath, "~/plan_visual_path", "message")
 
-        # Farthest image row (of 1000) a waypoint may occupy — caps how far ahead
-        # the path reaches. Smaller row = farther/higher in the frame = more
-        # error-prone; larger = nearer/more conservative. Live-adjustable.
         self.declare_parameter("min_row", 500)
-
-        # Consensus sampling: ask for N candidate paths in ONE reply (this
-        # model rejects candidate_count>1, so the prompt requests a candidates list)
-        # and keep the medoid — the path closest to all the others — robust to the
-        # model splitting between routes at temperature > 0. 1 = a single plan.
         self.declare_parameter("n_candidates", 1)
-
-        # Output control (quality vs validity), live-adjustable:
-        #   "json"   (default) JSON mode — valid JSON, keeps reasoning freedom;
-        #   "off"    unconstrained — best quality, but can return unparseable text;
-        #   "schema" constrained to the schema — always valid+shaped, but the hard
-        #            grammar can cost spatial-reasoning quality.
         self.declare_parameter("structured_output", "json")
 
         self.get_logger().info("Path planner ready — call ~/plan_visual_path.")
-
-    # ------------------------------------------------------------------
-    # Main execution
 
     def _run(self, goal_handle):
         goal = goal_handle.request
 
         self._publish_feedback(goal_handle, "RUNNING")
 
-        # Frames come from the goal (the unified hint_narrative buffer), oldest
-        # first: the LAST is the current view the path is planned on, the earlier
-        # ones are continuity. The current view must decode — its stamp grounds the
-        # follow — while an unreadable past frame is just dropped.
         if not goal.images:
             return self._abort(goal_handle, "No camera frame supplied in the goal.")
         *past_msgs, current_msg = goal.images
@@ -69,15 +37,12 @@ class PathPlannerNode(GeminiActionNode):
             try:
                 _, pil = self._frame_to_pil(msg)
                 hist.append(pil)
-            except Exception as e:  # noqa: BLE001 — skip an unreadable continuity frame
+            except Exception as e:  # noqa: BLE001
                 self.get_logger().warn(f"Skipping an unreadable continuity frame: {e}")
 
         if goal_handle.is_cancel_requested:
             return self._cancel(goal_handle)
 
-        # N-candidate sampling is done IN ONE call: this model rejects
-        # candidate_count>1, so the prompt asks for N paths in a single response
-        # (via {return_spec}) and we pick the medoid. n<=1 is the plain single plan.
         n = max(1, int(self._p("n_candidates")))
         prompt = self._fill_prompt(
             "path_planner.txt", description=goal.description,
@@ -97,12 +62,6 @@ class PathPlannerNode(GeminiActionNode):
         if goal_handle.is_cancel_requested:
             return self._cancel(goal_handle)
 
-        # Parse the reply. **Any interpretable response is a success** — the generator only
-        # relays what the model said (waypoints, possibly empty; a turn, possibly 0), and
-        # whether an environment is done / blocked is the narrative's call, not ours. The
-        # only failures are *no usable response*: a timeout / API error (handled above), or
-        # an unparseable reply here — a genuine model malfunction, distinct from a valid
-        # "empty" decision, so the BT/narrative sees an error rather than a silent no-op.
         parsed = self._parse_json(raw)
         if parsed is None:
             return self._abort(
@@ -120,20 +79,15 @@ class PathPlannerNode(GeminiActionNode):
                 path_cands.append((reasoning, waypoints, points, turn))
 
         if path_cands:
-            # Consensus: the medoid path — the candidate closest to all the others —
-            # carrying its own end-of-path turn.
             reasoning, waypoints, points, turn = self._select_medoid(path_cands)
             if len(cand_dicts) > 1:
                 self.get_logger().info(
                     f"Chose medoid of {len(path_cands)}/{len(cand_dicts)} candidate paths.")
         else:
-            # No waypoints in any candidate: a turn-only (scan / re-orient) or a no-op
-            # move — still a valid response. Relay the first candidate's turn verbatim.
             reasoning, waypoints, points, turn = first_reason, [], [], first_turn
             self.get_logger().info(f"No waypoints — turn-only/no-op move ({turn:+.0f} deg).")
 
         result = PlanVisualPath.Result()
-        # The VLM's brief explanation of the chosen path rides on `message`.
         result.message = reasoning or f"{len(waypoints)} waypoint(s), turn {turn:+.0f} deg"
         result.waypoints = waypoints
         result.turn_degrees = float(turn)
@@ -141,20 +95,8 @@ class PathPlannerNode(GeminiActionNode):
         goal_handle.succeed()
         return result
 
-    # ------------------------------------------------------------------
-    # Helpers
-
     @staticmethod
     def _continuity_text(n_past):
-        """The {continuity} token describing the ``n_past`` past frames attached
-        ahead of the current view (empty when there are none).
-
-        Frames arrive in the goal (the unified hint_narrative buffer), oldest first;
-        the last is the current view, the earlier ``n_past`` are recent past views.
-        Only the images travel — no per-frame reasoning note — so the caption just
-        labels them and says to continue the approach across the view change, with
-        the current instruction still winning.
-        """
         if n_past <= 0:
             return ""
         return (
@@ -166,12 +108,6 @@ class PathPlannerNode(GeminiActionNode):
 
     @staticmethod
     def _response_schema(n):
-        """Constrained-output schema: a single plan, or a candidates list.
-
-        Passed as ``response_schema`` so the model can only emit well-formed JSON
-        matching it — the fix for the corrupted/degenerate long replies. Mirrors
-        the ``{return_spec}`` prompt shape (single vs candidates) for ``n``.
-        """
         waypoint = types.Schema(
             type=types.Type.OBJECT,
             required=["point"],
@@ -200,11 +136,6 @@ class PathPlannerNode(GeminiActionNode):
 
     @staticmethod
     def _return_spec(n):
-        """The {return_spec} block: single plan, or N candidate plans in ONE reply.
-
-        candidate_count>1 is unsupported by this model, so N-sampling is done by
-        asking for N paths in a single response and taking the medoid.
-        """
         shape = ('{"reasoning": <plan the path in words, then draw it>,'
                  '"waypoints": [{"point": [y, x], "label": <n>}, ...],'
                  '"turn_degrees": <in-place turn at the end, + left / - right / 0 none>}')
@@ -219,12 +150,6 @@ class PathPlannerNode(GeminiActionNode):
 
     @staticmethod
     def _candidate_dicts(data):
-        """Return the list of candidate replies from a parsed model response.
-
-        Accepts the multi form ``{"candidates": [...]}``, a single object
-        ``{"reasoning", "waypoints"}``, or a bare ``[...]`` waypoint list — each
-        element is then handed to ``_parse_reasoning_points``.
-        """
         if isinstance(data, dict) and isinstance(data.get("candidates"), list):
             cands = [c for c in data["candidates"] if isinstance(c, (dict, list))]
             if cands:
@@ -232,14 +157,6 @@ class PathPlannerNode(GeminiActionNode):
         return [data]
 
     def _select_medoid(self, cands):
-        """Return the consensus candidate — the one whose (arc-length-resampled)
-        path is closest, summed, to all the others.
-
-        ``cands`` is a list of ``(reasoning, waypoints, points, turn)`` tuples (the whole
-        tuple is returned, so the chosen path keeps its own turn). Averaging whole paths
-        is wrong (two valid routes average to a path between them), so this picks the
-        most central *actual* candidate instead. A single candidate is returned as-is.
-        """
         if len(cands) == 1:
             return cands[0]
         curves = [self._resample([(m.x, m.y) for m in c[1]]) for c in cands]
@@ -253,8 +170,6 @@ class PathPlannerNode(GeminiActionNode):
 
     @staticmethod
     def _resample(pts, k=12):
-        """Resample an ordered polyline to ``k`` points, evenly by arc length, so
-        candidates of different lengths compare pointwise."""
         a = np.asarray(pts, dtype=float)
         if len(a) < 2:
             base = a[:1] if len(a) else np.zeros((1, 2))
@@ -269,12 +184,6 @@ class PathPlannerNode(GeminiActionNode):
                          np.interp(targets, arc, a[:, 1])], axis=1)
 
     def _parse_reasoning_points(self, data):
-        """Split the model reply into ``(reasoning, points, turn_degrees)``.
-
-        Accepts the documented object form
-        ``{"reasoning": ..., "waypoints": [...], "turn_degrees": ...}`` and tolerates a
-        bare ``[...]`` list (reasoning empty, no turn).
-        """
         if isinstance(data, dict):
             reasoning = data.get("reasoning", "") or ""
             points = data.get("waypoints", [])
@@ -292,11 +201,6 @@ class PathPlannerNode(GeminiActionNode):
         return str(reasoning), points, turn
 
     def _points_to_waypoints(self, points):
-        """Convert Gemini ``[{"point": [y, x], ...}]`` to normalized waypoints.
-
-        Each returned ``Point`` has ``x``/``y`` in ``[-1, 1]`` (image space,
-        center = 0), ``z`` unused. Malformed entries are skipped.
-        """
         min_row = int(self._p("min_row"))
         waypoints = []
         for p in points:
@@ -304,9 +208,6 @@ class PathPlannerNode(GeminiActionNode):
             if not (isinstance(pt, (list, tuple)) and len(pt) == 2):
                 continue
             y, x = pt
-            # Hard cap on forward reach: pull any point past the limit (too far /
-            # too high in the frame) down to min_row. Far points are where the VLM's
-            # ground grounding is least reliable; this backstops the prompt.
             y = max(float(y), float(min_row))
             waypoint = Point()
             waypoint.x = float(min(max(2.0 * x / 1000.0 - 1.0, -1.0), 1.0))

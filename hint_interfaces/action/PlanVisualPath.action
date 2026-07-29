@@ -4,13 +4,8 @@ sensor_msgs/CompressedImage[] images
 ---
 # Result
 string message
-# Ordered ground waypoints to follow, normalized image space (point.x, point.y in
-# [-1, 1], center = 0; z unused), nearest-first. May be empty.
 geometry_msgs/Point[] waypoints
-# Signed in-place rotation to apply after following the path (degrees), measured from
-# the heading the robot ends the path with. + = left (CCW), - = right (CW), 0 = none.
 float64 turn_degrees
-# Stamp of the current-view frame the path was planned on.
 builtin_interfaces/Time stamp
 ---
 # Feedback

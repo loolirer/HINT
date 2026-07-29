@@ -191,7 +191,7 @@ def read_bag(bag_path):
                     slot[2] = gs.status  # SUCCEEDED (4) vs CANCELED/ABORTED (5/6)
 
         elif topic == "/map":
-            occ = deserialize_message(data, mtype(topic))  # keep latest
+            occ = deserialize_message(data, mtype(topic))
 
     ref = "map" if ("map" in parents or has_map) else "odom"
 

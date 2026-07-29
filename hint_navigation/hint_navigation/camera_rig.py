@@ -1,33 +1,7 @@
-"""camera_rig.py — the camera rig (inverse-perspective-mapping), single source of truth.
-
-hint_navigation owns the camera's physical placement (its *rig*: height above the ground,
-forward offset, downward tilt) and the horizontal FOV that sets the focal length. This
-module holds that rig **and** the ground-plane projection math shared by the navigation
-nodes, so the two directions can never drift apart (they used to be hand-synced copies
-across three nodes):
-
-- ``path_projector`` : ``pixels_to_ground``  (VLM waypoints -> base_link metric path)
-- ``obstacle_projector``   : ``ground_to_pixels``  (ground-mask -> BEV obstacle homography)
-- ``visual_debug``         : ``ground_to_pixels``  (odom paths -> image overlay)
-
-``pixels_to_ground`` and ``ground_to_pixels`` are exact inverses of one pinhole + tilt +
-height model. Ground points are ``base_link`` metric (x forward, y left, z = 0 implied);
-pixels are ``(u, v)`` in an image of size ``(w, h)``. The model is resolution-invariant
-(focal length and principal point scale with ``w``/``h``), so callers pass whatever image
-size their pixels are expressed in (full-res waypoints, or the coarse processing-grid mask).
-
-Pure and stateless — no ROS, no node. ``CameraRig.from_node(node)`` reads the four rig
-parameters (declaring them if absent) and returns a snapshot; call it at the point of use
-to keep the rig live-adjustable (``ros2 param set`` while calibrating), or build one
-directly with the constructor.
-"""
-
 import math
 
 import numpy as np
 
-# The four rig parameters + their defaults, declared once here so every consumer node
-# shares the exact same parameter schema (bringup injects the real rig geometry).
 RIG_PARAMS = {
     "camera_height": 0.14,          # m above the ground plane
     "camera_forward_offset": 0.0,   # m ahead of the base origin
@@ -37,8 +11,6 @@ RIG_PARAMS = {
 
 
 class CameraRig:
-    """Pinhole + tilt + height ground-plane projector (both directions)."""
-
     def __init__(self, height, forward_offset, tilt, hfov_deg):
         self.height = float(height)
         self.forward_offset = float(forward_offset)
@@ -47,14 +19,12 @@ class CameraRig:
 
     @classmethod
     def declare(cls, node):
-        """Declare the rig parameters on ``node`` (idempotent)."""
         for name, default in RIG_PARAMS.items():
             if not node.has_parameter(name):
                 node.declare_parameter(name, default)
 
     @classmethod
     def from_node(cls, node):
-        """Snapshot the rig from ``node``'s current parameters (declaring if absent)."""
         cls.declare(node)
         g = node.get_parameter
         return cls(
@@ -65,13 +35,9 @@ class CameraRig:
         )
 
     def _focal(self, w):
-        """Focal length (px) implied by the horizontal FOV at image width ``w``."""
         return (w / 2.0) / math.tan(math.radians(self.hfov_deg) / 2.0)
 
     def pixels_to_ground(self, pts, w, h):
-        """Back-project pixel points ``(N, 2)`` onto the ground plane in ``base_link``
-        (X forward, Y left). Points on/above the horizon clamp to a far ground distance
-        rather than diverging."""
         f = self._focal(w)
         cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
         cos_t, sin_t = math.cos(self.tilt), math.sin(self.tilt)
@@ -85,8 +51,6 @@ class CameraRig:
         return np.stack([X, Y], axis=1).astype(np.float64)
 
     def ground_to_pixels(self, gxy, w, h):
-        """Project ground points ``(N, 2)`` metric ``base_link`` to pixels; returns
-        ``(pix (N, 2), in_front mask)``."""
         f = self._focal(w)
         cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
         cos_t, sin_t = math.cos(self.tilt), math.sin(self.tilt)

@@ -7,7 +7,6 @@ package_name = "hint_perception"
 
 
 def package_data_files(directory):
-    """Install every file under ``directory`` to share/, preserving the tree."""
     entries = []
     for path in glob(os.path.join(directory, "**", "*"), recursive=True):
         if os.path.isfile(path):

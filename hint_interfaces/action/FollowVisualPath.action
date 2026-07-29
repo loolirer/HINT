@@ -1,8 +1,5 @@
 # Goal
-# Ordered ground waypoints to follow, normalized image space (point.x, point.y in
-# [-1, 1], center = 0; z unused), nearest-first.
 geometry_msgs/Point[] waypoints
-# Stamp of the frame the waypoints were defined on.
 builtin_interfaces/Time stamp
 ---
 # Result

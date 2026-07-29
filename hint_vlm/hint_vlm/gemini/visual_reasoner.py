@@ -9,47 +9,12 @@ from hint_vlm.gemini.gemini_base import GeminiActionNode
 
 
 class ReasonerNode(GeminiActionNode):
-    """A generic text-(and-optional-image)-in / JSON-out LLM reasoner.
-
-    It reasons over the text it is handed and, when the goal carries ``images``,
-    over those frames too. It is the model call the semantic mission planner
-    leans on as its **director**: each cycle the planner hands it the before/after
-    frames of the move just executed plus the running narrative, and it assesses
-    the move against what it actually sees and emits the next instruction. With
-    an empty ``images`` list it degrades to pure text reasoning, so any text-only
-    caller still works unchanged.
-
-    It inherits ``GeminiActionNode``'s API client, action server, timeout-guarded
-    call, single-goal lifecycle, and feedback/abort/cancel helpers. Frames arrive
-    in the goal (no camera subscription).
-
-    Contract: the goal carries a ``prompt`` and an optional ``schema`` (a JSON
-    shape the reply must match). When a schema is given the reply is parsed and
-    re-serialized so the caller gets canonical JSON; when it is empty the raw
-    text is returned. A genuine reply *succeeds* (BT ``SUCCESS``); anything that
-    stops the reasoning from running (empty prompt, timeout, API error,
-    unparseable JSON) *aborts* (BT ``FAILURE``) with the reason in ``response``.
-
-    ``model_id`` defaults to the Robotics-ER model like the rest of the package,
-    but for pure text reasoning it can be pointed at a general Gemini model via
-    the parameter.
-    """
-
     def __init__(self):
         super().__init__("visual_reasoner", VisualReason, "~/visual_reason", "response")
 
-        # Output control (quality vs validity) when a schema is requested, same
-        # knob as path_planner, live-adjustable:
-        #   "json"   (default) JSON mode — valid JSON, keeps reasoning freedom;
-        #   "off"    unconstrained — best quality, but a reply can be unparseable;
-        #   "schema" constrained decoding to the schema (enum-enforced), but the
-        #            hard grammar can cost reasoning quality.
         self.declare_parameter("structured_output", "json")
 
         self.get_logger().info("Reasoner node ready — call ~/visual_reason.")
-
-    # ------------------------------------------------------------------
-    # Main execution
 
     def _run(self, goal_handle):
         goal = goal_handle.request
@@ -65,9 +30,6 @@ class ReasonerNode(GeminiActionNode):
         response_schema = None
         json_output = False
         if want_json:
-            # "schema": constrain to the schema (only when it's real JSON). Else
-            # ("json"/"off", or a loose shape string) the decoder can't enforce the
-            # shape, so hint it in the prompt — and gate validity with JSON mode.
             schema_obj = (self._as_response_schema(goal.schema)
                           if mode == "schema" else None)
             if schema_obj is not None:
@@ -80,18 +42,13 @@ class ReasonerNode(GeminiActionNode):
                 )
                 json_output = (mode == "json")
 
-        # Optional grounding frames (e.g. the mission director's before/after
-        # views). Empty list -> pure text reasoning, exactly as before. Order is
-        # preserved so the prompt can refer to "the first / second image".
         pil_frames = []
         for img in goal.images:
             try:
                 _, pil_img = self._frame_to_pil(img)
                 pil_frames.append(pil_img)
-            except Exception as e:  # noqa: BLE001 — skip an unreadable frame
+            except Exception as e:  # noqa: BLE001
                 self.get_logger().warn(f"Skipping an unreadable image: {e}")
-        # Text before images (Gemini best practice); image order preserved so the
-        # prompt can refer to "the first / second image".
         contents = [prompt] + pil_frames
 
         if goal_handle.is_cancel_requested:
@@ -102,7 +59,7 @@ class ReasonerNode(GeminiActionNode):
                                  json_output=json_output)
         except TimeoutError as e:
             return self._abort(goal_handle, str(e))
-        except Exception as e:  # noqa: BLE001 — surfaced to caller as FAILURE
+        except Exception as e:  # noqa: BLE001
             return self._abort(goal_handle, f"API error: {e}")
 
         if goal_handle.is_cancel_requested:
@@ -125,21 +82,13 @@ class ReasonerNode(GeminiActionNode):
 
         result = VisualReason.Result()
         result.response = response
-        # Report the frame reasoned over (the current view = last image), mirroring
-        # PlanVisualPath. Left as the default zero stamp for a text-only call.
         if goal.images:
             result.stamp = goal.images[-1].header.stamp
         goal_handle.succeed()
         return result
 
-    # ------------------------------------------------------------------
-    # Helpers
-
     @staticmethod
     def _as_response_schema(schema_str):
-        """Return a JSON-schema dict for constrained decoding when the goal's
-        ``schema`` is real JSON (a dict), else ``None`` — loose shape strings like
-        ``'{"x": bool}'`` aren't valid JSON and stay as a prompt hint."""
         try:
             obj = json.loads(schema_str)
         except (json.JSONDecodeError, TypeError):

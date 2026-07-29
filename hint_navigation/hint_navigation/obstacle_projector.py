@@ -1,23 +1,3 @@
-"""obstacle_projector — ground mask -> Nav2 obstacle point cloud.
-
-The streaming, image->metric half of hint_navigation. It subscribes to hint_perception's
-image-space ground mask (``/camera/ground``, ``mono8``, 255 = ground) and warps it through
-the ground-plane homography into a top-down (BEV) grid: a cell that is **known** (inside
-the camera wedge) but **not ground** is an obstacle. Those obstacle cell centres are
-published as a ``sensor_msgs/PointCloud2`` on ``/obstacles`` (``base_link``, z = 0) for the
-Nav2 local costmap's obstacle layer. One point per BEV cell keeps the cloud light.
-
-This node owns the camera rig (via ``camera_rig.CameraRig``); the BEV *grid* geometry
-(``bev_*``) is its own concern and lives here. It was split out of the old fused
-``ground_segmenter`` so perception stays purely image-space — the segmenter now only
-labels pixels; anything that needs the camera's physical placement lives on this side.
-
-**Latency compensation is preserved end-to-end:** the cloud is stamped with the *mask's*
-header stamp (which the segmenter inherits from the source camera frame), so Nav2's
-obstacle layer TF-transforms ``base_link -> odom`` at capture time, landing points where
-they were seen, not where the robot is now.
-"""
-
 import math
 
 import cv2
@@ -32,8 +12,7 @@ from std_msgs.msg import Header
 
 from hint_navigation.camera_rig import CameraRig
 
-# Latest-mask-wins; RELIABLE matches the segmenter's mask publisher (a reliable pub also
-# serves any best-effort subscriber, so this stays compatible downstream).
+# RELIABLE matches the segmenter's mask publisher (also serves best-effort subs).
 _LATEST_MASK_QOS = QoSProfile(
     history=HistoryPolicy.KEEP_LAST,
     depth=1,
@@ -46,21 +25,17 @@ class ObstacleProjectorNode(Node):
         super().__init__("obstacle_projector_node")
         self.bridge = CvBridge()
 
-        # Camera rig (owns camera<->ground); declared here so it shows up at startup and
-        # bringup's rig params bind. Re-snapshotted per frame to stay live-adjustable.
         CameraRig.declare(self)
 
-        # --- BEV window (base_link: x forward, y left); one obstacle point per cell ---
         self.declare_parameter("bev_range", 3.0)        # m forward coverage
         self.declare_parameter("bev_half_width", 1.5)   # m lateral each side
         self.declare_parameter("bev_resolution", 0.05)  # m per cell (~ costmap res)
-        self.declare_parameter("obstacle_frame", "base_link")  # cloud frame_id
+        self.declare_parameter("obstacle_frame", "base_link")
         self.declare_parameter("mask_topic", "/camera/ground")
 
         self.create_subscription(
             Image, str(self._p("mask_topic")), self.callback, _LATEST_MASK_QOS
         )
-        # Reliable pub so a best-effort costmap observation sub is still compatible.
         self.pub_obstacles = self.create_publisher(PointCloud2, "/obstacles", 5)
 
         self.get_logger().info(
@@ -69,9 +44,6 @@ class ObstacleProjectorNode(Node):
 
     def _p(self, name):
         return self.get_parameter(name).value
-
-    # ------------------------------------------------------------------
-    # BEV grid geometry (grid concerns; the rig owns only camera<->ground)
 
     def _bev_geom(self):
         res = max(1e-3, float(self._p("bev_resolution")))
@@ -84,11 +56,6 @@ class ObstacleProjectorNode(Node):
         return (rng - x) / res - 0.5, (half - y) / res - 0.5  # (row, col)
 
     def _mask_to_obstacle_cells(self, rig, ground, w, h):
-        """Warp the image-space ground mask to BEV; return obstacle (mx, my) points.
-
-        ``ground`` is a boolean image mask (True = traversable). A BEV cell is an
-        obstacle when it is **known** (inside the camera wedge) but **not ground**.
-        """
         rows, cols, res, rng, half = self._bev_geom()
         x_off = rig.forward_offset
         x_near = max(0.25 * rng, x_off + 0.2)
@@ -118,9 +85,6 @@ class ObstacleProjectorNode(Node):
         my = half - (xs + 0.5) * res           # metric y left
         return mx, my
 
-    # ------------------------------------------------------------------
-    # Callback
-
     def callback(self, msg):
         try:
             mask = self.bridge.imgmsg_to_cv2(msg, desired_encoding="mono8")
@@ -130,7 +94,7 @@ class ObstacleProjectorNode(Node):
         if mask is None:
             return
 
-        rig = CameraRig.from_node(self)  # snapshot current rig (live-adjustable)
+        rig = CameraRig.from_node(self)
         ground = mask > 0
         h, w = ground.shape[:2]
         mx, my = self._mask_to_obstacle_cells(rig, ground, w, h)
