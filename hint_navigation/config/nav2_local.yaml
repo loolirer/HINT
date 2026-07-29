@@ -19,7 +19,7 @@ controller_server:
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
       required_movement_radius: 0.1
-      movement_time_allowance: 30.0
+      movement_time_allowance: 5.0
     # Positional arrival — the VLM path carries no meaningful final heading, so yaw is
     # effectively ignored.
     goal_checker:
@@ -86,7 +86,7 @@ controller_server:
         cost_weight: 14.0      # was 14.0 — loosen path-hugging so the robot may deviate to skirt obstacles
         max_path_occupancy_ratio: 0.05
         trajectory_point_step: 4
-        threshold_to_consider: 0.1
+        threshold_to_consider: 0.025
         offset_from_furthest: 20
         use_path_orientations: false
       PathFollowCritic:
@@ -160,7 +160,7 @@ behavior_server:
     robot_base_frame: base_link
     transform_timeout: 0.1
     simulate_ahead_time: 2.0
-    max_rotational_vel: 1.0
-    min_rotational_vel: 0.4
-    rotational_acc_lim: 3.2
+    max_rotational_vel: 0.50
+    min_rotational_vel: 0.05
+    rotational_acc_lim: 0.50
     enable_stamped_cmd_vel: true   # TB3 consumes stamped /cmd_vel
