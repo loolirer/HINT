@@ -11,7 +11,7 @@ builtin_interfaces/Time stamp
 ---
 # Result
 # Success/failure is the action's terminal status (SUCCEEDED vs ABORTED) — no
-# redundant `success` bool (matching PlanVisualPath / Reason). Reaching the goal (or a
+# redundant `success` bool (matching PlanVisualPath / VisualReason). Reaching the goal (or a
 # turn-only no-op with no drivable path) SUCCEEDS; a blocked/no-progress follow,
 # a rejected goal, or a grounding failure ABORTS, with the reason in `message`.
 string message

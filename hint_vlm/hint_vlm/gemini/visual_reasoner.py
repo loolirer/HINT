@@ -123,7 +123,7 @@ class ReasonerNode(GeminiActionNode):
 
         self.get_logger().info(f"Reasoned → {response}")
 
-        result = Reason.Result()
+        result = VisualReason.Result()
         result.response = response
         # Report the frame reasoned over (the current view = last image), mirroring
         # PlanVisualPath. Left as the default zero stamp for a text-only call.

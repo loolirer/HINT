@@ -398,7 +398,7 @@ class MissionPlannerNode(Node):
             return result
 
         # --- Cognition call 2: plan the move (executor) over the SAME frames ---
-        plan = self._plan(self._narrative.get("next", ""), images, goal_handle)
+        plan = self._plan_move(self._narrative.get("next", ""), images, goal_handle)
 
         if goal_handle.is_cancel_requested:
             return self._cancelled_result(goal_handle)
@@ -540,7 +540,7 @@ class MissionPlannerNode(Node):
             if not self._interruptible_sleep(delay, goal_handle):
                 return None   # cancelled during the backoff
 
-    def _plan(self, description, images, goal_handle=None):
+    def _plan_move(self, description, images, goal_handle=None):
         """Plan the move via one path_planner call, WAITING through failures.
 
         Mirrors ``_compile``: the same retry-and-wait resilience (the robot stays put

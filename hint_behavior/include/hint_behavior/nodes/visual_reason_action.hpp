@@ -75,7 +75,7 @@ public:
     if (wr) {
       setOutput("response", wr->result->response);
     }
-    RCLCPP_WARN(logger(), "Reason action could not run (%s)", BT::toStr(error));
+    RCLCPP_WARN(logger(), "VisualReason action could not run (%s)", BT::toStr(error));
     return BT::NodeStatus::FAILURE;
   }
 };
