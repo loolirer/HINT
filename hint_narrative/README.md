@@ -179,9 +179,9 @@ the *compiled belief*.
 Every run auto-records a **minimal MCAP rosbag** (`<mission>.bag`, a sibling of the mission YAML),
 started on a fresh run and closed when the mission ends (or on Ctrl+C). It is **overwritten each
 run**, mirroring the jsonl semantics. The topic set is deliberately small (no images / clouds /
-costmap — just `/tf`, `/tf_static`, `/odom`, the projector's raw + truncated paths, `/map` if
-present, and the `plan_visual_path` / `advance` / `follow_visual_path` / `spin` `_action/status`
-topics). Toggle with the `record_bag` param; relocate with `bag_path`. Recording is a controlled
+costmap — just `/tf`, `/tf_static`, `/odom`, the projector's followed path (`~/path`), `/map` if
+present, and the `visual_reason` / `plan_visual_path` / `advance` / `follow_visual_path` / `spin`
+`_action/status` topics). Toggle with the `record_bag` param; relocate with `bag_path`. Recording is a controlled
 `ros2 bag record --storage mcap` subprocess (needs `ros-<distro>-rosbag2-storage-mcap`).
 
 The offline **`mission_report`** script compiles that bag into one annotated figure plus stats,
@@ -192,11 +192,15 @@ ros2 run hint_narrative mission_report missions/<name>/mission.bag
 ```
 
 Reference frame is `map` if the bag has one, else `odom`. The figure shows the **actual** driven
-path (continuous), the VLM **raw** and **truncated** paths, the robot **footprint** (circle +
-heading) drawn **only at VLM plan-call poses**, start/end markers, each **turn** as a curved arrow
-labelled with its measured (odometry) magnitude, and a stats box: mission duration, VLM-processing
-time (`plan_visual_path` + `advance` windows) and movement time (`follow_visual_path` + `spin`
-windows) — all derived from the recorded `_action/status` topics, so no runtime node is touched.
+path (continuous), the **truncated** (followed) path, the robot **footprint** (circle + heading)
+drawn **only at VLM plan-call poses** and labelled with the **stop's sequence index** (0-based, in
+visiting order), start/end markers, each **turn** as a post-spin heading line, and a stats box:
+mission duration, VLM-processing time (the `advance` wrapper window — the whole stationary-cognition
+span per cycle), movement time (`follow_visual_path` + `spin` windows), and the **VLM hit rate**
+(successful/total of the real VLM calls — the `visual_reason` compile + `plan_visual_path` plan,
+each by its `_action/status` terminal status, retries counted as separate calls). All displayed
+paths share one opacity (`PATH_ALPHA`). Everything is derived from the recorded topics, so no
+runtime node is touched.
 
 ## Prompt template (`prompts/compile.txt`)
 
