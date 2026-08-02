@@ -1,18 +1,3 @@
-"""visual_debug — one composited /debug image for HINT live visualization.
-
-Instead of every node shipping its own debug image, each node publishes only its real
-output data and this node layers those outputs into a **single** `/debug` image:
-
-- the camera frame as the backdrop,
-- the binary ground mask as a green/red overlay,
-- the trajectory navigator's followed (ground-clipped) and raw (full VLM-intent) paths,
-  re-projected onto the frame via the current odometry pose so they track as the robot moves,
-- the mission (BT) tree's live state as text, top-left.
-
-Every layer toggles via a `show_*` parameter. Rendering is subscriber-gated: nothing is
-composed or published unless something subscribes to `/debug`.
-"""
-
 import math
 import threading
 
@@ -28,12 +13,12 @@ from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import String
 
-# Latest-wins for the streaming inputs; latched for the once-published state/paths.
+from hint_navigation.camera_rig import CameraRig
+
 _LATEST = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1,
                      reliability=ReliabilityPolicy.BEST_EFFORT)
 _LATCHED = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
-# Muted palette (BGR) — deliberately no full green / full red.
 _C_GROUND = (120, 190, 120)      # soft green
 _C_NONGROUND = (110, 110, 215)   # soft coral
 _C_PATH_RAW = (70, 170, 235)     # amber — the full VLM intent
@@ -52,22 +37,16 @@ class VisualDebugNode(Node):
         super().__init__("visual_debug_node")
         self.bridge = CvBridge()
 
-        # --- Camera geometry (match the rig / the other nodes) ---
-        self.declare_parameter("camera_height", 0.14)
-        self.declare_parameter("camera_forward_offset", 0.0)
-        self.declare_parameter("camera_tilt", 0.0)
-        self.declare_parameter("camera_hfov_deg", 62.2)
-        # --- Layer toggles ---
+        CameraRig.declare(self)
         self.declare_parameter("show_mask", True)
         self.declare_parameter("show_path", True)
         self.declare_parameter("show_path_raw", True)
         self.declare_parameter("show_bt_state", True)
         self.declare_parameter("overlay_alpha", 0.35)
-        # --- Input topics ---
         self.declare_parameter("image_topic", "/camera/image_raw/compressed")
-        self.declare_parameter("mask_topic", "/camera/ground/mask")
-        self.declare_parameter("path_topic", "/trajectory_navigator_node/path")
-        self.declare_parameter("path_raw_topic", "/trajectory_navigator_node/path_raw")
+        self.declare_parameter("mask_topic", "/camera/ground")
+        self.declare_parameter("path_topic", "/path_projector_node/path")
+        self.declare_parameter("path_raw_topic", "/path_projector_node/path_raw")
         self.declare_parameter("odom_topic", "/odom")
         self.declare_parameter("bt_state_topic", "/hint_behavior_server/state")
 
@@ -93,9 +72,6 @@ class VisualDebugNode(Node):
 
     def _p(self, name):
         return self.get_parameter(name).value
-
-    # ------------------------------------------------------------------
-    # Caching subscriptions
 
     def _mask_cb(self, msg):
         try:
@@ -125,29 +101,7 @@ class VisualDebugNode(Node):
         with self._lock:
             self._bt_state = msg.data
 
-    # ------------------------------------------------------------------
-    # Projection: odom path -> current base_link -> image pixels
-
-    def _ground_to_pixels(self, gxy, w, h):
-        """Project ground points (N,2 metric base_link) to (pix, in_front). Same camera
-        model as `ground_segmenter._ground_to_pixels`."""
-        hfov = math.radians(float(self._p("camera_hfov_deg")))
-        f = (w / 2.0) / math.tan(hfov / 2.0)
-        cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
-        tilt = float(self._p("camera_tilt"))
-        cos_t, sin_t = math.cos(tilt), math.sin(tilt)
-        cam_h = float(self._p("camera_height"))
-        x_off = float(self._p("camera_forward_offset"))
-        dx = gxy[:, 0] - x_off
-        cam_z = cos_t * dx + sin_t * cam_h
-        cam_x = -gxy[:, 1]
-        cam_y = -sin_t * dx + cos_t * cam_h
-        z = np.where(cam_z > 1e-6, cam_z, 1e-6)
-        pix = np.stack([cx + f * cam_x / z, cy + f * cam_y / z], axis=1)
-        return pix, cam_z > 1e-6
-
-    def _project_path(self, pts_odom, pose, w, h):
-        """odom (x, y) points -> in-front image (u, v) via the current robot pose."""
+    def _project_path(self, rig, pts_odom, pose, w, h):
         if not pts_odom or pose is None:
             return []
         rx, ry, ryaw = pose
@@ -155,11 +109,8 @@ class VisualDebugNode(Node):
         a = np.array(pts_odom, dtype=float)
         dx, dy = a[:, 0] - rx, a[:, 1] - ry
         base = np.stack([c * dx + s * dy, -s * dx + c * dy], axis=1)  # base_link (X fwd, Y left)
-        pix, infront = self._ground_to_pixels(base, w, h)
+        pix, infront = rig.ground_to_pixels(base, w, h)
         return [tuple(np.round(pix[i]).astype(int)) for i in range(len(pix)) if infront[i]]
-
-    # ------------------------------------------------------------------
-    # Render
 
     def _image_cb(self, msg):
         if self.pub_debug.get_subscription_count() == 0:
@@ -181,11 +132,13 @@ class VisualDebugNode(Node):
             a = float(np.clip(self._p("overlay_alpha"), 0.0, 1.0))
             frame[:] = ((1.0 - a) * frame.astype(np.float32) + a * tint).astype(np.uint8)
 
+        rig = CameraRig.from_node(self)
         # Raw (intent) first, followed (clipped) on top.
         if bool(self._p("show_path_raw")) and path_raw:
-            self._draw_polyline(frame, self._project_path(path_raw, pose, w, h), _C_PATH_RAW)
+            self._draw_polyline(frame, self._project_path(rig, path_raw, pose, w, h), _C_PATH_RAW)
         if bool(self._p("show_path")) and path:
-            self._draw_polyline(frame, self._project_path(path, pose, w, h), _C_PATH, dots=True)
+            self._draw_polyline(
+                frame, self._project_path(rig, path, pose, w, h), _C_PATH, dots=True)
 
         if bool(self._p("show_bt_state")):
             self._draw_state(frame, bt)

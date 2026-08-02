@@ -1,47 +1,16 @@
 <?xml version="1.0"?>
-<!--
-  RunMission — drive a mission_planner mission to completion.
-
-  One custom leaf, MissionAdvance, is the whole node interface: each tick it
-  reports the outcome of the move just executed (success + the planner's VLM
-  reasoning as {plan_message}) and returns the next directive. The mission_planner
-  node folds that outcome into its rolling narrative (one reasoner call) and
-  decides the next instruction and completion; the tree just loops
-  report -> execute -> capture.
-
-  Which mission runs is chosen at the call: {mission} is the mission YAML path.
-  There is no default mission — send a payload that binds it, e.g.
-    <SubTree ID="RunMission" mission="/abs/path/to/mission.yaml"/>
-  The node reloads only when the path changes (and resumes that mission's
-  narrative). An empty {mission} with nothing loaded fails cleanly (FAILURE).
-
-    1. MissionAdvance(success, observation) hands out the next instruction, or
-       returns FAILURE when the narrative reports the mission complete.
-    2. FollowPlannedTrajectory plans + follows it, surfacing the planner's VLM
-       reasoning as {plan_message}.
-    3. SetBlackboard records whether the execution succeeded into {last_ok}, fed
-       back to the next MissionAdvance. (On the first tick {last_ok} is unset;
-       MissionAdvance defaults success=true and, with nothing executed yet, just
-       serves the first instruction.)
-
-  Divergence from the plan is normal and absorbed by the narrative, so the loop
-  usually ends on completion. The one failure path is the stuck backstop: if the
-  robot never leaves an environment within the cycle cap, MissionAdvance reports
-  mission_failed. When the loop ends the outer Fallback runs the Precondition — a
-  clean finish maps to overall SUCCESS, a failure ({mission_failed}) to FAILURE.
--->
 <root BTCPP_format="4">
   <BehaviorTree ID="RunMission">
     <Fallback>
       <KeepRunningUntilFailure>
         <Sequence>
-          <MissionAdvance mission="{mission}" success="{last_ok}" observation="{plan_message}"
-                          description="{description}" area="{area}"
-                          mission_failed="{mission_failed}"/>
+          <MissionAdvance mission_path="{mission_path}" success="{last_ok}"
+                          waypoints="{waypoints}" turn_degrees="{turn_degrees}" stamp="{stamp}"
+                          area="{area}" mission_failed="{mission_failed}"/>
           <Fallback>
             <Sequence>
-              <SubTree ID="FollowPlannedTrajectory" description="{description}"
-                       plan_message="{plan_message}"/>
+              <FollowVisualPathAction waypoints="{waypoints}" stamp="{stamp}"/>
+              <SpinAction yaw_degrees="{turn_degrees}"/>
               <SetBlackboard output_key="last_ok" value="true"/>
             </Sequence>
             <SetBlackboard output_key="last_ok" value="false"/>

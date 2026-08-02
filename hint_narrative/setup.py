@@ -5,8 +5,6 @@ from setuptools import find_packages, setup
 
 package_name = "hint_narrative"
 
-# Missions live one-per-directory (missions/<name>/mission.yaml); install each
-# preserving its subdirectory so the runtime artifacts stay grouped per mission.
 mission_data = [
     (os.path.join("share", package_name, os.path.dirname(p)), [p])
     for p in glob("missions/**/*.yaml", recursive=True)

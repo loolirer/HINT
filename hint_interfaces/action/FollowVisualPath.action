@@ -1,9 +1,8 @@
 # Goal
-sensor_msgs/RegionOfInterest roi
+geometry_msgs/Point[] waypoints
 builtin_interfaces/Time stamp
 ---
 # Result
-bool success
 string message
 ---
 # Feedback

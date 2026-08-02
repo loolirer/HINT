@@ -9,17 +9,10 @@ find_package(geometry_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/VisualWaypoints.msg"
-  "srv/SetTarget.srv"
-  "srv/SetWaypoints.srv"
-  "srv/StopTracking.srv"
-  "action/ApproachTarget.action"
-  "action/FollowTrajectory.action"
-  "action/GroundDescription.action"
-  "action/VisualQuestion.action"
-  "action/PlanTrajectory.action"
-  "action/Reason.action"
   "action/MissionAdvance.action"
+  "action/VisualReason.action"
+  "action/PlanVisualPath.action"
+  "action/FollowVisualPath.action"
   DEPENDENCIES builtin_interfaces std_msgs sensor_msgs geometry_msgs
 )
 

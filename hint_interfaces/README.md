@@ -12,28 +12,29 @@ source install/setup.bash
 
 | Interface | Shape | Used by |
 |---|---|---|
-| `action/PlanTrajectory` | goal `{stamp, description}` → result `{success, message, markers, turn_degrees, stamp}` / feedback `{state}` | `gemini_robotics_er/trajectory_generator` — plans ground waypoints **and** an end-of-move turn |
-| `action/FollowTrajectory` | goal `{waypoints, stamp}` → result `{success, message}` / feedback `{state}` | `hint_navigation/trajectory_navigator` — grounds the waypoints and drives Nav2's `follow_path` |
-| `action/Reason` | goal `{prompt, schema, images}` → result `{success, response}` / feedback `{state}` | `gemini_robotics_er/visual_reasoner` — generic text(+image)-in / JSON-out reasoning |
-| `action/MissionAdvance` | goal `{success, observation, mission_path}` → result `{mission_done, mission_failed, description, area, message}` / feedback `{state}` | `hint_narrative/narrative_navigation` — report-and-advance cycle of the mission loop |
+| `action/PlanVisualPath` | goal `{description, images}` → result `{message, waypoints, turn_degrees, stamp}` / feedback `{state}` | `hint_vlm/path_planner` — plans ground waypoints **and** an end-of-move turn over the goal's frame buffer |
+| `action/FollowVisualPath` | goal `{waypoints, stamp}` → result `{message}` / feedback `{state}` | `hint_navigation/path_projector` — grounds the waypoints into an `odom` path and drives Nav2's `follow_path` |
+| `action/VisualReason` | goal `{prompt, schema, images}` → result `{response, stamp}` / feedback `{state}` | `hint_vlm/visual_reasoner` — generic text(+image)-in / JSON-out reasoning |
+| `action/MissionAdvance` | goal `{success, mission_path, first}` → result `{mission_done, mission_failed, area, message, waypoints, turn_degrees, stamp}` / feedback `{state}` | `hint_narrative/narrative_navigation` — one cognition cycle of the mission loop: recompiles the narrative **and** plans the path, returning the next move as a trajectory |
 
-### `PlanTrajectory` result fields
+> **Result success convention.** `PlanVisualPath`, `FollowVisualPath`, and `VisualReason` carry **no `success` bool** — success/failure is the action's terminal status (SUCCEEDED vs ABORTED), with the reason in `message`/`response`. `MissionAdvance` instead reports completion via `mission_done`/`mission_failed`.
+>
+> **Shared image buffer.** `hint_narrative` owns the one camera-frame buffer and, each `MissionAdvance` cycle, attaches it to **both** VLM calls it makes internally — the director (`VisualReason.images`) and the planner (`PlanVisualPath.images`) — so both reason over identical frames. The buffer no longer crosses the BT boundary; `MissionAdvance` returns the resulting trajectory (`waypoints`/`turn_degrees`/`stamp`) directly. `PlanVisualPath`/`VisualReason` report the current-view frame's `stamp` (`images[-1]`), which `MissionAdvance` passes through so the follow can ground the path.
+
+### `PlanVisualPath` result fields
 
 | Field | Type | Notes |
 |---|---|---|
-| `markers` | `geometry_msgs/Point[]` | Ordered waypoints, normalized image space `x`/`y ∈ [-1, 1]` (center 0), nearest-first. **May be empty** for a turn-only (scan / re-orient) move |
+| `waypoints` | `geometry_msgs/Point[]` | Ordered waypoints, normalized image space `x`/`y ∈ [-1, 1]` (center 0), nearest-first. **May be empty** for a turn-only (scan / re-orient) move |
 | `turn_degrees` | `float64` | Signed in-place rotation after the path, from the path's end heading. **+ = left (CCW)**, **− = right (CW)**, 0 = none |
 
-## Legacy interfaces (still defined, not used by the current stack)
+## Removed interfaces (historical note)
 
-Defined for the pre-Nav2 pipeline (visual trackers / IBVS servoing) that has since been
-removed. Kept in the package but currently unwired:
+The package once carried the pre-Nav2 pipeline's interfaces (visual trackers / IBVS
+servoing): `msg/VisualWaypoints`, `srv/SetTarget` / `SetWaypoints` / `StopTracking`, and
+`action/ApproachTarget` / `GroundDescription` / `VisualQuestion`. They were **deleted** when
+the stack moved to Nav2 — there are no `msg/` or `srv/` directories anymore, and only the four
+actions above remain. (Recover any from git history if ever needed.)
 
-- `msg/VisualWaypoints`, `srv/SetTarget`, `srv/SetWaypoints`, `srv/StopTracking`
-- `action/ApproachTarget`, `action/GroundDescription`, `action/VisualQuestion`
-
-`gemini_robotics_er` still ships `description_detector`/`visual_question` nodes (using
-`GroundDescription`/`VisualQuestion`), but they are not launched or wired into the BT.
-
-> The `.action` / `.msg` / `.srv` files under `action/`, `msg/`, `srv/` are the source of
-> truth for exact field definitions.
+> The `.action` files under `action/` are the source of truth for exact field definitions;
+> this README summarizes them.

@@ -3,17 +3,14 @@
 <package format="3">
   <name>hint_perception</name>
   <version>0.0.0</version>
-  <description>HINT perception: semantic ground segmentation (ground_segmenter) — an
-    ONNX/OpenVINO model whose non-ground cells are projected into an obstacle
-    PointCloud2 (/ground/obstacles) for the mapless Nav2 local costmap.</description>
+  <description>HINT perception (image space only): semantic ground segmentation
+    (ground_segmenter) — an ONNX/OpenVINO model publishing a binary ground mask on
+    /camera/ground. The metric obstacle cloud + debug view live in hint_navigation.</description>
   <maintainer email="lorenzo.oliveira@ee.ufcg.edu.br">loolirer</maintainer>
   <license>Apache-2.0</license>
 
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>sensor_msgs_py</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
-  <exec_depend>nav_msgs</exec_depend>
   <exec_depend>cv_bridge</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
 

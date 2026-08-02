@@ -23,6 +23,9 @@ def generate_launch_description():
         "camera_hfov_deg": 62.2,
     }
 
+    vlm_timeout = 60.0
+    tf_buffer_time = 2.0 * vlm_timeout + 10.0
+
     camera_remap = (
         "/camera/image_raw/compressed",
         "/camera/image_raw/compressed/throttle",
@@ -96,20 +99,27 @@ def generate_launch_description():
         package="hint_perception",
         executable="ground_segmenter",
         output="screen",
-        parameters=[camera_rig, {"device": "GPU", "model": "segformer-b5-ade"}],
+        parameters=[{"device": "GPU", "model": "segformer-b5-ade"}],
         remappings=[camera_remap],
     )
 
-    trajectory_navigator = Node(
+    obstacle_projector = Node(
         package="hint_navigation",
-        executable="trajectory_navigator",
+        executable="obstacle_projector",
         output="screen",
         parameters=[camera_rig],
     )
 
-    trajectory_generator = Node(
-        package="gemini_robotics_er",
-        executable="trajectory_generator",
+    path_projector = Node(
+        package="hint_navigation",
+        executable="path_projector",
+        output="screen",
+        parameters=[camera_rig, {"tf_buffer_time": tf_buffer_time}],
+    )
+
+    path_planner = Node(
+        package="hint_vlm",
+        executable="path_planner",
         output="screen",
         parameters=[
             {
@@ -118,15 +128,14 @@ def generate_launch_description():
                 "thinking_budget": 0,
                 "temperature": 1.0,
                 "n_candidates": 1,
-                "history_frames": 2,
                 "structured_output": "json",
+                "api_timeout": vlm_timeout,
             }
         ],
-        remappings=[camera_remap],
     )
 
     visual_reasoner = Node(
-        package="gemini_robotics_er",
+        package="hint_vlm",
         executable="visual_reasoner",
         output="screen",
         parameters=[
@@ -135,9 +144,9 @@ def generate_launch_description():
                 "model_id": "gemini-robotics-er-1.6-preview",
                 "thinking_budget": -1,
                 "structured_output": "json",
+                "api_timeout": vlm_timeout,
             }
         ],
-        remappings=[camera_remap],
     )
 
     narrative_navigation = Node(
@@ -146,7 +155,9 @@ def generate_launch_description():
         output="screen",
         parameters=[
             {
-                "history_frames": 2,
+                "history_frames": 1,
+                "reasoner_timeout": vlm_timeout,
+                "planner_timeout": vlm_timeout,
             }
         ],
         remappings=[camera_remap],
@@ -165,7 +176,7 @@ def generate_launch_description():
     )
 
     visual_debug = Node(
-        package="hint_perception",
+        package="hint_navigation",
         executable="visual_debug",
         parameters=[camera_rig],
         output="screen",
@@ -195,8 +206,9 @@ def generate_launch_description():
             cartographer,
             occupancy_grid,
             ground_segmenter,
-            trajectory_navigator,
-            trajectory_generator,
+            obstacle_projector,
+            path_projector,
+            path_planner,
             visual_reasoner,
             narrative_navigation,
             bt_executor,

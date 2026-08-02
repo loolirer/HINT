@@ -1,0 +1,11 @@
+# Goal
+string prompt
+string schema
+sensor_msgs/CompressedImage[] images
+---
+# Result
+string response
+builtin_interfaces/Time stamp
+---
+# Feedback
+string state

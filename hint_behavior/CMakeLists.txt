@@ -11,9 +11,6 @@ find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 
-# Registry of HINT-specific BT leaf node types (GroundDescriptionAction,
-# ApproachTargetAction, ...), shared by every executable that needs to
-# build/tick a tree referencing them.
 add_library(hint_behavior_nodes
   src/register_nodes.cpp
 )
@@ -31,10 +28,6 @@ ament_target_dependencies(hint_behavior_nodes
   builtin_interfaces
 )
 
-# Long-running action server: a thin HintBtExecutorNode subclass of
-# behaviortree_ros2's TreeExecutionServer. Registration of HINT leaf types
-# happens via hint_behavior_nodes; btcpp_ros2_interfaces (ExecuteTree action) and
-# rclcpp_action come in transitively through behaviortree_ros2.
 add_executable(behavior_server
   src/behavior_server.cpp
 )

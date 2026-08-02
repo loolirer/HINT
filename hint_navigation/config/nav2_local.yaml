@@ -1,5 +1,5 @@
 # Mapless reactive Nav2 for HINT: only the controller_server (FollowPath + MPPI) and its
-# rolling local costmap, fed by ground_segmenter's /ground/obstacles point cloud. No
+# rolling local costmap, fed by obstacle_projector's /obstacles point cloud. No
 # global costmap / planner / map_server / amcl / bt_navigator — the VLM path is followed
 # directly via the follow_path action (driven by trajectory_navigator).
 
@@ -18,37 +18,37 @@ controller_server:
     # failure (the native equivalent of the old pursuit stall watchdog).
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
-      required_movement_radius: 0.2
-      movement_time_allowance: 10.0
+      required_movement_radius: 0.1
+      movement_time_allowance: 5.0
     # Positional arrival — the VLM path carries no meaningful final heading, so yaw is
     # effectively ignored.
     goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.05
-      yaw_goal_tolerance: 3.2
+      xy_goal_tolerance: 0.1
+      yaw_goal_tolerance: 0.1
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
       time_steps: 48
       model_dt: 0.05
       batch_size: 1600
-      vx_std: 0.2
-      vy_std: 0.2
-      wz_std: 0.5           # wider angular sampling so MPPI explores dodging maneuvers
-      vx_max: 0.075          # 0.26 Waffle Pi rated max (m/s)
+      vx_std: 0.1
+      vy_std: 0.1
+      wz_std: 0.25           # wider angular sampling so MPPI explores dodging maneuvers
+      vx_max: 0.13          # 0.26 Waffle Pi rated max (m/s)
       vx_min: 0.0           # forward-only: the camera faces forward, never reverse blind
       vy_max: 0.0           # differential drive: no lateral velocity
-      wz_max: 0.46          # # 1.82 Waffle Pi rated max (rad/s)
+      wz_max: 0.91          # # 1.82 Waffle Pi rated max (rad/s)
       ax_max: 3.0
       ax_min: -3.0
       az_max: 3.5
       iteration_count: 1
-      prune_distance: 1.7
+      prune_distance: 1.0
       transform_tolerance: 0.2
       temperature: 0.3
       gamma: 0.015
       motion_model: "DiffDrive"
-      visualize: true
+      visualize: false
       AckermannConstraints:
         min_turning_r: 0.0
       critics: ["ConstraintCritic", "CostCritic", "GoalCritic", "GoalAngleCritic",
@@ -56,16 +56,16 @@ controller_server:
       ConstraintCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 4.0
+        cost_weight: 5.0
       GoalCritic:
         enabled: true
         cost_power: 1
         cost_weight: 5.0
-        threshold_to_consider: 1.4
+        threshold_to_consider: 1.0
       GoalAngleCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 3.0
+        cost_weight: 5.0
         threshold_to_consider: 0.5
       PreferForwardCritic:
         enabled: true
@@ -75,25 +75,25 @@ controller_server:
       CostCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 8.0       # was 3.81 — obstacle avoidance was being outvoted by PathAlign
+        cost_weight: 14.0       # was 3.81 — obstacle avoidance was being outvoted by PathAlign
         critical_cost: 300.0
         consider_footprint: false
         collision_cost: 1000000.0
-        near_goal_distance: 1.0
+        near_goal_distance: 0.2
       PathAlignCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 7.0      # was 14.0 — loosen path-hugging so the robot may deviate to skirt obstacles
+        cost_weight: 14.0      # was 14.0 — loosen path-hugging so the robot may deviate to skirt obstacles
         max_path_occupancy_ratio: 0.05
         trajectory_point_step: 4
-        threshold_to_consider: 0.5
+        threshold_to_consider: 0.025
         offset_from_furthest: 20
         use_path_orientations: false
       PathFollowCritic:
         enabled: true
         cost_power: 1
         cost_weight: 5.0
-        offset_from_furthest: 5
+        offset_from_furthest: 2
         threshold_to_consider: 1.4
       PathAngleCritic:
         enabled: true
@@ -101,7 +101,7 @@ controller_server:
         cost_weight: 2.0
         offset_from_furthest: 4
         threshold_to_consider: 0.5
-        max_angle_to_furthest: 1.0
+        max_angle_to_furthest: 0.5
         mode: 0
     enable_stamped_cmd_vel: true   # TB3 consumes stamped /cmd_vel
 
@@ -125,7 +125,7 @@ local_costmap:
         enabled: true
         observation_sources: ground
         ground:
-          topic: /ground/obstacles
+          topic: /obstacles
           data_type: "PointCloud2"
           marking: true
           clearing: true
@@ -160,7 +160,7 @@ behavior_server:
     robot_base_frame: base_link
     transform_timeout: 0.1
     simulate_ahead_time: 2.0
-    max_rotational_vel: 1.0
-    min_rotational_vel: 0.4
-    rotational_acc_lim: 3.2
+    max_rotational_vel: 0.50
+    min_rotational_vel: 0.05
+    rotational_acc_lim: 0.50
     enable_stamped_cmd_vel: true   # TB3 consumes stamped /cmd_vel

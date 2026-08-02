@@ -1,29 +1,3 @@
-"""Export a Hugging Face semantic-segmentation model to ONNX for OpenVINO inference.
-
-Takes a downloaded HF model directory (`config.json` + `model.safetensors`) and emits a
-graph that accepts a single image of shape (1, 3, H, W) and returns per-class logits.
-H and W are fixed at export time — `ground_segmenter` resizes the frame to whatever the
-graph declares, so the export size *is* the inference size.
-
-Most encoder-decoder semantic-segmentation architectures work (SegFormer, DPT, BEiT,
-UPerNet, DeepLabV3). **Mask2Former / MaskFormer / OneFormer do not** — they emit
-query-based `masks_queries_logits` + `class_queries_logits` that need a post-processing
-step to become a class map, which this exporter (and the node) don't do.
-
-The logits come out at the model's native stride (SegFormer: H/4 x W/4). That's left
-as-is rather than upsampled in-graph — `ground_segmenter` nearest-resizes the mask to
-the camera frame anyway, and argmaxing at stride is cheaper than argmaxing at full res.
-Pass --upsample if you want the graph to do it instead.
-
-The export is fp32; let OpenVINO pick fp16 on the iGPU at runtime (same as the DA3 path).
-
-Example:
-    python3 scripts/export_seg_onnx.py \\
-        --model-dir ~/turtlebot3_ws/src/hint_perception/models/segformer-b0-ade \\
-        --height 384 --width 512 \\
-        --output ~/turtlebot3_ws/src/hint_perception/models/ground-seg.onnx
-"""
-
 import argparse
 import os
 import re
@@ -34,8 +8,7 @@ import torch.nn.functional as F
 
 from transformers import AutoConfig, AutoModelForSemanticSegmentation
 
-# Label words that read as traversable ground, used to suggest ground_class_ids. Matched
-# on word boundaries, not as substrings: "land" must not fire on "kitchen island".
+# Matched on word boundaries, not substrings: "land" must not fire on "kitchen island".
 _GROUND_WORDS = (
     "floor", "flooring", "road", "earth", "ground", "rug", "carpet", "path",
     "pathway", "pavement", "sidewalk", "runway", "dirt", "sand", "grass", "land",
@@ -46,8 +19,6 @@ _GROUND_RE = re.compile(
 
 
 class SegOnnxWrapper(nn.Module):
-    """Wraps an HF segmentation model to take (B, 3, H, W) and return only logits."""
-
     def __init__(self, model: nn.Module, size=None) -> None:
         super().__init__()
         self.model = model
@@ -63,7 +34,6 @@ class SegOnnxWrapper(nn.Module):
 
 
 def _report_labels(config) -> None:
-    """Print the model's label map + the ground_class_ids it implies."""
     id2label = getattr(config, "id2label", None) or {}
     if not id2label:
         print(
@@ -96,7 +66,9 @@ def _report_labels(config) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(
+        description="Export a Hugging Face semantic-segmentation model to ONNX for OpenVINO."
+    )
     ap.add_argument(
         "--model-dir", required=True, help="Path to the local HF model directory."
     )
@@ -148,10 +120,7 @@ def main() -> None:
             input_names=["image"],
             output_names=["logits"],
             training=torch.onnx.TrainingMode.EVAL,
-            # Legacy TorchScript exporter, matching export_onnx.py: the dynamo path is
-            # still flaky across HF vision architectures, and the input size is fixed
-            # here anyway, so tracing loses nothing.
-            dynamo=False,
+            dynamo=False,  # the dynamo path is still flaky across HF vision architectures
         )
     print("Done.")
     _report_labels(config)

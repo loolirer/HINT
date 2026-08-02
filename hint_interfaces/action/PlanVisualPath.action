@@ -1,11 +1,11 @@
 # Goal
-builtin_interfaces/Time stamp
 string description
+sensor_msgs/CompressedImage[] images
 ---
 # Result
-bool success
 string message
-sensor_msgs/RegionOfInterest roi
+geometry_msgs/Point[] waypoints
+float64 turn_degrees
 builtin_interfaces/Time stamp
 ---
 # Feedback

@@ -3,7 +3,7 @@ from glob import glob
 
 from setuptools import find_packages, setup
 
-package_name = "gemini_robotics_er"
+package_name = "hint_vlm"
 
 setup(
     name=package_name,
@@ -18,7 +18,7 @@ setup(
     zip_safe=True,
     maintainer="loolirer",
     maintainer_email="lorenzo.oliveira@ee.ufcg.edu.br",
-    description="Gemini Robotics-ER nodes for HINT",
+    description="VLM-powered nodes for HINT (Gemini Robotics-ER)",
     license="Apache-2.0",
     extras_require={
         "test": [
@@ -27,10 +27,8 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "description_detector = gemini_robotics_er.description_detector:main",
-            "visual_question = gemini_robotics_er.visual_question:main",
-            "trajectory_generator = gemini_robotics_er.trajectory_generator:main",
-            "visual_reasoner = gemini_robotics_er.visual_reasoner:main",
+            "path_planner = hint_vlm.gemini.path_planner:main",
+            "visual_reasoner = hint_vlm.gemini.visual_reasoner:main",
         ],
     },
 )
