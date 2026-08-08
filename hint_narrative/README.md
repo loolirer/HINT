@@ -224,10 +224,11 @@ the per-cycle content (`done`, vision) — the shape a context cache wants.
 Reasoner `schema` — a **real JSON schema** (`NARRATIVE_SCHEMA`) passed to the reasoner, which uses it
 as `response_schema` for **constrained decoding**, so the compile reply is always well-formed JSON
 with exactly these fields:
-`{analysis, done, next, mission_complete (bool), mission_failed (bool)}`
-— `analysis` is free-form think-first scratch; `done`/`next` are the two memory fields the node
-keeps; `mission_complete`/`mission_failed` are the director's terminal signals (the node trusts
-them — there is no code-owned queue or cycle cap).
+`{done, next, mission_complete (bool), mission_failed (bool)}`
+— `done`/`next` are the two memory fields the node keeps; `mission_complete`/`mission_failed` are
+the director's terminal signals (the node trusts them — there is no code-owned queue or cycle cap).
+There is no in-band `analysis`/reasoning field: the reasoner runs with native thinking
+(`thinking_budget`), so the model reasons in its own channel and emits only the answer.
 
 `prompts/brief.txt` is the permanent-context prefix (capabilities, navigation preferences, ambiguity
 policy) prepended on every call.
