@@ -41,8 +41,8 @@ order, using its named landmarks to place myself. Each time I reason, and then f
   blocked or gone and I have no move that could recover. Drifting from the plan or partial progress is
   NEVER failure; I stay and re-orient instead. Otherwise false.
 
---- WHAT I SEE ---
-{vision}
-
 --- WHAT I'VE DONE ---
 {done}
+
+--- WHAT I SEE ---
+{vision}
