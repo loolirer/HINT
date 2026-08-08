@@ -5,6 +5,7 @@ import signal
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import rclpy
@@ -16,7 +17,8 @@ from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 
 from action_msgs.msg import GoalStatus
-from hint_interfaces.action import MissionAdvance, PlanVisualPath, VisualReason
+from geometry_msgs.msg import Point
+from hint_interfaces.action import MissionAdvance, VisualReason
 from sensor_msgs.msg import CompressedImage
 
 _LATEST_FRAME_QOS = QoSProfile(
@@ -43,6 +45,36 @@ NARRATIVE_SCHEMA = json.dumps(
     }
 )
 
+PATH_SCHEMA = json.dumps(
+    {
+        "type": "object",
+        "properties": {
+            "reasoning": {"type": "string"},
+            "waypoints": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "point": {"type": "array", "items": {"type": "number"}},
+                    },
+                    "required": ["point"],
+                },
+            },
+            "turn_degrees": {"type": "number"},
+        },
+        "required": ["reasoning", "waypoints", "turn_degrees"],
+    }
+)
+
+
+@dataclass
+class _PlannedMove:
+    waypoints: list
+    turn_degrees: float
+    stamp: object
+    message: str
+
+
 _BAG_TOPICS = [
     "/tf",
     "/tf_static",
@@ -50,7 +82,7 @@ _BAG_TOPICS = [
     "/path_projector_node/path",
     "/map",
     "/visual_reasoner/visual_reason/_action/status",
-    "/path_planner/plan_visual_path/_action/status",
+    "/path_planner/visual_reason/_action/status",
     "/narrative_navigation/mission_advance/_action/status",
     "/path_projector_node/follow_visual_path/_action/status",
     "/spin/_action/status",
@@ -64,7 +96,7 @@ class MissionPlannerNode(Node):
         share = get_package_share_directory("hint_narrative")
         self.declare_parameter("mission_path", "")
         self.declare_parameter(
-            "brief_path", os.path.join(share, "prompts", "brief.txt")
+            "embodiment_path", os.path.join(share, "prompts", "robot_embodiment.txt")
         )
         self.declare_parameter("prompts_dir", os.path.join(share, "prompts"))
         self.declare_parameter("narrative_path", "")
@@ -73,7 +105,7 @@ class MissionPlannerNode(Node):
         self.declare_parameter("bag_path", "")
         self.declare_parameter("reasoner_action", "/visual_reasoner/visual_reason")
         self.declare_parameter("reasoner_timeout", 30.0)
-        self.declare_parameter("planner_action", "/path_planner/plan_visual_path")
+        self.declare_parameter("planner_action", "/path_planner/visual_reason")
         self.declare_parameter("planner_timeout", 30.0)
         self.declare_parameter("camera_topic", "/camera/image_raw/compressed")
         self.declare_parameter("history_frames", 1)
@@ -93,7 +125,7 @@ class MissionPlannerNode(Node):
         self._frame_history = []
         self._last_plan_message = ""
 
-        self._brief = self._read(self._p("brief_path"))
+        self._embodiment = self._read(self._p("embodiment_path"))
         if self._mission_path:
             self._load_mission(self._mission_path)
 
@@ -102,7 +134,7 @@ class MissionPlannerNode(Node):
             self, VisualReason, self._p("reasoner_action"), callback_group=cbg
         )
         self._planner = ActionClient(
-            self, PlanVisualPath, self._p("planner_action"), callback_group=cbg
+            self, VisualReason, self._p("planner_action"), callback_group=cbg
         )
         self._advance_srv = ActionServer(
             self,
@@ -318,9 +350,9 @@ class MissionPlannerNode(Node):
 
     def _compile(self, vision, images, goal_handle=None):
         prompt = self._fill(
-            "compile.txt",
+            "compile_narrative.txt",
             {
-                "brief": self._brief,
+                "embodiment": self._embodiment,
                 "mission": self._mission_text or "",
                 "done": self._narrative_text(),
                 "vision": vision,
@@ -352,12 +384,12 @@ class MissionPlannerNode(Node):
             if not self._interruptible_sleep(delay, goal_handle):
                 return None
 
-    def _plan_move(self, description, images, goal_handle=None):
+    def _plan_move(self, instruction, images, goal_handle=None):
         retries = int(self._p("compile_retries"))
         delay = max(0.0, float(self._p("compile_retry_delay")))
         attempt = 0
         while True:
-            res = self._call_planner(description, images, goal_handle)
+            res = self._call_planner(instruction, images, goal_handle)
             if res is not None:
                 return res
             if goal_handle is not None and goal_handle.is_cancel_requested:
@@ -410,13 +442,21 @@ class MissionPlannerNode(Node):
             self.get_logger().warn(f"Reasoner returned non-JSON: {res.response!r}")
             return None
 
-    def _call_planner(self, description, images, goal_handle=None):
+    def _call_planner(self, instruction, images, goal_handle=None):
         timeout = float(self._p("planner_timeout"))
         if not self._planner.wait_for_server(timeout_sec=timeout):
             self.get_logger().warn("Planner action server unavailable.")
             return None
-        goal = PlanVisualPath.Goal()
-        goal.description = description
+        goal = VisualReason.Goal()
+        goal.prompt = self._fill(
+            "plan_path.txt",
+            {
+                "embodiment": self._embodiment,
+                "next": instruction,
+                "vision": self._continuity_text(max(0, len(images or []) - 1)),
+            },
+        )
+        goal.schema = PATH_SCHEMA
         goal.images = images or []
         handle = self._await(self._planner.send_goal_async(goal), timeout, goal_handle)
         if handle is None or not handle.accepted:
@@ -426,10 +466,67 @@ class MissionPlannerNode(Node):
         if wrapped is None:
             self.get_logger().warn("Planner result timed out or cancelled.")
             return None
+        res = wrapped.result
         if wrapped.status != GoalStatus.STATUS_SUCCEEDED:
-            self.get_logger().warn(f"Planner failed: {wrapped.result.message}")
+            self.get_logger().warn(f"Planner failed: {res.response}")
             return None
-        return wrapped.result
+        try:
+            data = json.loads(res.response)
+        except json.JSONDecodeError:
+            self.get_logger().warn(f"Planner returned non-JSON: {res.response!r}")
+            return None
+        reasoning, points, turn = self._parse_reasoning_points(data)
+        waypoints = self._points_to_waypoints(points)
+        message = reasoning or f"{len(waypoints)} waypoint(s), turn {turn:+.0f} deg"
+        return _PlannedMove(waypoints, turn, res.stamp, message)
+
+    @staticmethod
+    def _continuity_text(n_past):
+        if n_past <= 0:
+            return ""
+        return (
+            f"{n_past + 1} images are attached, oldest first; the LAST is my CURRENT view — the "
+            f"earlier {n_past} are my recent past view(s) from the moves that led here. I read how "
+            "the view has changed and CONTINUE my approach across it — build on the progress, do not "
+            "re-plan from scratch. But the CURRENT instruction WINS: if it now points somewhere "
+            "different, I follow it and drop the old plan."
+        )
+
+    @staticmethod
+    def _parse_reasoning_points(data):
+        if isinstance(data, dict):
+            reasoning = data.get("reasoning", "") or ""
+            points = data.get("waypoints", [])
+            turn = data.get("turn_degrees", 0.0)
+        elif isinstance(data, list):
+            reasoning, points, turn = "", data, 0.0
+        else:
+            reasoning, points, turn = "", [], 0.0
+        if not isinstance(points, list):
+            points = []
+        try:
+            turn = max(-360.0, min(360.0, float(turn)))
+        except (TypeError, ValueError):
+            turn = 0.0
+        return str(reasoning), points, turn
+
+    @staticmethod
+    def _points_to_waypoints(points):
+        waypoints = []
+        for p in points:
+            pt = p.get("point") if isinstance(p, dict) else p
+            if not (isinstance(pt, (list, tuple)) and len(pt) == 2):
+                continue
+            try:
+                y, x = float(pt[0]), float(pt[1])
+            except (TypeError, ValueError):
+                continue
+            waypoint = Point()
+            waypoint.x = float(min(max(2.0 * x / 1000.0 - 1.0, -1.0), 1.0))
+            waypoint.y = float(min(max(2.0 * y / 1000.0 - 1.0, -1.0), 1.0))
+            waypoint.z = 0.0
+            waypoints.append(waypoint)
+        return waypoints
 
     @staticmethod
     def _await(future, timeout, goal_handle=None, reasoner_handle=None):

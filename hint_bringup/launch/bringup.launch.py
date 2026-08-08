@@ -119,7 +119,8 @@ def generate_launch_description():
 
     path_planner = Node(
         package="hint_vlm",
-        executable="path_planner",
+        executable="visual_reasoner",
+        name="path_planner",
         output="screen",
         parameters=[
             {
@@ -127,7 +128,6 @@ def generate_launch_description():
                 "model_id": "gemini-robotics-er-1.6-preview",
                 "thinking_budget": 0,
                 "temperature": 1.0,
-                "n_candidates": 1,
                 "structured_output": "json",
                 "api_timeout": vlm_timeout,
             }
