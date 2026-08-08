@@ -35,7 +35,8 @@ what it came for, and `mission_failed` only when it is genuinely stuck with no r
 hint_narrative/
   hint_narrative/narrative_navigation.py  # the narrative-director node
   missions/<name>/mission.txt              # a plain-text mission (one dir per mission)
-  prompts/compile.txt                      # the single narrative-compile prompt
+  prompts/compile.txt                      # the narrative-compile prompt (director call)
+  prompts/plan.txt                         # the path-planning prompt (planner call)
   prompts/brief.txt                        # permanent context: capabilities + rules + policy
   README.md                                # this file — single source of truth
 ```
@@ -83,16 +84,19 @@ This node is the mission's **cognition** layer: **one `~/mission_advance` cycle 
 per-cycle VLM calls** over the one frame buffer it owns, and returns a ready-to-drive
 **trajectory** to the BT. The BT is then a thin executive over motor skills — it only reports
 whether the last move `success`-ed, and drives the returned trajectory (`FollowVisualPath` +
-`Spin`). There is no `PlanVisualPath` BT leaf; planning lives here.
+`Spin`). There is no path-planning BT leaf; planning lives here.
 
 Per cycle, in order:
 - **reasoner (director-with-eyes):** one `compile.txt` call (`visual_reasoner`) that reasons
   over the **before/after frames of the move just executed** plus the narrative — it judges the
   move from the images, folds it in, and emits the next instruction (`next`) + completion.
 - **path_planner (executor-with-eyes):** the narrative's `next` + the **same** frame buffer →
-  ordered `waypoints` + a signed `turn_degrees` + a short reasoning `message`. This node is now
-  `path_planner`'s **client** (mirroring the reasoner relationship), so both cognition calls run
-  over one buffer with no cross-process routing — the trajectory rides out on the `advance`
+  ordered `waypoints` + a signed `turn_degrees` + a short reasoning `message`. The planner is a
+  second `visual_reasoner` instance (node `path_planner`, temp 1.0); this node owns its prompt
+  (`plan.txt`) and waypoint schema, calls it via `VisualReason` (mirroring the reasoner
+  relationship), and **parses + normalizes** the JSON reply into `waypoints` (0–1000 → `[-1,1]`)
+  itself. Both cognition calls run over one buffer with no cross-process routing — the trajectory
+  rides out on the `advance`
   result (`waypoints` / `turn_degrees` / `stamp`).
 
 If the compile declares the mission complete (or stuck), no plan is made and `mission_done` is
@@ -180,7 +184,7 @@ Every run auto-records a **minimal MCAP rosbag** (`<mission>.bag`, a sibling of 
 started on a fresh run and closed when the mission ends (or on Ctrl+C). It is **overwritten each
 run**, mirroring the jsonl semantics. The topic set is deliberately small (no images / clouds /
 costmap — just `/tf`, `/tf_static`, `/odom`, the projector's followed path (`~/path`), `/map` if
-present, and the `visual_reason` / `plan_visual_path` / `advance` / `follow_visual_path` / `spin`
+present, and the two `visual_reason` (director + planner) / `advance` / `follow_visual_path` / `spin`
 `_action/status` topics). Toggle with the `record_bag` param; relocate with `bag_path`. Recording is a controlled
 `ros2 bag record --storage mcap` subprocess (needs `ros-<distro>-rosbag2-storage-mcap`).
 
@@ -197,8 +201,8 @@ drawn **only at VLM plan-call poses** and labelled with the **stop's sequence in
 visiting order), start/end markers, each **turn** as a post-spin heading line, and a stats box:
 mission duration, VLM-processing time (the `advance` wrapper window — the whole stationary-cognition
 span per cycle), movement time (`follow_visual_path` + `spin` windows), and the **VLM hit rate**
-(successful/total of the real VLM calls — the `visual_reason` compile + `plan_visual_path` plan,
-each by its `_action/status` terminal status, retries counted as separate calls). All displayed
+(successful/total of the real VLM calls — the director `visual_reason` compile + the planner
+`visual_reason` plan, each by its `_action/status` terminal status, retries counted as separate calls). All displayed
 paths share one opacity (`PATH_ALPHA`). Everything is derived from the recorded topics, so no
 runtime node is touched.
 
@@ -248,15 +252,16 @@ first `~/mission_advance` that carries a `mission_path` loads that mission (and 
 |---|---|---|
 | `~/mission_advance` | `hint_interfaces/action/MissionAdvance` | Action server |
 | `/visual_reasoner/visual_reason` (see `reasoner_action`) | `hint_interfaces/action/VisualReason` | Action client — the narrative recompile (with before/after frames) |
-| `/path_planner/plan_visual_path` (see `planner_action`) | `hint_interfaces/action/PlanVisualPath` | Action client — the path plan (`next` + the same frame buffer → `waypoints` + `turn_degrees`) |
+| `/path_planner/visual_reason` (see `planner_action`) | `hint_interfaces/action/VisualReason` | Action client — the path plan (a second `visual_reasoner` instance; this node sends `plan.txt` + the waypoint schema and parses the reply into `waypoints` + `turn_degrees`) |
 | `/camera/image_raw/compressed` (see `camera_topic`) | `sensor_msgs/CompressedImage` | Sub — latest frame; latched into the **unified** rolling image buffer (`history_frames`), attached to **both** VLM calls |
 
 **`advance`** — Goal: `success` (did the last move execute?), `mission_path` (optional — the mission
 to run; loads/switches it when it changes, else keeps the current one), and `first` (true only on the
 run's first tick → wipe + reseed; see **Missions never resume across runs** above). The node appends
 the outcome to the pure log and recompiles the narrative (`compile.txt` → reasoner), then — if the
-director did not declare the mission over — **plans the move** (`next` + the frame buffer →
-`path_planner`), appends **one** snapshot for the cycle, and returns Result:
+director did not declare the mission over — **plans the move** (`next` + the frame buffer → a
+`VisualReason` call on `path_planner`, whose JSON reply this node parses into `waypoints`),
+appends **one** snapshot for the cycle, and returns Result:
 `mission_done` (director `mission_complete` **or** `mission_failed`), `mission_failed` (director
 declared stuck, an unrecoverable compile/IO error, or a cognition call failed past its retry
 budget), `waypoints` / `turn_degrees` / `stamp` (the trajectory to drive — `waypoints` may be empty
@@ -272,14 +277,14 @@ opening move.
 |---|---|---|
 | `mission_path` | `""` | Optional mission to preload at startup; empty → start **idle**. A `~/mission_advance` goal's `mission_path` selects/switches the mission per call (the node reloads on change, resuming that mission's narrative if it exists), so one running node serves any mission without a restart |
 | `brief_path` | share `prompts/brief.txt` | Permanent-context brief |
-| `prompts_dir` | share `prompts/` | Directory holding `compile.txt` |
+| `prompts_dir` | share `prompts/` | Directory holding `compile.txt` (director) and `plan.txt` (planner) |
 | `narrative_path` | `""` | Narrative history; empty → sibling of the real mission file (`<mission>.narrative.jsonl`) |
 | `log_path` | `""` | Raw log; empty → sibling of the real mission file (`<mission>.log.jsonl`) |
 | `record_bag` | `true` | Auto-record the per-run minimal MCAP rosbag (start on a fresh run, close on mission end). Set `false` to disable (e.g. tests) |
 | `bag_path` | `""` | Rosbag output dir; empty → sibling of the real mission file (`<mission>.bag`). Overwritten each fresh run |
 | `reasoner_action` | `/visual_reasoner/visual_reason` | Reasoner (director) action name |
 | `reasoner_timeout` | `30.0` | Seconds to wait on a single reasoner call |
-| `planner_action` | `/path_planner/plan_visual_path` | Path-planner (executor) action name |
+| `planner_action` | `/path_planner/visual_reason` | Path-planner (executor) action name — a `VisualReason` server (second `visual_reasoner` instance) |
 | `planner_timeout` | `30.0` | Seconds to wait on a single planner call |
 | `compile_retries` | `-1` | Cognition-retry budget — governs **both** per-cycle VLM calls (compile **and** plan). On a reasoner/planner/API failure the move did **not** advance, so instead of driving on a stale belief / no plan the `~/mission_advance` call **waits and retries** — the robot stays put (the BT leaf sits in `RUNNING`; the follow only runs once advance returns). Retries after the first attempt: **`-1` = retry indefinitely** until it succeeds or the BT halts; `0` = one attempt; `N` = N retries. On a *bounded* budget being exhausted the mission **aborts** (`mission_failed` → BT `FAILURE`), never re-serving. Live-adjustable |
 | `compile_retry_delay` | `2.0` | Backoff (s) between cognition retries (see `compile_retries`). The wait is cancellable — a BT halt / Ctrl+C breaks out immediately |
@@ -327,7 +332,7 @@ ticked by `behavior_server`. `MissionAdvance` (→ `~/mission_advance`) is the w
 interface: each tick it reports whether the last move succeeded and returns the next move as a
 trajectory (`waypoints` + `turn_degrees` + `stamp`). The BT is a thin executive over motor skills —
 it drives that trajectory with `FollowVisualPathAction` + `SpinAction`. There is **no**
-`PlanVisualPath` leaf; planning happens inside the node.
+path-planning leaf; planning happens inside the node.
 
 ```
 Fallback
