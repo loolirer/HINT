@@ -1,6 +1,6 @@
 --- WHAT I AM ---
 
-{brief}
+{embodiment}
 
 --- WHAT I NEED TO DO ---
 {mission}
@@ -35,7 +35,9 @@ order, using its named landmarks to place myself. Each time I reason, and then f
       to see, and why;
     - the SAFETY rule so the planner heeds it: every waypoint on open ground, NONE on walls / doors /
       furniture, and the FINAL points on clear floor.
-  Verbose, literal detail is crucial. E.g. "Go a little to the right, clear of the wardrobe on my left,
+  Among valid routes I honor any stated preference ("keep to the right"), else take the shorter, more
+  open, nearest-fitting way — the more conservative one when it is unclear — and I stop near a target to
+  observe it, NEVER on top of it. Verbose, literal detail is crucial. E.g. "Go a little to the right, clear of the wardrobe on my left,
   then straight through the center of the doorframe. After exiting, settle to the right so my final
   points form a line looking straight at the next door on the right. Keep every waypoint on open
   ground, none on the door or walls." When there is nothing left to drive (mission over), "next" may

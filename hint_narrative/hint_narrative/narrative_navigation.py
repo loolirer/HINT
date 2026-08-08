@@ -96,7 +96,7 @@ class MissionPlannerNode(Node):
         share = get_package_share_directory("hint_narrative")
         self.declare_parameter("mission_path", "")
         self.declare_parameter(
-            "brief_path", os.path.join(share, "prompts", "robot_embodiment.txt")
+            "embodiment_path", os.path.join(share, "prompts", "robot_embodiment.txt")
         )
         self.declare_parameter("prompts_dir", os.path.join(share, "prompts"))
         self.declare_parameter("narrative_path", "")
@@ -125,7 +125,7 @@ class MissionPlannerNode(Node):
         self._frame_history = []
         self._last_plan_message = ""
 
-        self._brief = self._read(self._p("brief_path"))
+        self._embodiment = self._read(self._p("embodiment_path"))
         if self._mission_path:
             self._load_mission(self._mission_path)
 
@@ -352,7 +352,7 @@ class MissionPlannerNode(Node):
         prompt = self._fill(
             "compile_narrative.txt",
             {
-                "brief": self._brief,
+                "embodiment": self._embodiment,
                 "mission": self._mission_text or "",
                 "done": self._narrative_text(),
                 "vision": vision,
@@ -384,12 +384,12 @@ class MissionPlannerNode(Node):
             if not self._interruptible_sleep(delay, goal_handle):
                 return None
 
-    def _plan_move(self, description, images, goal_handle=None):
+    def _plan_move(self, instruction, images, goal_handle=None):
         retries = int(self._p("compile_retries"))
         delay = max(0.0, float(self._p("compile_retry_delay")))
         attempt = 0
         while True:
-            res = self._call_planner(description, images, goal_handle)
+            res = self._call_planner(instruction, images, goal_handle)
             if res is not None:
                 return res
             if goal_handle is not None and goal_handle.is_cancel_requested:
@@ -442,7 +442,7 @@ class MissionPlannerNode(Node):
             self.get_logger().warn(f"Reasoner returned non-JSON: {res.response!r}")
             return None
 
-    def _call_planner(self, description, images, goal_handle=None):
+    def _call_planner(self, instruction, images, goal_handle=None):
         timeout = float(self._p("planner_timeout"))
         if not self._planner.wait_for_server(timeout_sec=timeout):
             self.get_logger().warn("Planner action server unavailable.")
@@ -451,8 +451,9 @@ class MissionPlannerNode(Node):
         goal.prompt = self._fill(
             "plan_path.txt",
             {
-                "description": description,
-                "continuity": self._continuity_text(max(0, len(images or []) - 1)),
+                "embodiment": self._embodiment,
+                "next": instruction,
+                "vision": self._continuity_text(max(0, len(images or []) - 1)),
             },
         )
         goal.schema = PATH_SCHEMA

@@ -37,7 +37,7 @@ hint_narrative/
   missions/<name>/mission.txt              # a plain-text mission (one dir per mission)
   prompts/compile_narrative.txt                      # the narrative-compile prompt (director call)
   prompts/plan_path.txt                         # the path-planning prompt (planner call)
-  prompts/robot_embodiment.txt                        # permanent context: capabilities + rules + policy
+  prompts/robot_embodiment.txt                        # the robot's physical embodiment — {embodiment}, shared by both prompts
   README.md                                # this file — single source of truth
 ```
 
@@ -211,19 +211,26 @@ runtime node is touched.
 The single reasoner prompt (replacing the old judge/replan/compress). Placeholders are literal
 `{name}` tokens the node substitutes (not `str.format` — the body has JSON braces):
 
-The tokens are ordered **static-first** (brief + mission) so the unchanging prefix sits ahead of
+The tokens are ordered **static-first** (embodiment + mission) so the unchanging prefix sits ahead of
 the per-cycle content (`done`, vision) — the shape a context cache wants.
 
 | Token | Filled with |
 |---|---|
-| `{brief}` | `prompts/robot_embodiment.txt`, verbatim (permanent context) |
-| `{mission}` | the mission text (`mission.txt`), verbatim — the static `what I need to do` prefix |
+| `{embodiment}` | `prompts/robot_embodiment.txt`, verbatim — the robot's physical embodiment, the `--- WHAT I AM ---` prefix shared with the planner's `plan_path.txt` |
+| `{mission}` | the mission text (`mission.txt`), verbatim — the static `what I need to do` prefix (director-only; the whole trip, distinct from the planner's single-move `{next}`) |
 | `{done}` | the memory carried forward — `done` only (`next` is regenerated; its result is read from the before/after images) |
 | `{vision}` | how to read the attached camera image(s): the last is the current view, earlier ones are recent past views (buffer depth `history_frames`); one = current-only, none = no frame |
 
 > The before/after frames themselves are **attached to the reasoner call** (the `VisualReason` goal's
 > `images`), not substituted into the prompt text; `{vision}` is the caption that tells the model how
 > to read them.
+
+> **Shared token vocabulary.** The planner prompt (`plan_path.txt`) reuses the same token names for the
+> same slots, so a name means one thing across both prompts: `{embodiment}` (the shared body) and
+> `{vision}` (the attached-frames caption) are identical roles, and the planner's move token is
+> `{next}` — the very field this compile emits (`next`), passed straight through. Only `{mission}`
+> (director-only, the whole trip) and the planner's output fields (`reasoning` / `waypoints` /
+> `turn_degrees`) are unshared, and those names appear in just one place.
 
 Reasoner `schema` — a **real JSON schema** (`NARRATIVE_SCHEMA`) passed to the reasoner, which uses it
 as `response_schema` for **constrained decoding**, so the compile reply is always well-formed JSON
@@ -234,8 +241,12 @@ the director's terminal signals (the node trusts them — there is no code-owned
 There is no in-band `analysis`/reasoning field: the reasoner runs with native thinking
 (`thinking_budget`), so the model reasons in its own channel and emits only the answer.
 
-`prompts/robot_embodiment.txt` is the permanent-context prefix (capabilities, navigation preferences, ambiguity
-policy) prepended on every call.
+`prompts/robot_embodiment.txt` is the robot's **physical embodiment** (differential drive, one forward
+camera, flat-floor-only, width, "closer than it seems") — it is division-of-labor-neutral and forms the
+`--- WHAT I AM ---` prefix of **both** VLM prompts: the director's `compile_narrative.txt` and the
+planner's `plan_path.txt`. The director-only decision policy (route preferences, done/blocked judgment)
+lives in `compile_narrative.txt`, not here, so the two prompts share one physical self without duplicating
+narrative rules.
 
 ## Node
 
@@ -276,7 +287,7 @@ opening move.
 | Parameter | Default | Effect |
 |---|---|---|
 | `mission_path` | `""` | Optional mission to preload at startup; empty → start **idle**. A `~/mission_advance` goal's `mission_path` selects/switches the mission per call (the node reloads on change, resuming that mission's narrative if it exists), so one running node serves any mission without a restart |
-| `brief_path` | share `prompts/robot_embodiment.txt` | Permanent-context brief |
+| `embodiment_path` | share `prompts/robot_embodiment.txt` | The robot's physical embodiment (`{embodiment}`), shared by both the director and planner prompts |
 | `prompts_dir` | share `prompts/` | Directory holding `compile_narrative.txt` (director) and `plan_path.txt` (planner) |
 | `narrative_path` | `""` | Narrative history; empty → sibling of the real mission file (`<mission>.narrative.jsonl`) |
 | `log_path` | `""` | Raw log; empty → sibling of the real mission file (`<mission>.log.jsonl`) |
