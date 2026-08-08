@@ -11,7 +11,6 @@ find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/MissionAdvance.action"
   "action/VisualReason.action"
-  "action/PlanVisualPath.action"
   "action/FollowVisualPath.action"
   DEPENDENCIES builtin_interfaces std_msgs sensor_msgs geometry_msgs
 )
