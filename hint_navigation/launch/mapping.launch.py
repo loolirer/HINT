@@ -7,19 +7,38 @@ from launch.actions import (
     ExecuteProcess,
     GroupAction,
     IncludeLaunchDescription,
-    RegisterEventHandler,
+    OpaqueFunction,
 )
-from launch.event_handlers import OnShutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, SetRemap
 
+MAPS_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "maps")
+)
+
+
+def map_autosaver(context, *args, **kwargs):
+    region = LaunchConfiguration("region").perform(context)
+    interval = LaunchConfiguration("save_interval").perform(context)
+    map_stem = os.path.join(MAPS_DIR, region, "map")
+    os.makedirs(os.path.dirname(map_stem), exist_ok=True)
+
+    save_loop = (
+        f'while true; do sleep {interval}; '
+        f'ros2 run nav2_map_server map_saver_cli -f "{map_stem}" '
+        f'--ros-args -p save_map_timeout:=5.0; done'
+    )
+    return [
+        ExecuteProcess(
+            cmd=["bash", "-c", save_loop],
+            name="map_autosaver",
+            output="screen",
+        )
+    ]
+
 
 def generate_launch_description():
-    maps_dir = os.path.normpath(
-        os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "maps")
-    )
-
     teleop_config = os.path.join(
         get_package_share_directory("hint_navigation"), "config", "teleop.yaml"
     )
@@ -56,12 +75,15 @@ def generate_launch_description():
     except Exception:
         rviz_args = []
 
-    region = LaunchConfiguration("region")
     use_sim_time = LaunchConfiguration("use_sim_time")
 
     declare_region = DeclareLaunchArgument(
         "region", default_value="default",
-        description="Environment name — the map is saved to hint_navigation/maps/<region>/map",
+        description="Environment name — the map is autosaved to hint_navigation/maps/<region>/map",
+    )
+    declare_save_interval = DeclareLaunchArgument(
+        "save_interval", default_value="5.0",
+        description="Seconds between map autosaves; the last save before Ctrl+C is your map",
     )
     declare_use_sim_time = DeclareLaunchArgument(
         "use_sim_time", default_value="false",
@@ -98,30 +120,13 @@ def generate_launch_description():
         output="screen",
     )
 
-    def save_map_on_shutdown(event, context):
-        map_stem = os.path.join(maps_dir, region.perform(context), "map")
-        os.makedirs(os.path.dirname(map_stem), exist_ok=True)
-        return [
-            ExecuteProcess(
-                cmd=[
-                    "ros2", "run", "nav2_map_server", "map_saver_cli",
-                    "-f", map_stem,
-                    "--ros-args", "-p", "save_map_timeout:=5.0",
-                ],
-                output="screen",
-            )
-        ]
-
-    save_on_shutdown = RegisterEventHandler(
-        OnShutdown(on_shutdown=save_map_on_shutdown)
-    )
-
     return LaunchDescription([
         declare_region,
+        declare_save_interval,
         declare_use_sim_time,
         teleop,
         cartographer,
         occupancy_grid,
         rviz2,
-        save_on_shutdown,
+        OpaqueFunction(function=map_autosaver),
     ])
