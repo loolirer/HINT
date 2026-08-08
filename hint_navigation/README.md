@@ -54,14 +54,7 @@ chain stays action-based.
 
 Per goal it:
 
-0. **Ground-clips** the VLM pixel path: each normalized waypoint is tested against
-   `hint_perception`'s binary ground mask (`/camera/ground`, matched to the goal's frame
-   stamp); the **leading run** of on-ground waypoints is kept, and the **first waypoint that
-   leaves the ground is dropped along with every waypoint after it** — so the robot never
-   follows a path that runs off the floor. No fresh mask → the path passes through
-   unclipped. If nothing survives (all off-ground, or the VLM sent none), the goal succeeds
-   as a no-op so the BT's Spin still runs.
-1. **Grounds** the surviving waypoints (`x`/`y ∈ [-1, 1]`, nearest-first) onto the ground plane
+1. **Grounds** the VLM waypoints (`x`/`y ∈ [-1, 1]`, nearest-first) onto the ground plane
    in `base_link` via `CameraRig.pixels_to_ground`, then re-expresses them in **`odom`** using
    the robot pose at the goal's stamp — looked up from **TF** (`odom → base_link` at that
    stamp), the same transform the costmap and MPPI use. So the path is anchored once in the
@@ -71,6 +64,16 @@ Per goal it:
    calls), the TF buffer's `cache_time` (`tf_buffer_time`) must cover that latency, or the
    stamped lookup falls out of the buffer and the goal aborts. Prepends the robot's own pose
    so the path starts at the robot; each pose's yaw is the path tangent.
+1. **Distance-clips** the grounded path where it first leaves a circle of radius `path_range` m
+   around the robot, interpolating the segment–circle crossing so the endpoint stays clean
+   (`path_range ≤ 0` disables it). The bound is **straight-line distance from the robot**, not
+   path length, because that is what projection error tracks: `pixels_to_ground` error grows with
+   range (the horizon clamp sends a near-horizon waypoint on legitimately open floor to a wildly
+   far, unreliable point), so a radial cutoff bounds *how unreliable* the farthest retained point
+   can be. It is not obstacle safety — the costmap + MPPI handle that — but a guardrail against
+   that projection blow-up and against a long move committing the robot to a big uncorrected drive
+   past the sensed window (against the re-plan-every-cycle cadence). Independent of
+   `obstacle_projector`'s `bev_range` (the sensed horizon); default `5.0` sits a little beyond it.
 1. **Smooths + densifies** the grounded points before handing them to MPPI: a **centripetal
    Catmull-Rom** spline is fit through the (few, far-apart) waypoints and resampled at
    `path_resolution` m (default `0.05`, ≈ costmap resolution). MPPI's path critics
@@ -85,13 +88,14 @@ Per goal it:
 3. Handles the **turn-only** move: an empty `waypoints` goal succeeds immediately (nothing to
    follow), so the BT's `SpinAction` that runs next performs the rotation.
 
-It also republishes two grounded paths (re-stamped, at control rate) purely for RViz —
-re-stamping is what lets them render correctly in an **ego (`base_link`) view** instead of
-freezing at plan time:
-- **`~/path`** — the ground-clipped path actually handed to MPPI.
-- **`~/path_raw`** — the **full VLM path** as grounded (never followed), so you can
-  see what the model intended vs what survived the clip. When nothing is clipped the two
-  coincide.
+It also republishes the grounded path purely for RViz, from a **`control_rate` timer that runs
+continuously** — not only while a follow is active, but through the end-of-move Spin and idle,
+until the next path replaces it. Each tick re-stamps the path to *now*, which is what lets RViz
+transform it against the **live** `odom → base_link` and render it correctly in an **ego
+(`base_link`) view**. (Republishing only inside the follow action froze the stamp the moment the
+follow ended, so during the Spin RViz used a stale transform and the path rotated rigidly with
+the robot instead of staying put in the world.)
+- **`~/path`** — the VLM-projected path, both handed to MPPI and republished for RViz.
 
 ### Interfaces
 
@@ -99,10 +103,8 @@ freezing at plan time:
 |---|---|---|
 | `~/follow_visual_path` | `hint_interfaces/FollowVisualPath` | Action server (BT-facing) |
 | `follow_path` (see `follow_path_action`) | `nav2_msgs/FollowPath` | Action client (Nav2 controller) |
-| `/camera/ground` (see `mask_topic`) | `sensor_msgs/Image` (`mono8`) | Sub — ground mask for clipping the pixel path |
 | `/tf`, `/tf_static` | `tf2_msgs/TFMessage` | Sub (TF listener) — `path_frame ← robot_frame` at the goal stamp, the world anchor for grounding |
-| `~/path` | `nav_msgs/Path` (latched) | Pub — the ground-clipped path handed to MPPI, for RViz |
-| `~/path_raw` | `nav_msgs/Path` (latched) | Pub — the full VLM path grounded (debug; never followed) |
+| `~/path` | `nav_msgs/Path` (latched) | Pub — the VLM-projected path handed to MPPI, for RViz |
 
 ### Key parameters
 
@@ -116,7 +118,10 @@ this package; injected by bringup — see [camera_rig](#camera_rig-camera_rigpy)
 + planner calls, so bringup derives it from `vlm_timeout`) and `tf_lookup_timeout` (`0.1` s —
 brief blocking wait on the stamped lookup); `server_timeout`, `control_rate`;
 `path_resolution` (`0.05` m — Catmull-Rom smooth-densification spacing for the path handed to
-MPPI; live-adjustable).
+MPPI; live-adjustable); `path_range` (`5.0` m — max straight-line distance from the robot before the
+grounded path is distance-clipped; `≤ 0` disables it. Deliberately independent of
+`obstacle_projector`'s `bev_range`, though bringup can set them equal; the `5.0` default sits a
+little beyond the sensed horizon).
 
 ## obstacle_projector
 
@@ -151,10 +156,16 @@ Rig (see [camera_rig](#camera_rig-camera_rigpy)), plus the BEV grid geometry:
 | Parameter | Default | Effect |
 |---|---|---|
 | `bev_range` | `3.0` | Forward extent of the BEV window (m) |
-| `bev_half_width` | `1.5` | Lateral extent each side (m) |
 | `bev_resolution` | `0.05` | BEV cell size (m) — one obstacle point per cell (~ costmap resolution) |
 | `obstacle_frame` | `base_link` | Frame the obstacle cloud is published in |
 | `mask_topic` | `/camera/ground` | Ground-mask input topic |
+
+The window's **lateral** half-width is not a parameter — it is derived from the rig
+(`camera_hfov_deg`, `camera_tilt`, `camera_height`, `camera_forward_offset`) and `bev_range` as
+the lateral extent the camera actually sees at the far range. Widening it independently would only
+add columns the camera never images (masked out as unknown); narrowing it would discard obstacle
+pixels at the far sides. So `bev_range` is the single forward horizon, and the sides follow from
+the FOV.
 
 ## visual_debug
 
@@ -167,9 +178,9 @@ because it needs the rig to re-project the projector's odom paths onto the frame
 Layers (each toggled by a `show_*` param):
 1. **Backdrop** — the camera frame.
 2. **Ground overlay** — the binary mask tinted (muted green = ground, coral = not), alpha-blended.
-3. **Paths** — the projector's `~/path_raw` (full VLM intent) and `~/path` (followed, ground-clipped),
-   each transformed `odom → current base_link` (via `CameraRig.ground_to_pixels`) and projected
-   onto the frame, so they track as the robot moves. Amber = intent, teal = followed.
+3. **Path** — the projector's `~/path` (the VLM-projected path), transformed
+   `odom → current base_link` (via `CameraRig.ground_to_pixels`) and projected onto the frame,
+   so it tracks as the robot moves. Teal.
 4. **BT state** — the mission tree's live state (`/hint_behavior_server/state`) as text, top-left.
 
 ```bash
@@ -183,8 +194,7 @@ ros2 param set /visual_debug_node show_mask false        # toggle any layer live
 |---|---|---|
 | `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Sub — backdrop, drives the render |
 | `/camera/ground` (see `mask_topic`) | `sensor_msgs/Image` (`mono8`) | Sub — ground overlay |
-| `/path_projector_node/path` | `nav_msgs/Path` | Sub — followed (clipped) path |
-| `/path_projector_node/path_raw` | `nav_msgs/Path` | Sub — full VLM-intent path |
+| `/path_projector_node/path` | `nav_msgs/Path` | Sub — the VLM-projected path |
 | `/odom` | `nav_msgs/Odometry` | Sub — pose for re-projecting the paths |
 | `/hint_behavior_server/state` | `std_msgs/String` | Sub — mission-tree state text |
 | `/debug` | `sensor_msgs/Image` (`bgr8`) | Pub — the single composited debug image |
@@ -192,7 +202,7 @@ ros2 param set /visual_debug_node show_mask false        # toggle any layer live
 ### Parameters
 
 Rig (see [camera_rig](#camera_rig-camera_rigpy)); layer toggles `show_mask` / `show_path` /
-`show_path_raw` / `show_bt_state` (all default true); `overlay_alpha` (0.35); and a `*_topic`
+`show_bt_state` (all default true); `overlay_alpha` (0.35); and a `*_topic`
 name per input (`mask_topic` defaults to `/camera/ground`).
 
 ## Nav2 config (`config/nav2_local.yaml`)

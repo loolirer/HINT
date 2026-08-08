@@ -38,6 +38,12 @@ call **and** the planner call before `path_projector` grounds it, so its stamp c
 ~2× a single call old — the TF buffer must be large enough that the stamped `odom ← base_link`
 lookup still resolves. Bumping `vlm_timeout` can't silently outrun the buffer.
 
+`path_projector`'s `path_range` (max straight-line distance from the robot the grounded path is
+clipped to) is set here too, default `5.0` m. It is kept **independent** of `obstacle_projector`'s
+`bev_range` (the sensed horizon): you can set them equal, but the default leaves `path_range` a
+little beyond `bev_range` so a move can reach just past the current obstacle window. See
+`hint_navigation`'s `path_projector` docs for what the clip guards against.
+
 ## Usage
 
 ```bash
