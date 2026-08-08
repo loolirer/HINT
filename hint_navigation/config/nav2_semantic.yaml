@@ -1,0 +1,36 @@
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      obstacle_layer:
+        observation_sources: ground
+        ground:
+          topic: /obstacles
+          data_type: "PointCloud2"
+          marking: true
+          clearing: true
+          min_obstacle_height: -1.0
+          max_obstacle_height: 2.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+
+behavior_server:
+  ros__parameters:
+    local_costmap_topic: local_costmap/costmap_raw
+    local_footprint_topic: local_costmap/published_footprint
+    global_costmap_topic: local_costmap/costmap_raw
+    global_footprint_topic: local_costmap/published_footprint
+    cycle_frequency: 10.0
+    behavior_plugins: ["spin"]
+    spin:
+      plugin: "nav2_behaviors::Spin"
+    local_frame: odom
+    global_frame: odom
+    robot_base_frame: base_link
+    transform_timeout: 0.1
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 0.50
+    min_rotational_vel: 0.05
+    rotational_acc_lim: 0.50
+    enable_stamped_cmd_vel: true

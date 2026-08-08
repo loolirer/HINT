@@ -8,9 +8,11 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    params_file = os.path.join(
-        get_package_share_directory("hint_navigation"), "config", "nav2_local.yaml"
+    config_dir = os.path.join(
+        get_package_share_directory("hint_navigation"), "config"
     )
+    common_params = os.path.join(config_dir, "nav2_common.yaml")
+    semantic_params = os.path.join(config_dir, "nav2_semantic.yaml")
 
     use_sim_time = LaunchConfiguration("use_sim_time")
     declare_use_sim_time = DeclareLaunchArgument(
@@ -23,7 +25,7 @@ def generate_launch_description():
         executable="controller_server",
         name="controller_server",
         output="screen",
-        parameters=[params_file, {"use_sim_time": use_sim_time}],
+        parameters=[common_params, semantic_params, {"use_sim_time": use_sim_time}],
     )
 
     behavior_server = Node(
@@ -31,7 +33,7 @@ def generate_launch_description():
         executable="behavior_server",
         name="behavior_server",
         output="screen",
-        parameters=[params_file, {"use_sim_time": use_sim_time}],
+        parameters=[common_params, semantic_params, {"use_sim_time": use_sim_time}],
     )
 
     lifecycle_manager = Node(
