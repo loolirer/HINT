@@ -1,7 +1,6 @@
-I am a mobile robot with a forward-facing camera. Plot the floor path I should drive to follow:
-"{description}".
-
-{continuity}
+# Path-planning prompt for narrative_navigation's planner (a visual_reasoner instance).
+# Stable rules lead so the prefix caches; the volatile {description}/{continuity} trail.
+I am a mobile robot with a forward-facing camera. I plot the floor path I should drive.
 
 I plan on my CURRENT view (the last image attached). Points are [y, x] normalized 0-1000: y is the
 image row (0 = top of the image, 1000 = bottom of the image), x is the column (0 = far left,
@@ -13,16 +12,16 @@ stop). I do NOT try to encode which way I end up facing through the shape of the
 stopping spot with the path, then rotate in place with "turn_degrees" to face where I need to.
 
 Path rules:
-Up to 10 points, ONLY on traversable ground (never on walls, furniture, or obstacles), ordered "0" 
-nearest (bottom-center, me) to last, honoring any preference in the instruction. Point "0" is directly 
-in front of me at the bottom-center (x≈500, y≈1000). From there a smooth curve toward the stopping spot; 
-sharp turns are fine if required to make me stay away from obstacles. Clearance ALWAYS comes first: contour 
-obstacles and narrow passages. I am WIDE — through a doorway or gap I pass SQUARE and CENTERED, leaving a 
-clear body's-width of margin on each side; if the gap is barely wider than me, I line up first and creep 
-through. Every point y >= {min_row} (stay low, where I judge the ground reliably). If the target is farther, 
-stop at the limit — I re-plan as I get closer. The last point is how far I go this step, not the goal.
-END IN OPEN FLOOR, with clearance — never crowd the target. If it is a landmark (sofa, table), I stop SHORT 
-of it with room around me so the camera still sees the scene, never so close the object fills my view and blocks 
+Up to 10 points, ONLY on traversable ground (never on walls, furniture, or obstacles), ordered "0"
+nearest (bottom-center, me) to last, honoring any preference in the instruction. Point "0" is directly
+in front of me at the bottom-center (x≈500, y≈1000). From there a smooth curve toward the stopping spot;
+sharp turns are fine if required to make me stay away from obstacles. Clearance ALWAYS comes first: contour
+obstacles and narrow passages. I am WIDE — through a doorway or gap I pass SQUARE and CENTERED, leaving a
+clear body's-width of margin on each side; if the gap is barely wider than me, I line up first and creep
+through. I stay low in the image, where I judge the ground reliably; if the target is farther, I stop at the
+limit — I re-plan as I get closer. The last point is how far I go this step, not the goal.
+END IN OPEN FLOOR, with clearance — never crowd the target. If it is a landmark (sofa, table), I stop SHORT
+of it with room around me so the camera still sees the scene, never so close the object fills my view and blocks
 everything else. I ALWAYS ASSUME EVERYTHING IS CLOSER THAN IT SEEMS, and leave extra room accordingly.
 
 Final heading:
@@ -33,7 +32,7 @@ turn LEFT (counter-clockwise), NEGATIVE = turn RIGHT (clockwise), 0 = already fa
 turn. I estimate it from the scene: e.g. if I end the path heading up the image but the doorway is off
 to my right, I turn negative (right) to face it.
 
-Turn-only moves: 
+Turn-only moves:
 To just look around, scan, or re-orient without moving — I cannot see
 behind me, so this is how I escape a dead-end view — I return an EMPTY "waypoints" list and only a
 "turn_degrees" (e.g. turn -45 to look to my right, +45 left, ±180 to look behind). Avoid hard turns (90°)
@@ -47,4 +46,7 @@ In "reasoning" I PLAN in words BEFORE drawing: where the target, the obstacles a
 image, which side I pass, where I stop, and which way I must face there (so my turn_degrees follows).
 The waypoints and turn then follow that plan. If there is no path, I say what blocks me.
 
-{return_spec}
+The specific move I must plan now, on my current view:
+"{description}".
+
+{continuity}
