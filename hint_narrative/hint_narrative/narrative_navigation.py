@@ -96,7 +96,7 @@ class MissionPlannerNode(Node):
         share = get_package_share_directory("hint_narrative")
         self.declare_parameter("mission_path", "")
         self.declare_parameter(
-            "brief_path", os.path.join(share, "prompts", "brief.txt")
+            "brief_path", os.path.join(share, "prompts", "robot_embodiment.txt")
         )
         self.declare_parameter("prompts_dir", os.path.join(share, "prompts"))
         self.declare_parameter("narrative_path", "")
@@ -350,7 +350,7 @@ class MissionPlannerNode(Node):
 
     def _compile(self, vision, images, goal_handle=None):
         prompt = self._fill(
-            "compile.txt",
+            "compile_narrative.txt",
             {
                 "brief": self._brief,
                 "mission": self._mission_text or "",
@@ -449,7 +449,7 @@ class MissionPlannerNode(Node):
             return None
         goal = VisualReason.Goal()
         goal.prompt = self._fill(
-            "plan.txt",
+            "plan_path.txt",
             {
                 "description": description,
                 "continuity": self._continuity_text(max(0, len(images or []) - 1)),
