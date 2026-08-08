@@ -26,6 +26,8 @@ def generate_launch_description():
     vlm_timeout = 60.0
     tf_buffer_time = 2.0 * vlm_timeout + 10.0
 
+    path_range = 5.0
+
     camera_remap = (
         "/camera/image_raw/compressed",
         "/camera/image_raw/compressed/throttle",
@@ -114,7 +116,7 @@ def generate_launch_description():
         package="hint_navigation",
         executable="path_projector",
         output="screen",
-        parameters=[camera_rig, {"tf_buffer_time": tf_buffer_time}],
+        parameters=[camera_rig, {"tf_buffer_time": tf_buffer_time, "path_range": path_range}],
     )
 
     path_planner = Node(
