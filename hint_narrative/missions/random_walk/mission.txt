@@ -1,0 +1,4 @@
+Walk randomly around the room.
+
+I am in an indoor room. I keep moving along random paths across the open floor, making a random turn
+at the end of each move. I never stop and I am never done — I just keep wandering.
