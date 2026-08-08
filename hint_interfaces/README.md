@@ -15,7 +15,7 @@ source install/setup.bash
 | `action/PlanVisualPath` | goal `{description, images}` → result `{message, waypoints, turn_degrees, stamp}` / feedback `{state}` | `hint_vlm/path_planner` — plans ground waypoints **and** an end-of-move turn over the goal's frame buffer |
 | `action/FollowVisualPath` | goal `{waypoints, stamp}` → result `{message}` / feedback `{state}` | `hint_navigation/path_projector` — grounds the waypoints into an `odom` path and drives Nav2's `follow_path` |
 | `action/VisualReason` | goal `{prompt, schema, images}` → result `{response, stamp}` / feedback `{state}` | `hint_vlm/visual_reasoner` — generic text(+image)-in / JSON-out reasoning |
-| `action/MissionAdvance` | goal `{success, mission_path, first}` → result `{mission_done, mission_failed, area, message, waypoints, turn_degrees, stamp}` / feedback `{state}` | `hint_narrative/narrative_navigation` — one cognition cycle of the mission loop: recompiles the narrative **and** plans the path, returning the next move as a trajectory |
+| `action/MissionAdvance` | goal `{success, mission_path, first}` → result `{mission_done, mission_failed, message, waypoints, turn_degrees, stamp}` / feedback `{state}` | `hint_narrative/narrative_navigation` — one cognition cycle of the mission loop: recompiles the narrative **and** plans the path, returning the next move as a trajectory. `mission_done` / `mission_failed` are VLM-declared by the director |
 
 > **Result success convention.** `PlanVisualPath`, `FollowVisualPath`, and `VisualReason` carry **no `success` bool** — success/failure is the action's terminal status (SUCCEEDED vs ABORTED), with the reason in `message`/`response`. `MissionAdvance` instead reports completion via `mission_done`/`mission_failed`.
 >

@@ -6,7 +6,7 @@
         <Sequence>
           <MissionAdvance mission_path="{mission_path}" success="{last_ok}"
                           waypoints="{waypoints}" turn_degrees="{turn_degrees}" stamp="{stamp}"
-                          area="{area}" mission_failed="{mission_failed}"/>
+                          mission_failed="{mission_failed}"/>
           <Fallback>
             <Sequence>
               <FollowVisualPathAction waypoints="{waypoints}" stamp="{stamp}"/>
