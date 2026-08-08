@@ -18,6 +18,10 @@ path in `odom`, and the costmap is a short-lived rolling window.
 | `obstacle_projector` (node) | Streams `hint_perception`'s ground mask (`/camera/ground`) → obstacle `PointCloud2` (`/obstacles`) for the local costmap, via the ground-plane BEV homography |
 | `visual_debug` (node) | Composes one `/debug` image from the system's real outputs (mask overlay + projector paths + BT state) |
 | `launch/nav2.launch.py` + `config/nav2_local.yaml` | Brings up the mapless Nav2 stack: `controller_server` (FollowPath + MPPI, rolling local costmap) + `behavior_server` (Spin) + `nav2_lifecycle_manager` |
+| `launch/mapping.launch.py` | **Reference phase step 1** — Cartographer SLAM + occupancy grid (stock `turtlebot3_cartographer` config), to build and save a map |
+| `launch/reference.launch.py` + `config/nav2_reference.yaml` | **Reference phase step 2** — full Nav2 (AMCL + A* planner + DWB controller + bt_navigator) on the saved map, to drive an operator-clicked GoToGoal and record a ground-truth trajectory |
+| `launch/localization.launch.py` + `config/localization.yaml` | **HINT run** — AMCL + map_server on the saved map. Publishes `map→odom` so the HINT run's trajectory lands in the map frame; **not** used for navigation (HINT still drives with the mapless stack). Included by `hint_bringup`'s bringup |
+| `maps/<region>/` | Saved occupancy map (`map.pgm` + `map.yaml`) and the reference trajectory bag (`reference.bag`) per environment |
 
 ```bash
 colcon build --symlink-install --packages-select hint_interfaces hint_navigation
@@ -221,6 +225,47 @@ name per input (`mask_topic` defaults to `/camera/ground`).
 
 Lifecycle order in `nav2.launch.py` is `["controller_server", "behavior_server"]` (controller
 first, so its local costmap is up before the Spin server subscribes to it).
+
+## Reference phase & localization (the mission test protocol)
+
+A HINT mission is evaluated by **replicating a Nav2 ground-truth run**: map the region, drive an
+arbitrary Nav2 GoToGoal on it (the *reference*), then describe that route semantically and have
+HINT reproduce it — and finally overlay HINT's actual path against the reference on the same map
+(`hint_narrative`'s `mission_report --reference`). This is a **two-session** protocol so the
+reference and HINT trajectories share one fixed map frame: both localize with AMCL on the **same
+saved map**.
+
+Maps live in `hint_navigation/maps/<region>/` (one `<region>` per physical environment; several
+missions can reuse a map). The `map`/`region` launch args resolve there by default; the reference
+bag is a sibling (`reference.bag`).
+
+**Step 1 — build + save the map** (Cartographer SLAM):
+
+```bash
+ros2 launch hint_navigation mapping.launch.py           # drive the region with your teleop
+ros2 run nav2_map_server map_saver_cli -f hint_navigation/maps/<region>/map
+```
+
+**Step 2 — record the reference GoToGoal** (full Nav2 on the saved map):
+
+```bash
+ros2 launch hint_navigation reference.launch.py region:=<region>
+# in RViz: set the initial pose (2D Pose Estimate), then click a Nav2 goal — it drives there.
+ros2 bag record --storage mcap -o hint_navigation/maps/<region>/reference.bag /tf /tf_static /odom
+```
+
+**Step 3 — run HINT** and compare: `hint_bringup`'s bringup includes `localization.launch.py`
+(AMCL + map_server on the same `maps/<region>/map.yaml`, selected by its `region` arg), so the
+mission bag records the actual trajectory in the map frame. Then:
+
+```bash
+ros2 run hint_narrative mission_report missions/<name>/mission.bag \
+  --reference hint_navigation/maps/<region>/reference.bag
+```
+
+Requires (beyond the mapless-stack deps): `turtlebot3_cartographer`, `nav2_bringup`,
+`nav2_map_server`, `nav2_amcl`. `reference.launch.py`/`localization.launch.py` reuse
+`nav2_bringup`'s `bringup_launch.py` / `localization_launch.py`.
 
 ## Notes
 
