@@ -9,7 +9,6 @@
 
   <exec_depend>ros2launch</exec_depend>
   <exec_depend>teleop_twist_joy</exec_depend>
-  <exec_depend>turtlebot3_cartographer</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>hint_behavior</exec_depend>
   <exec_depend>hint_narrative</exec_depend>

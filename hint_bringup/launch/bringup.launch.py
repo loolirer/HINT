@@ -2,8 +2,9 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, GroupAction, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, SetRemap
 
 
@@ -12,8 +13,10 @@ def generate_launch_description():
         get_package_share_directory("hint_bringup"), "config", "teleop.yaml"
     )
 
-    cartographer_config_dir = os.path.join(
-        get_package_share_directory("hint_bringup"), "config"
+    region = LaunchConfiguration("region")
+    declare_region = DeclareLaunchArgument(
+        "region", default_value="default",
+        description="Environment name under hint_navigation/maps/<region>/ to localize on",
     )
 
     camera_rig = {
@@ -67,34 +70,15 @@ def generate_launch_description():
         ]
     )
 
-    cartographer = Node(
-        package="cartographer_ros",
-        executable="cartographer_node",
-        name="cartographer_node",
-        arguments=[
-            "-configuration_directory",
-            cartographer_config_dir,
-            "-configuration_basename",
-            "turtlebot3_lds_2d.lua",
-            "--ros-args",
-            "--log-level",
-            "error",
-        ],
-    )
-
-    occupancy_grid = Node(
-        package="cartographer_ros",
-        executable="cartographer_occupancy_grid_node",
-        name="cartographer_occupancy_grid_node",
-        arguments=[
-            "-resolution",
-            "0.05",
-            "-publish_period_sec",
-            "2.0",
-            "--ros-args",
-            "--log-level",
-            "error",
-        ],
+    localization = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory("hint_navigation"),
+                "launch",
+                "localization.launch.py",
+            )
+        ),
+        launch_arguments={"region": region}.items(),
     )
 
     ground_segmenter = Node(
@@ -205,8 +189,8 @@ def generate_launch_description():
         [
             teleop,
             nav2,
-            cartographer,
-            occupancy_grid,
+            declare_region,
+            localization,
             ground_segmenter,
             obstacle_projector,
             path_projector,

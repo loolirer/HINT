@@ -19,6 +19,7 @@ in one place. It has no nodes of its own; `launch/bringup.launch.py` starts the 
 - `path_projector` (`hint_navigation`) — grounds VLM waypoints → `odom` path → Nav2 `follow_path`
 - `visual_debug` (`hint_navigation`) — composes one `/debug` image (mask overlay + projector paths + BT state)
 - the mapless Nav2 stack via `hint_navigation/launch/nav2.launch.py`: `controller_server` (FollowPath + MPPI), `behavior_server` (Spin), `nav2_lifecycle_manager`
+- **localization** via `hint_navigation/launch/localization.launch.py`: `map_server` + `amcl` on a saved map (`hint_navigation/maps/<region>/map.yaml`, chosen by the `region` launch arg). This publishes `map→odom` so the mission's actual trajectory lands in the map frame — it is **localization only**, HINT still drives with the mapless stack above. (SLAM is no longer run here; mapping moved to `hint_navigation`'s reference phase — see its README.)
 - `visual_reasoner` (`hint_vlm`) — generic text/vision → JSON reasoner, launched **twice**: as `visual_reasoner` (the narrative director, temp 0) and as `path_planner` (the ground-path planner, temp 1.0). Both serve `VisualReason`; the prompt + schema that make one a director and the other a planner are owned by `hint_narrative`
 - `narrative_navigation` (`hint_narrative`) — semantic mission planner
 - `behavior_server` (`hint_behavior`; runtime node `hint_behavior_server`) — the BT executor running `RunMission`
@@ -49,8 +50,13 @@ little beyond `bev_range` so a move can reach just past the current obstacle win
 ```bash
 colcon build --symlink-install
 source install/setup.bash
-ros2 launch hint_bringup bringup.launch.py
+ros2 launch hint_bringup bringup.launch.py region:=<region>
 ```
+
+`region` (default `default`) selects the saved map at `hint_navigation/maps/<region>/map.yaml`
+that `map_server` + AMCL localize against — it must exist first (build it in the reference phase;
+see `hint_navigation`'s README). After launch, set the robot's initial pose in RViz (2D Pose
+Estimate) so AMCL converges.
 
 ## Teleop configuration
 
