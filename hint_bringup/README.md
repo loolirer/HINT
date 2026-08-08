@@ -8,8 +8,10 @@ in one place. It has no nodes of its own; `launch/bringup.launch.py` starts the 
 | Path | Purpose |
 |---|---|
 | `launch/bringup.launch.py` | Main bringup (see below) |
-| `config/teleop.yaml` | `teleop_twist_joy` parameters (axes, scales, enable button) |
 | `viz/hint.rviz` | RViz2 layout (ego view — `base_link` fixed frame) |
+
+The `teleop_twist_joy` parameters live in `hint_navigation/config/teleop.yaml` (teleop is
+also used by that package's mapping phase); bringup loads them from there.
 
 ## What it launches
 
@@ -60,7 +62,8 @@ Estimate) so AMCL converges.
 
 ## Teleop configuration
 
-`config/teleop.yaml` is passed to `teleop_twist_joy` at launch. Current mapping (Xbox controller):
+`hint_navigation/config/teleop.yaml` is passed to `teleop_twist_joy` at launch (the same file
+the mapping phase uses). Current mapping (Xbox controller):
 
 | Parameter | Value | Effect |
 |---|---|---|

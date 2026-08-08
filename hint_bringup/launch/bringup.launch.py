@@ -10,7 +10,7 @@ from launch_ros.actions import Node, SetRemap
 
 def generate_launch_description():
     teleop_config = os.path.join(
-        get_package_share_directory("hint_bringup"), "config", "teleop.yaml"
+        get_package_share_directory("hint_navigation"), "config", "teleop.yaml"
     )
 
     region = LaunchConfiguration("region")

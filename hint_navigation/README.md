@@ -18,7 +18,8 @@ path in `odom`, and the costmap is a short-lived rolling window.
 | `obstacle_projector` (node) | Streams `hint_perception`'s ground mask (`/camera/ground`) → obstacle `PointCloud2` (`/obstacles`) for the local costmap, via the ground-plane BEV homography |
 | `visual_debug` (node) | Composes one `/debug` image from the system's real outputs (mask overlay + projector paths + BT state) |
 | `launch/nav2.launch.py` + `config/nav2_local.yaml` | Brings up the mapless Nav2 stack: `controller_server` (FollowPath + MPPI, rolling local costmap) + `behavior_server` (Spin) + `nav2_lifecycle_manager` |
-| `launch/mapping.launch.py` | **Reference phase step 1** — Cartographer SLAM + occupancy grid (stock `turtlebot3_cartographer` config), to build and save a map |
+| `launch/mapping.launch.py` | **Reference phase step 1** — Cartographer SLAM + occupancy grid (stock `turtlebot3_cartographer` config) + `teleop_twist_joy` (you drive the region), to build and save a map |
+| `config/teleop.yaml` | `teleop_twist_joy` parameters (axes, scales, enable button) — used by both `mapping.launch.py` here and `hint_bringup`'s bringup |
 | `launch/reference.launch.py` + `config/nav2_reference.yaml` | **Reference phase step 2** — full Nav2 (AMCL + A* planner + DWB controller + bt_navigator) on the saved map, to drive an operator-clicked GoToGoal and record a ground-truth trajectory |
 | `launch/localization.launch.py` + `config/localization.yaml` | **HINT run** — AMCL + map_server on the saved map. Publishes `map→odom` so the HINT run's trajectory lands in the map frame; **not** used for navigation (HINT still drives with the mapless stack). Included by `hint_bringup`'s bringup |
 | `maps/<region>/` | Saved occupancy map (`map.pgm` + `map.yaml`) and the reference trajectory bag (`reference.bag`) per environment |
@@ -242,7 +243,7 @@ bag is a sibling (`reference.bag`).
 **Step 1 — build + save the map** (Cartographer SLAM):
 
 ```bash
-ros2 launch hint_navigation mapping.launch.py           # drive the region with your teleop
+ros2 launch hint_navigation mapping.launch.py           # includes teleop — drive the region
 ros2 run nav2_map_server map_saver_cli -f hint_navigation/maps/<region>/map
 ```
 

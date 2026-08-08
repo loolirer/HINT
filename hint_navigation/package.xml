@@ -29,6 +29,7 @@
   <exec_depend>nav2_behaviors</exec_depend>
   <exec_depend>nav2_lifecycle_manager</exec_depend>
 
+  <exec_depend>teleop_twist_joy</exec_depend>
   <exec_depend>turtlebot3_cartographer</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>nav2_map_server</exec_depend>
