@@ -124,6 +124,13 @@ class PathProjectorNode(Node):
         _latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self._path_pub = self.create_publisher(Path, "~/path", _latched)
 
+        self._last_path = None
+        self.create_timer(
+            1.0 / max(1.0, float(self._p("control_rate"))),
+            self._republish_path,
+            callback_group=ReentrantCallbackGroup(),
+        )
+
         self._goal_lock = threading.Lock()
 
         self._action_server = ActionServer(
@@ -247,7 +254,7 @@ class PathProjectorNode(Node):
         if path is None:
             return self._abort(goal_handle, "Could not ground path (no pose at the frame "
                                             "stamp — TF unavailable / tf_buffer_time too small)")
-        self._publish_path(path, self._path_pub)
+        self._last_path = path
 
         if not self._fp_client.wait_for_server(
                 timeout_sec=float(self._p("server_timeout"))):
@@ -266,7 +273,6 @@ class PathProjectorNode(Node):
 
         send_future = self._fp_client.send_goal_async(fp_goal)
         while rclpy.ok() and not send_future.done():
-            self._publish_path(path, self._path_pub)
             self._publish_feedback(goal_handle, "IDLE")
             rate.sleep()
         fp_handle = send_future.result()
@@ -279,9 +285,6 @@ class PathProjectorNode(Node):
             if goal_handle.is_cancel_requested and not canceling:
                 canceling = True
                 fp_handle.cancel_goal_async()
-            # Re-stamp each tick so RViz transforms the path against the current
-            # odom->base_link and it slides with the robot instead of freezing.
-            self._publish_path(path, self._path_pub)
             self._publish_feedback(goal_handle, "WAITING" if canceling else "RUNNING")
             rate.sleep()
 
@@ -313,9 +316,14 @@ class PathProjectorNode(Node):
         self.get_logger().warn(f"FollowVisualPath aborted: {message}")
         return result
 
-    def _publish_path(self, path, pub):
+    def _republish_path(self):
+        path = self._last_path
+        if path is not None:
+            self._publish_path(path)
+
+    def _publish_path(self, path):
         path.header.stamp = self.get_clock().now().to_msg()
-        pub.publish(path)
+        self._path_pub.publish(path)
 
     def _publish_feedback(self, goal_handle, state):
         fb = FollowVisualPath.Feedback()
