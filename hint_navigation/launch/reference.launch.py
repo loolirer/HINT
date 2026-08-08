@@ -61,16 +61,10 @@ def generate_launch_description():
         ]
     )
 
-    # controller_server (and its local_costmap) + behavior_server load the shared MPPI controller
-    # from nav2_common.yaml, then nav2_geometric.yaml on top (long-distance overrides win). The
-    # remaining nodes are geometric-only.
     geometric_only = [geometric_params, {"use_sim_time": use_sim_time}]
     driving_params = [common_params, geometric_params, {"use_sim_time": use_sim_time}]
     cmd_vel_to_mux = ("cmd_vel", "cmd_vel_nav2")
 
-    # Localization (map_server + amcl + its lifecycle manager) is the SAME layer the HINT run uses:
-    # reference and HINT localize on one saved map with one amcl config (config/nav2_localization.yaml),
-    # so their trajectories share a map frame. Included here rather than re-instantiated.
     localization = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
