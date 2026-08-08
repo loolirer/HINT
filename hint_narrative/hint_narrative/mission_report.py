@@ -46,6 +46,7 @@ IN_PLACE_TURN_COLOR = "#c02060"
 ROBOT_FILL = False  # fill the footprint circle? (False = hollow outline)
 ROBOT_FILL_COLOR = "#8a8a8a"  # footprint circle fill — grey (used when ROBOT_FILL)
 
+Z_REFERENCE = 3.4  # reference Nav2 GoToGoal path — below the actual path
 Z_ACTUAL = 3.5  # actual driven path
 Z_TRAJ = 3.6  # VLM (followed) path — dashed, above the actual path
 Z_HEADING = 3.7  # arrival heading line (above paths, below the circle)
@@ -55,6 +56,7 @@ Z_MARKER = 6.0  # centre marker (always on top of the circle)
 Z_LABEL = 10.0  # stop-sequence-index label
 
 _C_ACTUAL = "#1f4fd8"  # blue — the path actually driven
+_C_REFERENCE = "#0a8f4f"  # green — the Nav2 GoToGoal reference (target) trajectory
 _C_CLIP = "#bd5b00"  # amber — vlm path
 _C_START = "green"  # start: centre marker of the first stopped position
 _C_END = "red"  # end: centre marker of the last stopped position
@@ -353,7 +355,7 @@ def draw_polylines(polys, ax, color, label, lw, alpha, linestyle="-"):
         first = False
 
 
-def build_report(bag_path):
+def build_report(bag_path, reference_path=None):
     if not rclpy.ok():
         rclpy.init()
 
@@ -361,6 +363,10 @@ def build_report(bag_path):
     ref = data["ref"]
     actual = data["actual"]
     status = data["status"]
+
+    # The reference (Nav2 GoToGoal) run localizes AMCL on the SAME saved map as the HINT run,
+    # so its trajectory shares this report's map frame and overlays directly.
+    reference = read_bag(reference_path)["actual"] if reference_path else None
 
     t_min, t_max = data["span"]
     duration = _t_seconds(t_max - t_min) if t_min is not None else 0.0
@@ -389,6 +395,18 @@ def build_report(bag_path):
     draw_polylines(
         data["paths"], ax, _C_CLIP, "VLM path", 2.2, PATH_ALPHA, linestyle="--"
     )
+
+    if reference:
+        r = np.array([(x, y) for _, x, y, _ in reference])
+        ax.plot(
+            r[:, 0],
+            r[:, 1],
+            color=_C_REFERENCE,
+            lw=2.4,
+            alpha=PATH_ALPHA,
+            zorder=Z_REFERENCE,
+            label="Reference (Nav2)",
+        )
 
     if actual:
         a = np.array([(x, y) for _, x, y, _ in actual])
@@ -539,10 +557,18 @@ def main():
         description="Compile a mission's MCAP rosbag into a path report + stats."
     )
     parser.add_argument("bag_path", help="Path to the mission.bag directory")
+    parser.add_argument(
+        "--reference",
+        default=None,
+        help="Optional reference Nav2 GoToGoal bag to overlay as the target trajectory "
+             "(sibling of the map, e.g. hint_navigation/maps/<region>/reference.bag)",
+    )
     args = parser.parse_args()
     if not os.path.isdir(args.bag_path):
         parser.error(f"Not a bag directory: {args.bag_path}")
-    build_report(args.bag_path)
+    if args.reference is not None and not os.path.isdir(args.reference):
+        parser.error(f"Not a bag directory: {args.reference}")
+    build_report(args.bag_path, args.reference)
 
 
 if __name__ == "__main__":

@@ -192,19 +192,30 @@ The offline **`mission_report`** script compiles that bag into one annotated fig
 written **into the mission's directory** (`mission_report.png` + `mission_stats.json`):
 
 ```bash
-ros2 run hint_narrative mission_report missions/<name>/mission.bag
+ros2 run hint_narrative mission_report missions/<name>/mission.bag \
+  [--reference hint_navigation/maps/<region>/reference.bag]
 ```
 
-Reference frame is `map` if the bag has one, else `odom`. The figure shows the **actual** driven
-path (continuous), the **truncated** (followed) path, the robot **footprint** (circle + heading)
-drawn **only at VLM plan-call poses** and labelled with the **stop's sequence index** (0-based, in
-visiting order), start/end markers, each **turn** as a post-spin heading line, and a stats box:
-mission duration, VLM-processing time (the `advance` wrapper window — the whole stationary-cognition
-span per cycle), movement time (`follow_visual_path` + `spin` windows), and the **VLM hit rate**
-(successful/total of the real VLM calls — the director `visual_reason` compile + the planner
-`visual_reason` plan, each by its `_action/status` terminal status, retries counted as separate calls). All displayed
-paths share one opacity (`PATH_ALPHA`). Everything is derived from the recorded topics, so no
-runtime node is touched.
+Reference frame is `map` if the bag has one, else `odom`. In the current protocol the HINT run
+localizes with AMCL + `map_server` on the saved map (`hint_bringup`'s bringup includes
+`hint_navigation`'s `localization.launch.py`), so `/map` and a `map→odom` TF are recorded and the
+report is in the **map frame** — the actual trajectory sits on the real map.
+
+`--reference` overlays a **Nav2 GoToGoal ground-truth trajectory** (the reference bag recorded in
+the reference phase — see `hint_navigation`'s README) as a distinct green "Reference (Nav2)" line.
+Because both the reference and HINT runs AMCL-localize on the **same saved map**, they share one
+map frame and overlay directly, giving a target-vs-actual replication comparison.
+
+The figure also shows the **actual** driven path (continuous), the **truncated** (followed) path,
+the robot **footprint** (circle + heading) drawn **only at VLM plan-call poses** and labelled with
+the **stop's sequence index** (0-based, in visiting order), start/end markers, each **turn** as a
+post-spin heading line, and a stats box: mission duration, VLM-processing time (the `advance`
+wrapper window — the whole stationary-cognition span per cycle), movement time
+(`follow_visual_path` + `spin` windows), and the **VLM hit rate** (successful/total of the real VLM
+calls — the director `visual_reason` compile + the planner `visual_reason` plan, each by its
+`_action/status` terminal status, retries counted as separate calls). All displayed paths share one
+opacity (`PATH_ALPHA`). Everything is derived from the recorded topics, so no runtime node is
+touched.
 
 ## Prompt template (`prompts/compile_narrative.txt`)
 
