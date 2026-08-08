@@ -27,7 +27,6 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "path_planner = hint_vlm.gemini.path_planner:main",
             "visual_reasoner = hint_vlm.gemini.visual_reasoner:main",
         ],
     },
