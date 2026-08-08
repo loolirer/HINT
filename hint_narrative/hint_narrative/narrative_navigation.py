@@ -29,14 +29,12 @@ NARRATIVE_SCHEMA = json.dumps(
     {
         "type": "object",
         "properties": {
-            "analysis": {"type": "string"},
             "done": {"type": "string"},
             "next": {"type": "string"},
             "mission_complete": {"type": "boolean"},
             "mission_failed": {"type": "boolean"},
         },
         "required": [
-            "analysis",
             "done",
             "next",
             "mission_complete",
