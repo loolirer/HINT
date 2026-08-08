@@ -22,7 +22,7 @@ _STATUS_TERMINAL = (4, 5, 6)  # SUCCEEDED, CANCELED, ABORTED
 
 _VLM_STATUS = (
     "/visual_reasoner/visual_reason/_action/status",  # director VLM call (compile)
-    "/path_planner/plan_visual_path/_action/status",  # executor VLM call (plan)
+    "/path_planner/visual_reason/_action/status",  # executor VLM call (plan)
 )
 
 _ADVANCE_STATUS = "/narrative_navigation/mission_advance/_action/status"
@@ -30,7 +30,7 @@ _MOVE_STATUS = (
     "/path_projector_node/follow_visual_path/_action/status",
     "/spin/_action/status",
 )
-_PLAN_STATUS = "/path_planner/plan_visual_path/_action/status"  # footprint anchors
+_PLAN_STATUS = "/path_planner/visual_reason/_action/status"  # footprint anchors
 _SPIN_STATUS = "/spin/_action/status"  # turn markers
 
 _PATH_TOPIC = "/path_projector_node/path"
