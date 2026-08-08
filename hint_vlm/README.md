@@ -19,7 +19,7 @@ Shared plumbing (API-key loading + client, per-goal frame decode, timeout-guarde
 >
 > **Structured output — two strengths.** `_call_api(contents, json_output=True)` is **JSON mode** (`response_mime_type=application/json`): it forbids invalid-JSON tokens (killing the degenerate `"<td>"`-style corruption on long replies) while leaving field structure to the model, so reasoning quality is largely preserved. `_call_api(contents, response_schema=…)` is the **stricter** constrained decoding to an exact schema — always valid *and* shaped, but the hard grammar can **cost spatial-reasoning quality**. So the node defaults to **JSON mode** (see its `structured_output` param) and only uses the full schema on request. Plain `_call_api(contents)` stays fully unconstrained.
 
-**Prompt-free.** `visual_reasoner` carries no prompt of its own — the prompt (and optional schema) arrive in the goal. `hint_narrative` owns both prompts as data (`compile.txt` for the director, `plan.txt` for the planner) and fills them; this node just reasons over whatever text + frames it is handed.
+**Prompt-free.** `visual_reasoner` carries no prompt of its own — the prompt (and optional schema) arrive in the goal. `hint_narrative` owns both prompts as data (`compile_narrative.txt` for the director, `plan_path.txt` for the planner) and fills them; this node just reasons over whatever text + frames it is handed.
 
 ## Usage
 
