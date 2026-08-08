@@ -7,7 +7,7 @@ package_name = "hint_narrative"
 
 mission_data = [
     (os.path.join("share", package_name, os.path.dirname(p)), [p])
-    for p in glob("missions/**/*.yaml", recursive=True)
+    for p in glob("missions/**/*.txt", recursive=True)
 ]
 
 setup(

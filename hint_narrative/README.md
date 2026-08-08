@@ -1,26 +1,28 @@
 # hint_narrative
 
-The semantic mission planner — a **narrative director**. It starts from a static **Semantic
-Plan** (a prior: which environments to visit, in order, and a brief intent for each) and drives
-navigation by maintaining a rolling **Narrative State** that it **recompiles every cycle** with
-a single `visual_reasoner` call: judge the last move from the before/after camera frames, fold that into
-the narrative, and emit the next instruction.
+The semantic mission planner — a **narrative director**. It starts from a static plain-text
+**mission** (`mission.txt` — a first-person description of the whole trip, in order, with the
+visual landmarks it steers by embedded) and drives navigation by maintaining a rolling **Narrative
+State** that it **recompiles every cycle** with a single `visual_reasoner` call: judge the last
+move from the before/after camera frames, fold that into the narrative, and emit the next
+instruction.
 
-There are **no discrete steps, statuses, retries or pass/fail judging**. The old model outlined
-a happy path and read every divergence as failure, forcing constant replanning; here divergence
-is the normal material the narrative absorbs.
+There are **no discrete steps, statuses, or pass/fail judging**. The old model outlined a happy
+path and read every divergence as failure, forcing constant replanning; here divergence is the
+normal material the narrative absorbs.
 
-**The environment queue.** Order is owned by *code*, not the model. The node holds a FIFO queue
-of environments (head = current) plus a stack of visited ones. The model never names or reorders
-environments — each cycle it emits `environment_action` ∈ `{stay, advance, back, insert}` and the
-node applies it: `advance` pops the head (its intent is met), `back` restores the previous head
-(advanced too early), `insert` splices a discovered intermediate the plan omitted (e.g. a corridor
-between two rooms) in as the next environment, `stay` keeps working the head. This enforces the
-plan order while letting reality *refine* it, keeps the prompt bounded (only the head + a one-line
-peek are ever shown, regardless of queue length), and makes completion **code-derived** (the queue
-empties). A per-environment cycle cap (`max_env_cycles`) is the one **failure** path: if the robot
-never leaves a head within the cap, the mission fails (mapped to BT `FAILURE`) rather than dragging
-on forever.
+**Three-part memory.** Each cycle the director reasons over exactly three things:
+- **what I need to do** — the static mission text, an unchanging prompt prefix (placed first so
+  the model's context cache can hold it; it never changes during a run);
+- **what I've done** — `done`, the past-actions narrative, recompiled every cycle: new events fold
+  in sharp, old ones abstract into a phrase, with landmarks named as they're reached;
+- **what I'm doing** — `next`, the immediate drive instruction the director emits for the planner.
+
+There is no environment queue, no per-environment intent, and no code-owned order — the sequence
+lives in the mission prose, and the director tracks progress against it in `done`. **Completion
+and failure are the director's call:** it emits `mission_complete` when it has arrived and done
+what it came for, and `mission_failed` only when it is genuinely stuck with no recovering move
+(mapped to BT `FAILURE`). Partial progress and drift are never failure.
 
 > **Status.** Fully implemented and buildable: the data contracts, the `narrative_navigation`,
 > and the `hint_behavior` `RunMission` loop tree (a single `MissionAdvance` leaf) — see
@@ -32,7 +34,7 @@ on forever.
 ```
 hint_narrative/
   hint_narrative/narrative_navigation.py  # the narrative-director node
-  missions/<name>/mission.yaml             # a Semantic Plan (one dir per mission)
+  missions/<name>/mission.txt              # a plain-text mission (one dir per mission)
   prompts/compile.txt                      # the single narrative-compile prompt
   prompts/brief.txt                        # permanent context: capabilities + rules + policy
   README.md                                # this file — single source of truth
@@ -48,9 +50,9 @@ goal points it at (`mission_path`) — one running node serves any mission witho
 *can* preload one with the `mission_path` param, but that's optional.) Author missions with the
 `/author-mission` command.
 
-Each mission lives in its **own directory** (`missions/<name>/mission.yaml`) so its runtime
+Each mission lives in its **own directory** (`missions/<name>/mission.txt`) so its runtime
 artifacts stay grouped with it. The node writes two append-only siblings next to the mission
-YAML: `mission.narrative.jsonl` (the versioned narrative history) and `mission.log.jsonl` (the raw
+file: `mission.narrative.jsonl` (the versioned narrative history) and `mission.log.jsonl` (the raw
 action log). When it loads a mission it **resumes** from the tail of that mission's narrative if it
 exists; delete that file to start fresh.
 
@@ -58,7 +60,7 @@ exists; delete that file to start fresh.
 a run carries `first: true` — an **explicit** run-boundary flag the `MissionAdvance` BT leaf latches
 on its first tick of the run (the leaf instance is rebuilt per `ExecuteTree` goal, so `first` is true
 exactly once per run, false thereafter). On it the node **deletes** any existing `.narrative.jsonl` +
-`.log.jsonl` and reseeds from the plan. This holds no matter how the previous run ended — clean
+`.log.jsonl` and reseeds from the mission. This holds no matter how the previous run ended — clean
 completion, failure, or a premature **Ctrl+C** mid-run — because the flag keys on the fresh run's
 first tick, not on the old run's ending. The previous run's files persist *until* you launch the next
 run, so they stay there for debugging in between; they're wiped only when a new run actually begins.
@@ -93,7 +95,7 @@ Per cycle, in order:
   over one buffer with no cross-process routing — the trajectory rides out on the `advance`
   result (`waypoints` / `turn_degrees` / `stamp`).
 
-If the compile reports the mission complete/stuck, no plan is made and `mission_done` is
+If the compile declares the mission complete (or stuck), no plan is made and `mission_done` is
 returned. Both calls share the **retry-and-wait** resilience: a transient reasoner/planner/API
 failure retries with backoff (the robot stays put in `RUNNING`), and only a *bounded, exhausted*
 budget fails the mission (`compile_retries`, which now governs both). The planner's `message`
@@ -110,33 +112,36 @@ deeper history (more image tokens = more latency/cost). `history_frames` is the 
 governing frame depth for both calls. Only *images* are buffered — the director's text memory
 (`done`) already carries the narrative history.
 
-## Data contract 1 — Semantic Plan (`missions/*.yaml`)
+## Data contract 1 — mission.txt (`missions/*.txt`)
 
-The static prior, authored once (by a human or an LLM). Environments are **hard rails**: visited
-in order, never skipped or reordered. Each carries only a brief **intent** — not steps.
+The static prior, authored once (by a human or via `/author-mission`). It is **plain text** — a
+first-person account of the whole trip, in order, with the visual **landmarks** the robot steers
+by embedded right in the prose. No schema, no fields, no environment breakdown: a first line
+stating the trip in one sentence, then a few short paragraphs walking through it, ending with
+where the robot stops and what tells it it's done.
 
-```yaml
-mission: "<one-line mission statement>"
-environments:
-  - name: bedroom
-    description: "A regular bedroom"     # initial belief — enriched as the robot explores
-    intent: "Pass through the bedroom to the doorway into the living room, keeping to open floor."
-  - name: living_room
-    description: "A regular living room"
-    intent: "Enter the living room and stop on the floor in front of the couch."
+```
+Get from the bedroom to the living room and stop by the couch.
+
+I start in the bedroom. My way out is the open door — I drive to it, pass through, and turn left
+into the hallway.
+
+The hallway has a few doors, but one open passage without a door leads to the living room. I follow
+it through that open entrance.
+
+Inside is the living room with a couch on the open floor. I drive up to it and stop on the clear
+floor in front of the couch. That's where I'm done.
 ```
 
-`description` is the **initial** visual belief for each environment. It is not just
-documentation: each cycle the reasoner enriches the *current* environment's description with
-what the planner observed (accumulating detail, frozen once the robot moves on). The enrichment
-lives in the in-memory plan and the narrative snapshots — the **source YAML is never
-mutated** — so a finished mission's narrative tail holds a learned visual map of every visited
-environment.
+The mission text never changes during a run; it is loaded once and fed to the director each cycle
+as the **static prompt prefix** (`what I need to do`), so the model's context cache can hold it.
+The learned detail the robot accumulates does **not** mutate this file — it lives in the narrative
+`done` (and its snapshots).
 
 ## Data contract 2 — Narrative State (`<mission>.narrative.jsonl`)
 
 The living memory, recompiled every cycle: prose, recency-weighted, lossy by design, and the
-**primary context for the next plan** (`narrative.next` is fed to `path_planner`).
+**primary context for the next plan** (`next` is fed to `path_planner`).
 
 It is stored as a **versioned, git-like history** — each recompile **appends a full snapshot**
 (one JSON record per line) rather than overwriting, so the whole belief evolution is retained
@@ -147,25 +152,20 @@ the history is self-explaining.
 |---|---|
 | `version` | monotonic snapshot index (0, 1, 2 …) |
 | `ts` | ISO-8601 timestamp |
-| `current_environment` | the queue head's name (`""` once complete) — **derived**, not model-named |
-| `mission_complete` | `true` once the queue is empty — **derived** |
-| `mission_failed` | `true` when the mission ended stuck (a head exceeded `max_env_cycles`) |
-| `action` | the queue edit applied this cycle: `stay` / `advance` / `back` / `insert` / `fail` |
+| `mission_complete` | `true` when the director declared the mission done this cycle |
+| `mission_failed` | `true` when the director declared the robot stuck (or a cognition call exhausted its retry budget) |
 | `trigger` | `{success, observation}` that caused this recompile (`null` on version 0) |
-| `queue` | remaining environments `[{name, description, intent}, …]` — order shows any `insert`s |
-| `visited` | completed environments (their **enriched** descriptions — the learned map) |
-| `narrative.situation` | my current standing — where I am / what I face **right now**, rewritten fresh each cycle (the present moment, not history) |
-| `narrative.done` | recency-weighted history; older info abstracted, newer sharp |
-| `narrative.next` | the immediate next instruction — fed to `path_planner` |
+| `done` | recency-weighted history of what I've done; older info abstracted, newer sharp, landmarks named |
+| `next` | the immediate next instruction — fed to `path_planner` |
 
 ```jsonl
-{"version":1,"ts":"…","current_environment":"bedroom","mission_complete":false,"action":"insert","trigger":{"success":true,"observation":"planner: the only door leads to a hallway, not the living room"},"queue":[{"name":"bedroom","description":"a bedroom; door on the far wall opens to a hallway","intent":"pass through to the living room"},{"name":"corridor","description":"a hallway linking the rooms","intent":""},{"name":"living_room","description":"A regular living room","intent":"stop in front of the couch"}],"visited":[],"narrative":{"situation":"I am in the bedroom, facing the far wall; a door to a hallway is directly ahead.","done":"Found the bedroom's only exit is a hallway.","next":"Drive to the doorway on the far wall."}}
+{"version":1,"ts":"…","mission_complete":false,"mission_failed":false,"trigger":{"success":true,"observation":"a soft curve left around the chair toward the doorway"},"done":"Left the bedroom through the open door and turned left; now in the hallway with the couch room ahead.","next":"Go straight down the hallway, clear of the doors on my left, toward the open doorless passage at the end that leads into the living room."}
 ```
 
-- **Current state** = the last record. **Resume** = read the tail (`queue` + `visited` restore the
-  full plan state, including inserts), continue the `version` counter.
+- **Current state** = the last record. **Resume** = read the tail (`done` restores the memory),
+  continue the `version` counter.
 - **Reconstruct history** = read records `0..N` (e.g. `jq . <mission>.narrative.jsonl`) — the
-  `action` + `queue` fields show exactly how and when the plan was refined (e.g. a corridor spliced in).
+  `done` + `trigger` fields show how the belief evolved cycle by cycle.
 
 ## Data contract 3 — Pure Log (`<mission>.log.jsonl`)
 
@@ -176,7 +176,7 @@ the *compiled belief*.
 
 ## Mission rosbag + report (`<mission>.bag`, `mission_report.png`)
 
-Every run auto-records a **minimal MCAP rosbag** (`<mission>.bag`, a sibling of the mission YAML),
+Every run auto-records a **minimal MCAP rosbag** (`<mission>.bag`, a sibling of the mission file),
 started on a fresh run and closed when the mission ends (or on Ctrl+C). It is **overwritten each
 run**, mirroring the jsonl semantics. The topic set is deliberately small (no images / clouds /
 costmap — just `/tf`, `/tf_static`, `/odom`, the projector's followed path (`~/path`), `/map` if
@@ -207,12 +207,14 @@ runtime node is touched.
 The single reasoner prompt (replacing the old judge/replan/compress). Placeholders are literal
 `{name}` tokens the node substitutes (not `str.format` — the body has JSON braces):
 
+The tokens are ordered **static-first** (brief + mission) so the unchanging prefix sits ahead of
+the per-cycle content (`done`, vision) — the shape a context cache wants.
+
 | Token | Filled with |
 |---|---|
 | `{brief}` | `prompts/brief.txt`, verbatim (permanent context) |
-| `{environment}` | the **current** environment (name/description/intent) + a one-line peek at the next — bounded regardless of queue length |
-| `{situation}` | last cycle's `situation` — my standing after the previous move (continuity for the fresh rewrite) |
-| `{narrative}` | the memory carried forward — `done` only (`next` is regenerated; its result is read from the before/after images) |
+| `{mission}` | the mission text (`mission.txt`), verbatim — the static `what I need to do` prefix |
+| `{done}` | the memory carried forward — `done` only (`next` is regenerated; its result is read from the before/after images) |
 | `{vision}` | how to read the attached camera image(s): the last is the current view, earlier ones are recent past views (buffer depth `history_frames`); one = current-only, none = no frame |
 
 > The before/after frames themselves are **attached to the reasoner call** (the `VisualReason` goal's
@@ -222,10 +224,11 @@ The single reasoner prompt (replacing the old judge/replan/compress). Placeholde
 Reasoner `schema` — a **real JSON schema** (`NARRATIVE_SCHEMA`) passed to the reasoner, which uses it
 as `response_schema` for **constrained decoding**, so the compile reply is always well-formed JSON
 with exactly these fields:
-`{situation, done, next, environment_description, environment_action ∈ {stay|advance|back|insert} (enum), new_environment: {name, description}}`
-— the model reports its current `situation` + progress + enriches the current description, and edits the queue only via
-`environment_action` (`new_environment` carries the room to splice on `insert`). It never names
-the current environment; that's the queue head, owned by the node.
+`{done, next, mission_complete (bool), mission_failed (bool)}`
+— `done`/`next` are the two memory fields the node keeps; `mission_complete`/`mission_failed` are
+the director's terminal signals (the node trusts them — there is no code-owned queue or cycle cap).
+There is no in-band `analysis`/reasoning field: the reasoner runs with native thinking
+(`thinking_budget`), so the model reasons in its own channel and emits only the answer.
 
 `prompts/brief.txt` is the permanent-context prefix (capabilities, navigation preferences, ambiguity
 policy) prepended on every call.
@@ -251,16 +254,17 @@ first `~/mission_advance` that carries a `mission_path` loads that mission (and 
 **`advance`** — Goal: `success` (did the last move execute?), `mission_path` (optional — the mission
 to run; loads/switches it when it changes, else keeps the current one), and `first` (true only on the
 run's first tick → wipe + reseed; see **Missions never resume across runs** above). The node appends
-the outcome to the pure log, recompiles the narrative (`compile.txt` → reasoner) and applies the queue
-edit, then — if the mission is not over — **plans the move** (`next` + the frame buffer → `path_planner`),
-appends **one** snapshot for the cycle, and returns Result:
-`mission_done` (queue empty **or** failed), `mission_failed` (stuck past the cap, an unrecoverable
-compile/IO error, or a cognition call failed past its retry budget), `area` (= the current queue head),
-`waypoints` / `turn_degrees` / `stamp` (the trajectory to drive — `waypoints` may be empty for a turn-only
-move; empty/zero when `mission_done`), and `message` (the planner's brief path reasoning, or the
-failure/closing text on `mission_done`). The planner's reasoning is recorded internally as the next
-cycle's trigger `observation` — no longer round-tripped through the BT. On the first call nothing has
-executed (`success` defaults true) so it just plans and serves the opening move.
+the outcome to the pure log and recompiles the narrative (`compile.txt` → reasoner), then — if the
+director did not declare the mission over — **plans the move** (`next` + the frame buffer →
+`path_planner`), appends **one** snapshot for the cycle, and returns Result:
+`mission_done` (director `mission_complete` **or** `mission_failed`), `mission_failed` (director
+declared stuck, an unrecoverable compile/IO error, or a cognition call failed past its retry
+budget), `waypoints` / `turn_degrees` / `stamp` (the trajectory to drive — `waypoints` may be empty
+for a turn-only move; empty/zero when `mission_done`), and `message` (the planner's brief path
+reasoning, or the failure/closing text on `mission_done`). The planner's reasoning is recorded
+internally as the next cycle's trigger `observation` — no longer round-tripped through the BT. On
+the first call nothing has executed (`success` defaults true) so it just plans and serves the
+opening move.
 
 ### Parameters
 
@@ -279,7 +283,6 @@ executed (`success` defaults true) so it just plans and serves the opening move.
 | `planner_timeout` | `30.0` | Seconds to wait on a single planner call |
 | `compile_retries` | `-1` | Cognition-retry budget — governs **both** per-cycle VLM calls (compile **and** plan). On a reasoner/planner/API failure the move did **not** advance, so instead of driving on a stale belief / no plan the `~/mission_advance` call **waits and retries** — the robot stays put (the BT leaf sits in `RUNNING`; the follow only runs once advance returns). Retries after the first attempt: **`-1` = retry indefinitely** until it succeeds or the BT halts; `0` = one attempt; `N` = N retries. On a *bounded* budget being exhausted the mission **aborts** (`mission_failed` → BT `FAILURE`), never re-serving. Live-adjustable |
 | `compile_retry_delay` | `2.0` | Backoff (s) between cognition retries (see `compile_retries`). The wait is cancellable — a BT halt / Ctrl+C breaks out immediately |
-| `max_env_cycles` | `8` | Cycles on one environment before the mission fails (stuck backstop) |
 | `camera_topic` | `/camera/image_raw/compressed` | Frame source for the director's image history |
 | `history_frames` | `1` | Director vision-buffer depth N — how many past move-start frames to attach ahead of the current view. `0` = current view only (no move comparison), `1` = before/after of the last move, `3–4` = deeper history. Each extra frame adds image tokens → more latency/cost. Live-adjustable. Only images are buffered; the narrative (`done`) carries the text history |
 
@@ -300,7 +303,7 @@ reports whether the previous move succeeded and returns the next trajectory
 # cycle 0 — load a mission (via mission_path); first:true wipes any prior narrative
 # and reseeds, then plans + returns the opening move
 ros2 action send_goal /narrative_navigation/mission_advance hint_interfaces/action/MissionAdvance \
-  "{success: true, first: true, mission_path: '/root/turtlebot3_ws/src/hint_narrative/missions/bedroom_to_living_room/mission.yaml'}" \
+  "{success: true, first: true, mission_path: '/root/turtlebot3_ws/src/hint_narrative/missions/bedroom_to_living_room/mission.txt'}" \
   --feedback
 
 # report the move + get the next (first defaults false; mission_path can be omitted once loaded)
@@ -330,7 +333,7 @@ it drives that trajectory with `FollowVisualPathAction` + `SpinAction`. There is
 Fallback
   KeepRunningUntilFailure                       # ends when MissionAdvance reports mission over
     Sequence
-      MissionAdvance(success={last_ok}) → {waypoints}, {turn_degrees}, {stamp}, {area}
+      MissionAdvance(success={last_ok}) → {waypoints}, {turn_degrees}, {stamp}, {mission_failed}
       Fallback                                   # capture follow/spin success into {last_ok}
         Sequence:
           FollowVisualPathAction(waypoints={waypoints}, stamp={stamp})
@@ -341,8 +344,9 @@ Fallback
 ```
 
 The BT reports only `success`; the planner's reasoning stays inside the node (recorded as the next
-cycle's trigger). Divergence is absorbed by the narrative, so the loop ends on completion or on a
-failure path (stuck backstop, or a cognition call exhausting a *bounded* retry budget). The outer
+cycle's trigger). Divergence is absorbed by the narrative, so the loop ends on the director's
+`mission_complete`, or on a failure path (the director declaring the mission stuck, or a cognition
+call exhausting a *bounded* retry budget). The outer
 `Precondition` maps a clean finish to overall `SUCCESS` and `mission_failed` to `FAILURE`. The only
 custom terms are `MissionAdvance` / `FollowVisualPathAction` / `SpinAction`;
 `Fallback`/`KeepRunningUntilFailure`/`SetBlackboard`/`Precondition` are stock BT.cpp.
@@ -350,4 +354,4 @@ custom terms are `MissionAdvance` / `FollowVisualPathAction` / `SpinAction`;
 > **Future refinements (deferred):** letting the cognition node **choose the skill** (not just
 > plan a forward path) — e.g. an explicit "arrived" signal, a scan/rotate re-orient, or backtrack —
 > now that the executive is a clean dispatch point. The current node always plans a forward path +
-> end-of-move turn; completion is inferred from the narrative.
+> end-of-move turn; completion is declared by the director in the narrative compile.

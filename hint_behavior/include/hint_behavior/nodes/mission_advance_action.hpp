@@ -32,8 +32,7 @@ public:
         "turn_degrees", "in-place turn to apply after the path (+left / -right, deg)"),
       BT::OutputPort<builtin_interfaces::msg::Time>(
         "stamp", "current-view frame stamp the path was planned on (grounds the follow)"),
-      BT::OutputPort<std::string>("area", "the current environment (from the narrative)"),
-      BT::OutputPort<bool>("mission_failed", "true when the mission ended stuck (past the cycle cap)"),
+      BT::OutputPort<bool>("mission_failed", "true when the narrative declared the mission stuck"),
     });
   }
 
@@ -48,7 +47,6 @@ public:
 
   BT::NodeStatus onResultReceived(const WrappedResult & wr) override
   {
-    setOutput("area", wr.result->area);
     setOutput("mission_failed", wr.result->mission_failed);
     setOutput("waypoints", wr.result->waypoints);
     setOutput("turn_degrees", wr.result->turn_degrees);
@@ -62,8 +60,8 @@ public:
       }
       return BT::NodeStatus::FAILURE;
     }
-    RCLCPP_INFO(logger(), "[%s] %zu wpt, turn %+.0f: %s",
-                wr.result->area.c_str(), wr.result->waypoints.size(),
+    RCLCPP_INFO(logger(), "%zu wpt, turn %+.0f: %s",
+                wr.result->waypoints.size(),
                 wr.result->turn_degrees, wr.result->message.c_str());
     return BT::NodeStatus::SUCCESS;
   }

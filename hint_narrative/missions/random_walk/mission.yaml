@@ -1,6 +1,0 @@
-mission: "Walk Randomly"
-
-environments:
-  - name: "Room"
-    description: "An indoor environment"
-    intent: "Move around in random paths and make a random turn at the end. Never stop."

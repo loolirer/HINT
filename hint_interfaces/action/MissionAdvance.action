@@ -6,7 +6,6 @@ bool first
 # Result
 bool mission_done
 bool mission_failed
-string area
 string message
 geometry_msgs/Point[] waypoints
 float64 turn_degrees

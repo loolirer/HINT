@@ -7,8 +7,6 @@ import threading
 import time
 from datetime import datetime, timezone
 
-import yaml
-
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from rclpy.action import ActionClient, ActionServer, CancelResponse
@@ -31,35 +29,19 @@ NARRATIVE_SCHEMA = json.dumps(
     {
         "type": "object",
         "properties": {
-            "analysis": {"type": "string"},
-            "situation": {"type": "string"},
             "done": {"type": "string"},
             "next": {"type": "string"},
-            "environment_description": {"type": "string"},
-            "environment_action": {
-                "type": "string",
-                "enum": ["stay", "advance", "back", "insert"],
-            },
-            "new_environment": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "description": {"type": "string"},
-                },
-            },
+            "mission_complete": {"type": "boolean"},
+            "mission_failed": {"type": "boolean"},
         },
         "required": [
-            "analysis",
-            "situation",
             "done",
             "next",
-            "environment_description",
-            "environment_action",
+            "mission_complete",
+            "mission_failed",
         ],
     }
 )
-
-ACTIONS = ("stay", "advance", "back", "insert")
 
 _BAG_TOPICS = [
     "/tf",
@@ -93,7 +75,6 @@ class MissionPlannerNode(Node):
         self.declare_parameter("reasoner_timeout", 30.0)
         self.declare_parameter("planner_action", "/path_planner/plan_visual_path")
         self.declare_parameter("planner_timeout", 30.0)
-        self.declare_parameter("max_env_cycles", 10)
         self.declare_parameter("camera_topic", "/camera/image_raw/compressed")
         self.declare_parameter("history_frames", 1)
         self.declare_parameter("compile_retries", -1)
@@ -102,11 +83,8 @@ class MissionPlannerNode(Node):
         self._lock = threading.Lock()
         _mp = self._p("mission_path")
         self._mission_path = os.path.abspath(_mp) if _mp else ""
-        self._plan = None
-        self._queue = []
-        self._visited = []
-        self._narrative = {"situation": "", "done": "", "next": ""}
-        self._env_cycles = 0
+        self._mission_text = None
+        self._narrative = {"done": "", "next": ""}
         self._failed = False
         self._version = -1
         self._served = False
@@ -143,24 +121,14 @@ class MissionPlannerNode(Node):
             callback_group=cbg,
         )
 
-        if self._plan is not None:
+        if self._mission_text is not None:
             self.get_logger().info(
-                f"Mission planner ready — '{self._plan.get('mission', '')}' "
-                f"(queue: {[e['name'] for e in self._queue]}), narrative v{self._version}."
+                f"Mission planner ready — mission loaded, narrative v{self._version}."
             )
         else:
             self.get_logger().info(
                 "Mission planner ready — no mission loaded; waiting for a mission_path."
             )
-
-    def _current(self):
-        return self._queue[0] if self._queue else None
-
-    def _peek(self):
-        return self._queue[1] if len(self._queue) > 1 else None
-
-    def _complete(self):
-        return not self._queue
 
     def _camera_cb(self, msg):
         self._latest_frame = msg
@@ -218,7 +186,7 @@ class MissionPlannerNode(Node):
             self.get_logger().info(f"Switching mission -> {req.mission_path}")
             self._load_mission(req.mission_path)
 
-        if self._plan is None:
+        if self._mission_text is None:
             result = MissionAdvance.Result()
             result.mission_done = True
             result.mission_failed = True
@@ -265,11 +233,9 @@ class MissionPlannerNode(Node):
         result = MissionAdvance.Result()
         if data is None:
             self._failed = True
-            self._append_snapshot(trigger, "fail")
-            cur = self._current()
+            self._append_snapshot(trigger)
             result.mission_done = True
             result.mission_failed = True
-            result.area = cur["name"] if cur else ""
             result.message = (
                 "Narrative compile failed past the retry budget — aborting "
                 "(the narrative did not advance)."
@@ -279,46 +245,41 @@ class MissionPlannerNode(Node):
             self.get_logger().warn(result.message)
             return result
 
-        action = self._apply(data)
         self._narrative = {
-            "situation": str(data.get("situation", "")),
             "done": str(data.get("done", "")),
             "next": str(data.get("next", "")),
         }
-
-        cur = self._current()
-        result.area = cur["name"] if cur else ""
+        self._failed = bool(data.get("mission_failed", False))
+        complete = bool(data.get("mission_complete", False))
 
         if self._failed:
-            self._append_snapshot(trigger, action)
+            self._append_snapshot(trigger)
             result.mission_done = True
             result.mission_failed = True
-            result.message = (
-                f"Mission failed — stuck in '{result.area}' past the cycle cap."
-            )
+            result.message = self._narrative["done"] or "Mission failed."
             self._stop_recording()
             goal_handle.succeed()
-            self.get_logger().warn(result.message)
+            self.get_logger().warn(f"Mission failed (v{self._version}): {result.message}")
             return result
 
-        if self._complete():
-            self._append_snapshot(trigger, action)
+        if complete:
+            self._append_snapshot(trigger, complete=True)
             result.mission_done = True
             result.mission_failed = False
-            result.message = self._narrative.get("done", "") or "Mission complete."
+            result.message = self._narrative["done"] or "Mission complete."
             self._stop_recording()
             goal_handle.succeed()
             self.get_logger().info(f"Mission complete (v{self._version}).")
             return result
 
-        plan = self._plan_move(self._narrative.get("next", ""), images, goal_handle)
+        plan = self._plan_move(self._narrative["next"], images, goal_handle)
 
         if goal_handle.is_cancel_requested:
             return self._cancelled_result(goal_handle)
 
         if plan is None:
             self._failed = True
-            self._append_snapshot(trigger, "fail")
+            self._append_snapshot(trigger)
             result.mission_done = True
             result.mission_failed = True
             result.message = (
@@ -330,7 +291,7 @@ class MissionPlannerNode(Node):
             self.get_logger().warn(result.message)
             return result
 
-        self._append_snapshot(trigger, action)
+        self._append_snapshot(trigger)
         result.mission_done = False
         result.mission_failed = False
         result.waypoints = list(plan.waypoints)
@@ -343,8 +304,8 @@ class MissionPlannerNode(Node):
         self._served = True
         goal_handle.succeed()
         self.get_logger().info(
-            f"v{self._version} [{result.area}] ({action}) "
-            f"{len(result.waypoints)} wpt, turn {result.turn_degrees:+.0f}: {plan.message}"
+            f"v{self._version} {len(result.waypoints)} wpt, "
+            f"turn {result.turn_degrees:+.0f}: {plan.message}"
         )
         return result
 
@@ -355,61 +316,13 @@ class MissionPlannerNode(Node):
         self.get_logger().info("Advance cancelled (BT halt).")
         return result
 
-    def _apply(self, data):
-        cur = self._current()
-        desc = str(data.get("environment_description", "")).strip()
-        if cur is not None and desc:
-            cur["description"] = desc
-
-        action = str(data.get("environment_action", "stay")).strip().lower()
-        if action not in ACTIONS:
-            action = "stay"
-        head_changed = False
-        if action == "advance":
-            if self._queue:
-                self._visited.append(self._queue.pop(0))
-                head_changed = True
-            else:
-                action = "stay"
-        elif action == "back":
-            if self._visited:
-                self._queue.insert(0, self._visited.pop())
-                head_changed = True
-            else:
-                action = "stay"
-        elif action == "insert":
-            ne = data.get("new_environment") or {}
-            name = str(ne.get("name", "")).strip()
-            if name:
-                env = {
-                    "name": name,
-                    "description": str(ne.get("description", "")),
-                    "intent": "",
-                }
-                self._queue.insert(1 if self._queue else 0, env)
-            else:
-                action = "stay"
-
-        if head_changed:
-            self._env_cycles = 0
-        else:
-            self._env_cycles += 1
-            if self._queue and self._env_cycles > int(self._p("max_env_cycles")):
-                self.get_logger().warn(
-                    f"Env cycle cap on '{self._queue[0]['name']}' — failing the mission."
-                )
-                self._failed = True
-                action = "fail"
-        return action
-
     def _compile(self, vision, images, goal_handle=None):
         prompt = self._fill(
             "compile.txt",
             {
                 "brief": self._brief,
-                "environment": self._context_text(),
-                "situation": self._narrative.get("situation", "") or "(nothing yet)",
-                "narrative": self._narrative_text(),
+                "mission": self._mission_text or "",
+                "done": self._narrative_text(),
                 "vision": vision,
             },
         )
@@ -465,26 +378,6 @@ class MissionPlannerNode(Node):
             )
             if not self._interruptible_sleep(delay, goal_handle):
                 return None
-
-    def _context_text(self):
-        lines = [f"My mission: {self._plan.get('mission', '')}"]
-        cur = self._current()
-        if cur is None:
-            lines.append("I have been through all my planned places.")
-            return "\n".join(lines)
-        desc = cur.get("description", "")
-        lines.append(f"Where I am now: {cur['name']}" + (f" — {desc}" if desc else ""))
-        if cur.get("intent"):
-            lines.append(f"  What I need to do here: {cur['intent']}")
-        peek = self._peek()
-        if peek is not None:
-            lines.append(
-                f"Where I head next: {peek['name']}"
-                + (f" — {peek['intent']}" if peek.get("intent") else "")
-            )
-        else:
-            lines.append("Where I head next: (nowhere — I finish once I am done here)")
-        return "\n".join(lines)
 
     def _narrative_text(self):
         return self._narrative.get("done", "") or "(nothing yet)"
@@ -563,11 +456,10 @@ class MissionPlannerNode(Node):
 
     def _load_mission(self, path):
         abspath = os.path.abspath(path)
-        plan = self._load_plan(abspath)  # may raise — load before committing any state
+        text = self._load_plan(abspath)  # may raise — load before committing any state
         self._mission_path = abspath
-        self._plan = plan
+        self._mission_text = text
         self._load_or_seed()
-        self._env_cycles = 0
 
     def _reset_mission(self):
         for path in (self._narrative_path(), self._log_path()):
@@ -577,27 +469,15 @@ class MissionPlannerNode(Node):
             except OSError as e:
                 self.get_logger().warn(f"Could not delete {path}: {e}")
         self._load_or_seed()
-        self._env_cycles = 0
         self._frame_history = []
         self._start_recording()
 
     def _load_plan(self, path):
-        with open(path, "r") as f:
-            plan = yaml.safe_load(f)
-        if not isinstance(plan, dict):
-            raise ValueError(f"Mission file {path} did not parse to a mapping.")
-        self.get_logger().info(f"Loaded semantic plan from {path}.")
-        return plan
-
-    def _seed_queue(self):
-        return [
-            {
-                "name": e.get("name", ""),
-                "description": e.get("description", ""),
-                "intent": e.get("intent", ""),
-            }
-            for e in self._plan.get("environments", [])
-        ]
+        text = self._read(path)
+        if not text.strip():
+            raise ValueError(f"Mission file {path} is empty.")
+        self.get_logger().info(f"Loaded mission from {path}.")
+        return text
 
     def _load_or_seed(self):
         path = self._narrative_path()
@@ -613,44 +493,30 @@ class MissionPlannerNode(Node):
                             pass
         if last is not None:
             self._version = int(last.get("version", -1))
-            self._queue = last.get("queue") or []
-            self._visited = last.get("visited") or []
-            nar = last.get("narrative", {})
             self._narrative = {
-                "situation": nar.get("situation", ""),
-                "done": nar.get("done", ""),
-                "next": nar.get("next", ""),
+                "done": last.get("done", ""),
+                "next": last.get("next", ""),
             }
             self._failed = bool(last.get("mission_failed", False))
             self._served = True
             self.get_logger().info(f"Resumed from {path} at v{self._version}.")
         else:
-            self._queue = self._seed_queue()
-            self._visited = []
-            self._narrative = {"situation": "", "done": "", "next": ""}
+            self._narrative = {"done": "", "next": ""}
             self._version = -1
             self._served = False
             self._failed = False
             self._start_recording()
 
-    def _append_snapshot(self, trigger, action):
+    def _append_snapshot(self, trigger, complete=False):
         next_version = self._version + 1
-        cur = self._current()
         rec = {
             "version": next_version,
             "ts": self._now(),
-            "current_environment": cur["name"] if cur else "",
-            "mission_complete": self._complete(),
-            "mission_failed": self._failed,
-            "action": action,
+            "mission_complete": bool(complete),
+            "mission_failed": bool(self._failed),
             "trigger": trigger,
-            "queue": self._queue,
-            "visited": self._visited,
-            "narrative": {
-                "situation": self._narrative.get("situation", ""),
-                "done": self._narrative.get("done", ""),
-                "next": self._narrative.get("next", ""),
-            },
+            "done": self._narrative.get("done", ""),
+            "next": self._narrative.get("next", ""),
         }
         with open(self._narrative_path(), "a") as f:
             f.write(json.dumps(rec) + "\n")
@@ -682,7 +548,7 @@ class MissionPlannerNode(Node):
         return self._p("bag_path") or self._sibling(".bag")
 
     def _start_recording(self):
-        if not bool(self._p("record_bag")) or self._plan is None:
+        if not bool(self._p("record_bag")) or self._mission_text is None:
             return
         self._stop_recording()
         bag_dir = self._bag_dir()
