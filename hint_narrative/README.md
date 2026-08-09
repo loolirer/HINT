@@ -196,6 +196,11 @@ ros2 run hint_narrative mission_report missions/<name>/mission.bag \
   [--reference hint_navigation/maps/<region>/reference.bag]
 ```
 
+The `SHOW_ROBOT` module constant (top of `mission_report.py`, alongside the other glyph tunables)
+toggles the robot glyph at each stop (footprint circle + arrival/spin heading lines). Set it
+`False` to keep just the numbered sequence labels on the paths — useful when the circles clutter a
+dense run. Default `True` draws the full glyph.
+
 Reference frame is `map` if the bag has one, else `odom`. In the current protocol the HINT run
 localizes with AMCL + `map_server` on the saved map (`hint_bringup`'s bringup includes
 `hint_navigation`'s `localization.launch.py`), so `/map` and a `map→odom` TF are recorded and the
@@ -209,7 +214,8 @@ map frame and overlay directly, giving a target-vs-actual replication comparison
 The figure also shows the **actual** driven path (continuous), the **truncated** (followed) path,
 the robot **footprint** (circle + heading) drawn **only at VLM plan-call poses** and labelled with
 the **stop's sequence index** (0-based, in visiting order), start/end markers, each **turn** as a
-post-spin heading line, and a stats box: mission duration, VLM-processing time (the `advance`
+post-spin heading line (all of which `SHOW_ROBOT = False` suppresses, leaving the sequence labels),
+and a stats box: mission duration, VLM-processing time (the `advance`
 wrapper window — the whole stationary-cognition span per cycle), movement time
 (`follow_visual_path` + `spin` windows), and the **VLM hit rate** (successful/total of the real VLM
 calls — the director `visual_reason` compile + the planner `visual_reason` plan, each by its
