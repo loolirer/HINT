@@ -45,6 +45,8 @@ ROBOT_MARKER_COLOR = "black"
 IN_PLACE_TURN_COLOR = "#c02060"
 ROBOT_FILL = False  # fill the footprint circle? (False = hollow outline)
 ROBOT_FILL_COLOR = "#8a8a8a"  # footprint circle fill — grey (used when ROBOT_FILL)
+SHOW_ROBOT = False  # draw the robot glyph (footprint circle + arrival/spin heading lines) at each
+#                    stop; False keeps only the numbered sequence labels
 
 Z_REFERENCE = 3.4  # reference Nav2 GoToGoal path — below the actual path
 Z_ACTUAL = 3.5  # actual driven path
@@ -317,23 +319,26 @@ def _number_label(x, y, text, ax):
     )
 
 
-def draw_footprint(x, y, ax, marker_color=ROBOT_MARKER_COLOR, label=None):
-    ax.add_patch(
-        Circle(
-            (x, y),
-            _ROBOT_RADIUS,
-            facecolor=ROBOT_FILL_COLOR if ROBOT_FILL else "none",
-            edgecolor=ROBOT_LINE_COLOR,
-            lw=ROBOT_LINE_WIDTH,
-            alpha=1.0,
-            zorder=Z_CIRCLE,
+def draw_footprint(x, y, ax, marker_color=ROBOT_MARKER_COLOR, label=None, marker=True):
+    if SHOW_ROBOT:
+        ax.add_patch(
+            Circle(
+                (x, y),
+                _ROBOT_RADIUS,
+                facecolor=ROBOT_FILL_COLOR if ROBOT_FILL else "none",
+                edgecolor=ROBOT_LINE_COLOR,
+                lw=ROBOT_LINE_WIDTH,
+                alpha=1.0,
+                zorder=Z_CIRCLE,
+            )
         )
-    )
-    ax.scatter(
-        x, y, color=marker_color, s=ROBOT_MARKER_SIZE, marker="o", zorder=Z_MARKER
-    )
+    if marker:
+        ax.scatter(
+            x, y, color=marker_color, s=ROBOT_MARKER_SIZE, marker="o", zorder=Z_MARKER
+        )
     if label is not None:
-        _number_label(x, y + _ROBOT_RADIUS + 0.10, label, ax)
+        label_y = y + _ROBOT_RADIUS + 0.10 if (SHOW_ROBOT or marker) else y
+        _number_label(x, label_y, label, ax)
 
 
 def draw_polylines(polys, ax, color, label, lw, alpha, linestyle="-"):
@@ -475,21 +480,26 @@ def build_report(bag_path, reference_path=None):
         ]
 
     for i, c in enumerate(clusters):
+        is_endpoint = i == 0 or i == len(clusters) - 1
         marker_color = (
             _C_START
             if i == 0
             else _C_END if i == len(clusters) - 1 else ROBOT_MARKER_COLOR
         )
         arrive_yaw = c["arrive_yaw"] if c["arrive_yaw"] is not None else c["yaw"]
-        _heading_line(c["x"], c["y"], arrive_yaw, ax, ROBOT_MARKER_COLOR, Z_HEADING)
+        if SHOW_ROBOT:
+            _heading_line(c["x"], c["y"], arrive_yaw, ax, ROBOT_MARKER_COLOR, Z_HEADING)
 
-        if c["spin_yaw"] is not None and abs(
-            wrap(c["spin_yaw"] - arrive_yaw)
-        ) > math.radians(5):
-            _heading_line(
-                c["x"], c["y"], c["spin_yaw"], ax, IN_PLACE_TURN_COLOR, Z_SPIN_HEADING
-            )
-        draw_footprint(c["x"], c["y"], ax, marker_color, label=str(i))
+            if c["spin_yaw"] is not None and abs(
+                wrap(c["spin_yaw"] - arrive_yaw)
+            ) > math.radians(5):
+                _heading_line(
+                    c["x"], c["y"], c["spin_yaw"], ax, IN_PLACE_TURN_COLOR, Z_SPIN_HEADING
+                )
+        draw_footprint(
+            c["x"], c["y"], ax, marker_color, label=str(i),
+            marker=SHOW_ROBOT or is_endpoint,
+        )
 
     box = (
         f"Duration: {stats['mission_duration_s']:.1f} s\n"
