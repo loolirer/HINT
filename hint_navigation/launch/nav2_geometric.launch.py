@@ -7,11 +7,12 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node, SetRemap
 
+MAPS_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "maps")
+)
+
 
 def generate_launch_description():
-    maps_dir = os.path.normpath(
-        os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "maps")
-    )
     config_dir = os.path.join(
         get_package_share_directory("hint_navigation"), "config"
     )
@@ -34,7 +35,7 @@ def generate_launch_description():
     )
     declare_map = DeclareLaunchArgument(
         "map",
-        default_value=PathJoinSubstitution([maps_dir, region, "map.yaml"]),
+        default_value=PathJoinSubstitution([MAPS_DIR, region, "map.yaml"]),
         description="Saved occupancy map to navigate on for the reference GoToGoal",
     )
     declare_use_sim_time = DeclareLaunchArgument(

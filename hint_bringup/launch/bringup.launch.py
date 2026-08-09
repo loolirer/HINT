@@ -63,22 +63,12 @@ def generate_launch_description():
                     os.path.join(
                         get_package_share_directory("hint_navigation"),
                         "launch",
-                        "nav2.launch.py",
+                        "nav2_semantic.launch.py",
                     )
-                )
+                ),
+                launch_arguments={"region": region}.items(),
             ),
         ]
-    )
-
-    localization = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(
-                get_package_share_directory("hint_navigation"),
-                "launch",
-                "localization.launch.py",
-            )
-        ),
-        launch_arguments={"region": region}.items(),
     )
 
     ground_segmenter = Node(
@@ -187,10 +177,9 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
+            declare_region,
             teleop,
             nav2,
-            declare_region,
-            localization,
             ground_segmenter,
             obstacle_projector,
             path_projector,

@@ -17,11 +17,11 @@ path in `odom`, and the costmap is a short-lived rolling window.
 | `path_projector` (node) | Exposes the `hint_interfaces/FollowVisualPath` action the BT calls, grounds the VLM's normalized waypoints into a metric `odom` `nav_msgs/Path`, and drives Nav2's `follow_path` (MPPI) |
 | `obstacle_projector` (node) | Streams `hint_perception`'s ground mask (`/camera/ground`) → obstacle `PointCloud2` (`/obstacles`) for the local costmap, via the ground-plane BEV homography |
 | `visual_debug` (node) | Composes one `/debug` image from the system's real outputs (mask overlay + projector paths + BT state) |
-| `launch/nav2.launch.py` + `config/nav2_common.yaml` + `config/nav2_semantic.yaml` | Brings up the mapless Nav2 stack: `controller_server` (FollowPath + MPPI, rolling local costmap) + `behavior_server` (Spin) + `nav2_lifecycle_manager`. The MPPI controller comes from the shared `nav2_common.yaml`; the mapless local costmap (`/obstacles`) + Spin from `nav2_semantic.yaml` |
+| `launch/nav2_semantic.launch.py` + `config/nav2_common.yaml` + `config/nav2_semantic.yaml` | Brings up the mapless Nav2 semantic stack: `controller_server` (FollowPath + MPPI, rolling local costmap) + `behavior_server` (Spin) + `nav2_lifecycle_manager`, and includes the **shared `localization.launch.py`** (map_server + AMCL) on the saved map via a `region`/`map` arg — the same localization the geometric stack uses. The MPPI controller comes from the shared `nav2_common.yaml`; the mapless local costmap (`/obstacles`) + Spin from `nav2_semantic.yaml`. This is what `hint_bringup` includes for the HINT run |
 | `launch/mapping.launch.py` | **Reference phase step 1** — Cartographer SLAM + occupancy grid (stock `turtlebot3_cartographer` config) + `teleop_twist_joy` (you drive the region). Self-contained: a background `map_autosaver` re-saves `maps/<region>/map` every `save_interval` s (default 5) while the graph is alive, so a valid map is always on disk — no second terminal. Ctrl+C stops; the last autosave is your map |
 | `config/teleop.yaml` | `teleop_twist_joy` parameters (axes, scales, enable button) — used by both `mapping.launch.py` here and `hint_bringup`'s bringup |
-| `launch/reference.launch.py` + `config/nav2_common.yaml` + `config/nav2_geometric.yaml` | **Reference phase step 2** — a lean Nav2 stack composed directly (A* planner + MPPI controller + behavior_server + bt_navigator under a private lifecycle manager; no `nav2_bringup` bringup, no phantom nodes) plus the **shared `localization.launch.py`** (the same map_server + AMCL layer the HINT run uses), on the saved map, to drive an operator-clicked GoToGoal and record a ground-truth trajectory. Loads the **shared MPPI controller from `nav2_common.yaml`** (same as HINT) then `nav2_geometric.yaml` on top (global costmap + A* + long-distance overrides), so a HINT run and its reference differ only by the navigation approach (geometric A* plan here vs the VLM path in HINT). Routes Nav2 through the robot's `twist_mux` (`/cmd_vel → /cmd_vel_nav2`, priority 50) and adds `teleop_twist_joy` (`/cmd_vel → /cmd_vel_teleop`, priority 100) so the operator can nudge the robot to seed/converge AMCL and override or e-stop mid-goal |
-| `launch/localization.launch.py` + `config/nav2_localization.yaml` | **Shared localization** — AMCL + map_server on the saved map (one amcl config). Publishes `map→odom` so a run's trajectory lands in the map frame. Included by **both** `hint_bringup`'s bringup (the HINT run — not used for navigation, HINT drives with the mapless stack) **and** `reference.launch.py` (the reference GoToGoal), so both localize identically on the same map |
+| `launch/nav2_geometric.launch.py` + `config/nav2_common.yaml` + `config/nav2_geometric.yaml` | **Reference phase step 2** — a lean Nav2 stack composed directly (A* planner + MPPI controller + behavior_server + bt_navigator under a private lifecycle manager; no `nav2_bringup` bringup, no phantom nodes) plus the **shared `localization.launch.py`** (the same map_server + AMCL layer the HINT/semantic run uses), on the saved map, to drive an operator-clicked GoToGoal and record a ground-truth trajectory. Loads the **shared MPPI controller from `nav2_common.yaml`** (same as HINT) then `nav2_geometric.yaml` on top (global costmap + A* + long-distance overrides), so a HINT run and its reference differ only by the navigation approach (geometric A* plan here vs the VLM path in HINT). Routes Nav2 through the robot's `twist_mux` (`/cmd_vel → /cmd_vel_nav2`, priority 50) and adds `teleop_twist_joy` (`/cmd_vel → /cmd_vel_teleop`, priority 100) so the operator can nudge the robot to seed/converge AMCL and override or e-stop mid-goal |
+| `launch/localization.launch.py` + `config/nav2_localization.yaml` | **Shared localization** — AMCL + map_server on the saved map (one amcl config), on a `region`/`map` arg. Publishes `map→odom` so a run's trajectory lands in the map frame. Included by **both** nav2 stacks — `nav2_semantic.launch.py` (the HINT run — not used for navigation, HINT drives with the mapless stack) **and** `nav2_geometric.launch.py` (the reference GoToGoal) — so both localize identically on the same map. Localization is a **Nav2** concern owned by each stack, never a top-level `hint_bringup` include |
 | `maps/<region>/` | Saved occupancy map (`map.pgm` + `map.yaml`) and the reference trajectory bag (`reference.bag`) per environment |
 
 ```bash
@@ -219,7 +219,7 @@ Each stack then loads its own file **after** common (last file wins per paramete
 **`nav2_semantic.yaml`** (mapless HINT) and **`nav2_geometric.yaml`** (reference — see
 [reference phase](#reference-phase--localization-the-mission-test-protocol)).
 
-`nav2.launch.py` loads `[nav2_common.yaml, nav2_semantic.yaml]`:
+`nav2_semantic.launch.py` loads `[nav2_common.yaml, nav2_semantic.yaml]`:
 
 - **`controller_server`** — from common: `FollowPath` = `nav2_mppi_controller::MPPIController`
   (`motion_model: DiffDrive`, forward-only `vx_min: 0`, Waffle-Pi limits). `SimpleProgressChecker`
@@ -233,8 +233,10 @@ Each stack then loads its own file **after** common (last file wins per paramete
 - **`behavior_server`** — from semantic: the `spin` behavior only, mapless (its `global_*` costmap
   topics point at the local costmap). Drives the BT's end-of-move / scan turn via the `/spin` action.
 
-Lifecycle order in `nav2.launch.py` is `["controller_server", "behavior_server"]` (controller
-first, so its local costmap is up before the Spin server subscribes to it).
+Lifecycle order in `nav2_semantic.launch.py` is `["controller_server", "behavior_server"]` (controller
+first, so its local costmap is up before the Spin server subscribes to it). The stack also includes
+`localization.launch.py` (its own `map_server` + `amcl` under `lifecycle_manager_localization`) on
+the `region`/`map` arg, so localization ships with the Nav2 stack rather than the HINT bringup.
 
 ## Reference phase & localization (the mission test protocol)
 
@@ -261,7 +263,7 @@ ros2 launch hint_navigation mapping.launch.py region:=<region>
 **Step 2 — record the reference GoToGoal** (full Nav2 on the saved map):
 
 ```bash
-ros2 launch hint_navigation reference.launch.py region:=<region>
+ros2 launch hint_navigation nav2_geometric.launch.py region:=<region>
 # autostart is on — the whole Nav2 stack activates itself. Do NOT click the RViz panel's
 #   "Startup" (it re-triggers lifecycle transitions and aborts the bringup). Just:
 # 1. set the initial pose (2D Pose Estimate) FIRST — until then there is no map→odom TF,
@@ -273,8 +275,8 @@ ros2 launch hint_navigation reference.launch.py region:=<region>
 ros2 bag record --storage mcap -o hint_navigation/maps/<region>/reference.bag /tf /tf_static /odom
 ```
 
-> `reference.launch.py` composes only the nodes a Waffle Pi go-to-goal needs, each under a
-> private `nav2_lifecycle_manager` (mirroring `nav2.launch.py`), rather than pulling in
+> `nav2_geometric.launch.py` composes only the nodes a Waffle Pi go-to-goal needs, each under a
+> private `nav2_lifecycle_manager` (mirroring `nav2_semantic.launch.py`), rather than pulling in
 > `nav2_bringup`'s do-everything `bringup_launch.py`. That launch hardcodes a lifecycle list with
 > nodes the robot doesn't have (`collision_monitor`, `docking_server`, `route_server`,
 > `waypoint_follower`); any of them lacking params fails to configure and aborts the **entire**
@@ -292,9 +294,10 @@ ros2 bag record --storage mcap -o hint_navigation/maps/<region>/reference.bag /t
 > teleop is `cmd_vel_teleop` (priority 100). Both lifecycle managers `autostart`, so the stack
 > self-activates — don't click the RViz panel's Startup.
 
-**Step 3 — run HINT** and compare: `hint_bringup`'s bringup includes `localization.launch.py`
-(AMCL + map_server on the same `maps/<region>/map.yaml`, selected by its `region` arg), so the
-mission bag records the actual trajectory in the map frame. Then:
+**Step 3 — run HINT** and compare: `hint_bringup`'s bringup includes `nav2_semantic.launch.py`,
+which itself brings up `localization.launch.py` (AMCL + map_server on the same
+`maps/<region>/map.yaml`, selected by its `region` arg), so the mission bag records the actual
+trajectory in the map frame. Then:
 
 ```bash
 ros2 run hint_narrative mission_report missions/<name>/mission.bag \
@@ -303,7 +306,7 @@ ros2 run hint_narrative mission_report missions/<name>/mission.bag \
 
 Requires (beyond the mapless-stack deps): `turtlebot3_cartographer`, `nav2_map_server`,
 `nav2_amcl`, `nav2_planner`, `nav2_bt_navigator` (and `nav2_bringup` only for the RViz config).
-`reference.launch.py` composes these nodes directly under private lifecycle managers (it does
+`nav2_geometric.launch.py` composes these nodes directly under private lifecycle managers (it does
 **not** use `nav2_bringup`'s `bringup_launch.py`); `localization.launch.py` likewise composes
 `map_server` + `amcl` + their lifecycle manager directly, setting `map_server`'s `yaml_filename`
 as a plain parameter — `nav2_bringup`'s `localization_launch.py` was dropped because its
