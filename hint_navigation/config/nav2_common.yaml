@@ -1,30 +1,31 @@
 controller_server:
   ros__parameters:
-    controller_frequency: 20.0
+    controller_frequency: 10.0
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.5
     min_theta_velocity_threshold: 0.001
-    failure_tolerance: 0.3
+    failure_tolerance: 0.5
     progress_checker_plugins: ["progress_checker"]
     goal_checker_plugins: ["goal_checker"]
     controller_plugins: ["FollowPath"]
     progress_checker:
-      plugin: "nav2_controller::SimpleProgressChecker"
+      plugin: "nav2_controller::PoseProgressChecker"
       required_movement_radius: 0.1
-      movement_time_allowance: 5.0
+      required_movement_angle: 0.25
+      movement_time_allowance: 10.0
     goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.1
-      yaw_goal_tolerance: 0.1
+      xy_goal_tolerance: 0.30
+      yaw_goal_tolerance: 1.57
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
-      time_steps: 48
-      model_dt: 0.05
-      batch_size: 1600
-      vx_std: 0.1
+      time_steps: 60
+      model_dt: 0.1         # = 1/controller_frequency; 60 steps ≈ 0.8 m of lookahead at vx_max
+      batch_size: 2000
+      vx_std: 0.06
       vy_std: 0.1
-      wz_std: 0.25
+      wz_std: 0.35
       vx_max: 0.13          # 0.26 Waffle Pi rated max (m/s)
       vx_min: 0.0           # forward-only: the camera faces forward, never reverse blind
       vy_max: 0.0           # differential drive: no lateral velocity
@@ -33,7 +34,7 @@ controller_server:
       ax_min: -3.0
       az_max: 3.5
       iteration_count: 1
-      prune_distance: 1.0
+      prune_distance: 1.5
       transform_tolerance: 0.2
       temperature: 0.3
       gamma: 0.015
@@ -55,8 +56,8 @@ controller_server:
       GoalAngleCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 5.0
-        threshold_to_consider: 0.5
+        cost_weight: 3.0
+        threshold_to_consider: 0.3
       PreferForwardCritic:
         enabled: true
         cost_power: 1
@@ -65,26 +66,26 @@ controller_server:
       CostCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 14.0
+        cost_weight: 4.0
         critical_cost: 300.0
         consider_footprint: false
         collision_cost: 1000000.0
-        near_goal_distance: 0.2
+        near_goal_distance: 0.1
       PathAlignCritic:
         enabled: true
         cost_power: 1
         cost_weight: 14.0
         max_path_occupancy_ratio: 0.05
         trajectory_point_step: 4
-        threshold_to_consider: 0.025
-        offset_from_furthest: 20
+        threshold_to_consider: 0.3
+        offset_from_furthest: 10
         use_path_orientations: false
       PathFollowCritic:
         enabled: true
         cost_power: 1
         cost_weight: 5.0
-        offset_from_furthest: 2
-        threshold_to_consider: 1.4
+        offset_from_furthest: 5
+        threshold_to_consider: 0.6
       PathAngleCritic:
         enabled: true
         cost_power: 1
@@ -98,7 +99,7 @@ controller_server:
 local_costmap:
   local_costmap:
     ros__parameters:
-      update_frequency: 5.0
+      update_frequency: 10.0
       publish_frequency: 2.0
       global_frame: odom
       robot_base_frame: base_link
@@ -113,6 +114,6 @@ local_costmap:
         enabled: true
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.30   # keep-out margin (comfort clearance) — widened past robot_radius 0.20
-        cost_scaling_factor: 2.5  # gentle decay spreads the repulsive gradient so MPPI reacts earlier
+        inflation_radius: 0.40
+        cost_scaling_factor: 5.0
       always_send_full_costmap: true
