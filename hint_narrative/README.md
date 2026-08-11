@@ -196,10 +196,21 @@ ros2 run hint_narrative mission_report missions/<name>/mission.bag \
   [--reference hint_navigation/maps/<region>/reference.bag]
 ```
 
-The `SHOW_ROBOT` module constant (top of `mission_report.py`, alongside the other glyph tunables)
-toggles the robot glyph at each stop (footprint circle + arrival/spin heading lines). Set it
-`False` to keep just the numbered sequence labels on the paths — useful when the circles clutter a
-dense run. Default `True` draws the full glyph.
+**Framing the run (`VIEW_PADDING`).** A `<region>` map is usually far larger than any one mission,
+so the figure is **cropped to the run**, not to the map: the view is the bounding box of everything
+drawn (actual + reference + VLM paths) grown by `VIEW_PADDING` metres of clear margin on every side.
+That constant is the knob — raise it for more surrounding context, lower it to fill the frame with
+the trajectory. Two rules then shape the crop:
+
+- **Always landscape.** A run that is taller than it is wide is laid on its side (the frame rotated
+  −90°, so the plot's horizontal axis is the frame's `Y` and its vertical axis is `-X` — the axis
+  labels say which). The map raster, both paths and every heading rotate with it, so the picture
+  stays a rigid, undistorted view of the run.
+- **Never slimmer than `VIEW_MAX_ASPECT`** (default `2.0`, i.e. 2:1). A long straight corridor would
+  otherwise crop to a letterbox sliver; its short side is grown symmetrically until the box is 2:1.
+
+The PNG's own dimensions follow the cropped view (`FIG_WIDTH` sets the width), so the saved image is
+landscape and the run fills it without being clipped.
 
 Reference frame is `map` if the bag has one, else `odom`. In the current protocol the HINT run
 localizes with AMCL + `map_server` on the saved map (`hint_bringup`'s bringup includes
@@ -211,11 +222,38 @@ the reference phase — see `hint_navigation`'s README) as a distinct green "Ref
 Because both the reference and HINT runs AMCL-localize on the **same saved map**, they share one
 map frame and overlay directly, giving a target-vs-actual replication comparison.
 
-The figure also shows the **actual** driven path (continuous), the **truncated** (followed) path,
-the robot **footprint** (circle + heading) drawn **only at VLM plan-call poses** and labelled with
-the **stop's sequence index** (0-based, in visiting order), start/end markers, each **turn** as a
-post-spin heading line (all of which `SHOW_ROBOT = False` suppresses, leaving the sequence labels),
-and a stats box: mission duration, VLM-processing time (the `advance`
+The figure is deliberately spare: **three paths, their endpoints, and a stats box** — the robot
+footprint, per-stop heading lines and numbered call labels were removed once they stopped earning
+their space. The paths are the **driven** one (solid), the **VLM-planned** one (dashed) and, with
+`--reference`, the **reference** one (dotted), so all three separate in greyscale. Green **start**
+and red **end** markers sit on the **first and last point of the trajectory itself** — not the first
+and last VLM plan pose — with the driven path's as **circles** (`ENDPOINT_MARKER`) and the
+reference's as **squares** (`REFERENCE_ENDPOINT_MARKER`), so the two runs' ends stay
+distinguishable where they land on top of each other.
+
+The box reports each path's **length** — `Comprimento (Semântico)` / `(Geométrico)` / `(VLM)`, the
+last summed over every planned segment — plus `Tempo de Movimento (Geométrico)`, the reference run's
+time in motion. `mission_stats.json` carries those and the raw counts.
+
+> **Reading the numbers.** `Comprimento (VLM)` is the distance *planned*, including plans that were
+> aborted part-way, so it is not a driven distance and will not tally with the other two. Path
+> lengths come from the **map-frame** pose, where an AMCL correction larger than `LENGTH_STEP`
+> reads as travel — a run that relocalizes hard measures slightly long. `Tempo de Cognição` is the
+> `mission_advance` window, so it counts the retry-and-wait backoff as cognition: a run that hit
+> failing VLM calls will show cognition time far above the actual API time. And `spin_goals` counts
+> `Spin` *actions*, which the BT sends every cycle including the 0° ones — it is a cycle count, not
+> a count of turns actually made.
+
+> **The two movement times are measured differently.** `Tempo de Movimento (Semântico)` is the union
+> of the `follow_visual_path` + `spin` action windows; the reference bag has no action topics, so
+> `Tempo de Movimento (Geométrico)` is derived from the poses — seconds where the robot translated
+> faster than `MOVING_SPEED_EPS` or turned faster than `MOVING_YAW_RATE_EPS`, measured over
+> `MOVING_WINDOW` windows. The geometric figure therefore excludes stationary stretches inside a
+> motion command that the semantic figure counts. Trajectory lengths use `LENGTH_STEP` to discard
+> sub-step hops, so the pose jitter each AMCL correction injects can't accumulate into phantom
+> distance (raw summation inflates a 10 m straight line to ~11.8 m).
+
+The box also carries: mission duration, VLM-processing time (the `advance`
 wrapper window — the whole stationary-cognition span per cycle), movement time
 (`follow_visual_path` + `spin` windows), and the **VLM hit rate** (successful/total of the real VLM
 calls — the director `visual_reason` compile + the planner `visual_reason` plan, each by its
@@ -249,12 +287,27 @@ the per-cycle content (`done`, vision) — the shape a context cache wants.
 > (director-only, the whole trip) and the planner's output fields (`reasoning` / `waypoints` /
 > `turn_degrees`) are unshared, and those names appear in just one place.
 
-Reasoner `schema` — a **real JSON schema** (`NARRATIVE_SCHEMA`) passed to the reasoner, which uses it
-as `response_schema` for **constrained decoding**, so the compile reply is always well-formed JSON
-with exactly these fields:
+Reasoner `schema` — a **real JSON schema** (`NARRATIVE_SCHEMA`) passed to the reasoner, asking for:
 `{done, next, mission_complete (bool), mission_failed (bool)}`
 — `done`/`next` are the two memory fields the node keeps; `mission_complete`/`mission_failed` are
 the director's terminal signals (the node trusts them — there is no code-owned queue or cycle cap).
+
+> **Why the director uses constrained decoding.** Under `structured_output: json` the schema is only
+> pasted into the prompt as a hint, and a JSON Schema is *itself* valid JSON — so the model can
+> satisfy "reply with JSON" by **echoing the schema back**, producing a reply that parses perfectly
+> and carries no `done`/`next`. That is not hypothetical: it happened, repeatedly, and committing one
+> such reply erased a live mission's memory. Bringup therefore runs the director with
+> `structured_output: schema` (constrained decoding), which makes `required` binding at the decoder
+> instead of promptable. The planner stays on `json`, where the hard grammar would cost spatial
+> reasoning.
+>
+> Two guards back that up, so no single reply can wipe the narrative under any config:
+> `_usable_compile` **rejects** a compile that carries no `next` without ending the mission, or that
+> drops a `done` the node handed it — a rejected compile counts as a failed call and goes down the
+> same **retry-and-wait** path as a timeout (the robot holds position, the narrative does not
+> advance), bounded by `compile_retries`. And the commit is non-destructive: an absent `done` keeps
+> the existing one. `hint_vlm`'s reasoner also rejects any reply missing the schema's `required`
+> fields before it ever reaches this node.
 There is no in-band `analysis`/reasoning field: the reasoner runs with native thinking
 (`thinking_budget`), so the model reasons in its own channel and emits only the answer.
 
