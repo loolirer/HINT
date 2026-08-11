@@ -108,7 +108,7 @@ def generate_launch_description():
                 "model_id": "gemini-robotics-er-2-preview",
                 "thinking_budget": -1,
                 "temperature": 1.0,
-                "structured_output": "schema",
+                "structured_output": "json",
                 "api_timeout": vlm_timeout,
             }
         ],
