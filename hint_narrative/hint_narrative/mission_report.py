@@ -42,11 +42,25 @@ ROBOT_MARKER_SIZE = 90  # The marker inside each robot footprint
 ROBOT_LINE_WIDTH = 2.6  # Footprint circle border + heading-line width
 ROBOT_LINE_COLOR = "black"  # Footprint circle outline
 ROBOT_MARKER_COLOR = "black"
+ENDPOINT_MARKER = "o"  # start/end marker on the driven path
+REFERENCE_ENDPOINT_MARKER = "s"  # start/end on the reference path — a square tells the two apart
 IN_PLACE_TURN_COLOR = "#c02060"
 ROBOT_FILL = False  # fill the footprint circle? (False = hollow outline)
 ROBOT_FILL_COLOR = "#8a8a8a"  # footprint circle fill — grey (used when ROBOT_FILL)
 SHOW_ROBOT = False  # draw the robot glyph (footprint circle + arrival/spin heading lines) at each
 #                    stop; False keeps only the numbered sequence labels
+SHOW_CALL_NUMBERS = False  # number each VLM plan-call stop with its 0-based sequence index
+
+LENGTH_STEP = 0.05  # m — hops shorter than this don't extend the measured length, so the pose
+#                     jitter every AMCL correction injects can't accumulate into phantom distance
+MOVING_WINDOW = 0.25  # s — window a trajectory's speed is measured over when deciding "moving"
+MOVING_SPEED_EPS = 0.02  # m/s — slower than this over MOVING_WINDOW counts as stopped
+MOVING_YAW_RATE_EPS = 0.05  # rad/s — an in-place turn is still movement
+
+VIEW_PADDING = 1.0  # m of clear margin kept around the outermost trajectory point — the knob that
+#                     crops a map far larger than the run down to the run itself
+VIEW_MAX_ASPECT = 2.0  # widest the crop may run (width:height); a slimmer one grows its short side
+FIG_WIDTH = 11.0  # in — figure width; the height follows the cropped view, so the PNG is landscape
 
 Z_REFERENCE = 3.4  # reference Nav2 GoToGoal path — below the actual path
 Z_ACTUAL = 3.5  # actual driven path
@@ -266,6 +280,44 @@ def _union_windows(status, topics):
     return float(total)
 
 
+def _xy(samples):
+    return [(x, y) for _, x, y, _ in samples]
+
+
+def path_length(points, step=0.0):
+    """Arc length of an (x, y) polyline; `step` drops sub-`step` hops before they accumulate."""
+    total, anchor = 0.0, None
+    for p in points:
+        if anchor is None:
+            anchor = p
+            continue
+        d = math.hypot(p[0] - anchor[0], p[1] - anchor[1])
+        if d >= step:
+            total += d
+            anchor = p
+    return total
+
+
+def moving_time(samples):
+    """Seconds a trajectory was actually in motion — derived from the poses themselves, since a
+    reference bag carries no action topics to take windows from."""
+    total, anchor = 0.0, None
+    for s in samples:
+        t = _t_seconds(s[0])
+        if anchor is None:
+            anchor = (t, s[1], s[2], s[3])
+            continue
+        dt = t - anchor[0]
+        if dt < MOVING_WINDOW:
+            continue
+        moved = math.hypot(s[1] - anchor[1], s[2] - anchor[2])
+        turned = abs(wrap(s[3] - anchor[3]))
+        if moved / dt >= MOVING_SPEED_EPS or turned / dt >= MOVING_YAW_RATE_EPS:
+            total += dt
+        anchor = (t, s[1], s[2], s[3])
+    return total
+
+
 def pose_at(actual, t_sec):
     if not actual:
         return None
@@ -273,7 +325,7 @@ def pose_at(actual, t_sec):
     return arr[1], arr[2], arr[3]
 
 
-def draw_map(occ, ax):
+def draw_map(occ, ax, flip=False):
     res = occ.info.resolution
     w, h = occ.info.width, occ.info.height
     ox, oy = occ.info.origin.position.x, occ.info.origin.position.y
@@ -281,13 +333,11 @@ def draw_map(occ, ax):
     disp = np.full((h, w), 200, dtype=np.uint8)  # unknown -> mid gray
     known = grid >= 0
     disp[known] = (255 - grid[known] * 2.55).astype(np.uint8)
-    ax.imshow(
-        disp,
-        cmap="gray",
-        origin="lower",
-        zorder=1,
-        extent=[ox, ox + w * res, oy, oy + h * res],
-    )
+    extent = [ox, ox + w * res, oy, oy + h * res]
+    if flip:
+        disp = np.rot90(disp)
+        extent = [extent[2], extent[3], -extent[1], -extent[0]]
+    ax.imshow(disp, cmap="gray", origin="lower", zorder=1, extent=extent)
 
 
 def _heading_line(x, y, yaw, ax, color, zorder):
@@ -341,6 +391,24 @@ def draw_footprint(x, y, ax, marker_color=ROBOT_MARKER_COLOR, label=None, marker
         _number_label(x, label_y, label, ax)
 
 
+def draw_endpoints(samples, ax, marker):
+    for sample, color in ((samples[0], _C_START), (samples[-1], _C_END)):
+        ax.scatter(
+            sample[1],
+            sample[2],
+            color=color,
+            s=ROBOT_MARKER_SIZE,
+            marker=marker,
+            zorder=Z_MARKER,
+        )
+
+
+def _endpoint_handle(marker, color, label):
+    return Line2D(
+        [0], [0], marker=marker, color="w", markerfacecolor=color, markersize=10, label=label
+    )
+
+
 def draw_polylines(polys, ax, color, label, lw, alpha, linestyle="-"):
     first = True
     for poly in polys:
@@ -360,6 +428,45 @@ def draw_polylines(polys, ax, color, label, lw, alpha, linestyle="-"):
         first = False
 
 
+def _flip_point(x, y):
+    return y, -x
+
+
+def _flip_samples(samples):
+    return [(t, y, -x, wrap(yaw - math.pi / 2)) for t, x, y, yaw in samples]
+
+
+def _flip_polys(polys):
+    return [[_flip_point(x, y) for x, y in poly] for poly in polys]
+
+
+def _trajectory_points(actual, reference, polys):
+    pts = [(x, y) for _, x, y, _ in actual]
+    pts += [(x, y) for _, x, y, _ in (reference or ())]
+    for poly in polys:
+        pts.extend(poly)
+    return pts
+
+
+def _is_portrait(points):
+    xs, ys = [p[0] for p in points], [p[1] for p in points]
+    return (max(ys) - min(ys)) > (max(xs) - min(xs))
+
+
+def _view_box(points):
+    """Crop window: VIEW_PADDING around the outermost points, never slimmer than VIEW_MAX_ASPECT."""
+    xs, ys = [p[0] for p in points], [p[1] for p in points]
+    x0, x1 = min(xs) - VIEW_PADDING, max(xs) + VIEW_PADDING
+    y0, y1 = min(ys) - VIEW_PADDING, max(ys) + VIEW_PADDING
+    if x1 - x0 < 1.0:  # a run that never left one spot still needs a window to draw in
+        cx = (x0 + x1) / 2.0
+        x0, x1 = cx - 0.5, cx + 0.5
+    grow = ((x1 - x0) / VIEW_MAX_ASPECT - (y1 - y0)) / 2.0
+    if grow > 0.0:
+        y0, y1 = y0 - grow, y1 + grow
+    return x0, x1, y0, y1
+
+
 def build_report(bag_path, reference_path=None):
     if not rclpy.ok():
         rclpy.init()
@@ -372,6 +479,16 @@ def build_report(bag_path, reference_path=None):
     # The reference (Nav2 GoToGoal) run localizes AMCL on the SAME saved map as the HINT run,
     # so its trajectory shares this report's map frame and overlays directly.
     reference = read_bag(reference_path)["actual"] if reference_path else None
+    paths = data["paths"]
+
+    points = _trajectory_points(actual, reference, paths)
+    flip = bool(points) and _is_portrait(points)
+    if flip:
+        actual = _flip_samples(actual)
+        reference = _flip_samples(reference) if reference else reference
+        paths = _flip_polys(paths)
+        points = [_flip_point(x, y) for x, y in points]
+    view = _view_box(points) if points else None
 
     t_min, t_max = data["span"]
     duration = _t_seconds(t_max - t_min) if t_min is not None else 0.0
@@ -387,19 +504,24 @@ def build_report(bag_path, reference_path=None):
         "mission_duration_s": round(duration, 2),
         "vlm_processing_s": round(vlm_time, 2),
         "movement_s": round(move_time, 2),
+        "geometric_movement_s": round(moving_time(reference), 2) if reference else None,
+        "semantic_path_length_m": round(path_length(_xy(actual), LENGTH_STEP), 2),
+        "geometric_path_length_m": (
+            round(path_length(_xy(reference), LENGTH_STEP), 2) if reference else None
+        ),
+        "vlm_path_length_m": round(sum(path_length(p) for p in paths), 2),
         "vlm_successful_calls": vlm_ok,
         "vlm_total_calls": vlm_total,
         "plan_calls": n_plans,
         "turns": len(turn_wins),
     }
 
-    fig, ax = plt.subplots(figsize=(11, 11))
+    fig_height = FIG_WIDTH * (view[3] - view[2]) / (view[1] - view[0]) if view else FIG_WIDTH
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH, fig_height))
     if data["occ"] is not None:
-        draw_map(data["occ"], ax)
+        draw_map(data["occ"], ax, flip)
 
-    draw_polylines(
-        data["paths"], ax, _C_CLIP, "VLM path", 2.2, PATH_ALPHA, linestyle="--"
-    )
+    draw_polylines(paths, ax, _C_CLIP, "Caminho (VLM)", 2.2, PATH_ALPHA, linestyle="--")
 
     if reference:
         r = np.array([(x, y) for _, x, y, _ in reference])
@@ -410,7 +532,8 @@ def build_report(bag_path, reference_path=None):
             lw=2.4,
             alpha=PATH_ALPHA,
             zorder=Z_REFERENCE,
-            label="Reference (Nav2)",
+            linestyle=":",
+            label="Caminho (Nav2)",
         )
 
     if actual:
@@ -422,7 +545,7 @@ def build_report(bag_path, reference_path=None):
             lw=2.4,
             alpha=PATH_ALPHA,
             zorder=Z_ACTUAL,
-            label="Actual path",
+            label="Caminho (Semântico)",
         )
 
     IN_PLACE_EPS = (
@@ -461,31 +584,7 @@ def build_report(bag_path, reference_path=None):
             ps = pose_at(actual, s0)
             near["arrive_yaw"] = ps[2] if ps is not None else None
 
-    if not clusters and actual:
-        clusters = [
-            {
-                "x": actual[0][1],
-                "y": actual[0][2],
-                "yaw": actual[0][3],
-                "arrive_yaw": actual[0][3],
-                "spin_yaw": None,
-            },
-            {
-                "x": actual[-1][1],
-                "y": actual[-1][2],
-                "yaw": actual[-1][3],
-                "arrive_yaw": actual[-1][3],
-                "spin_yaw": None,
-            },
-        ]
-
     for i, c in enumerate(clusters):
-        is_endpoint = i == 0 or i == len(clusters) - 1
-        marker_color = (
-            _C_START
-            if i == 0
-            else _C_END if i == len(clusters) - 1 else ROBOT_MARKER_COLOR
-        )
         arrive_yaw = c["arrive_yaw"] if c["arrive_yaw"] is not None else c["yaw"]
         if SHOW_ROBOT:
             _heading_line(c["x"], c["y"], arrive_yaw, ax, ROBOT_MARKER_COLOR, Z_HEADING)
@@ -497,16 +596,35 @@ def build_report(bag_path, reference_path=None):
                     c["x"], c["y"], c["spin_yaw"], ax, IN_PLACE_TURN_COLOR, Z_SPIN_HEADING
                 )
         draw_footprint(
-            c["x"], c["y"], ax, marker_color, label=str(i),
-            marker=SHOW_ROBOT or is_endpoint,
+            c["x"],
+            c["y"],
+            ax,
+            ROBOT_MARKER_COLOR,
+            label=str(i) if SHOW_CALL_NUMBERS else None,
+            marker=SHOW_ROBOT,
         )
 
-    box = (
-        f"Duration: {stats['mission_duration_s']:.1f} s\n"
-        f"VLM processing: {stats['vlm_processing_s']:.1f} s\n"
-        f"Movement: {stats['movement_s']:.1f} s\n"
-        f"VLM Hit Rate: {vlm_ok}/{vlm_total}"
-    )
+    if reference:
+        draw_endpoints(reference, ax, REFERENCE_ENDPOINT_MARKER)
+    if actual:
+        draw_endpoints(actual, ax, ENDPOINT_MARKER)
+
+    lines = [
+        f"Tempo de Cognição (Semântico): {stats['vlm_processing_s']:.1f} s",
+        f"Tempo de Movimento (Semântico): {stats['movement_s']:.1f} s",
+    ]
+    if reference:
+        lines.append(
+            f"Tempo de Movimento (Geométrico): {stats['geometric_movement_s']:.1f} s"
+        )
+    lines.append(f"Comprimento (Semântico): {stats['semantic_path_length_m']:.2f} m")
+    if reference:
+        lines.append(
+            f"Comprimento (Geométrico): {stats['geometric_path_length_m']:.2f} m"
+        )
+    if paths:
+        lines.append(f"Comprimento (VLM): {stats['vlm_path_length_m']:.2f} m")
+    box = "\n".join(lines)
     ax.text(
         0.02,
         0.98,
@@ -520,39 +638,32 @@ def build_report(bag_path, reference_path=None):
         bbox=dict(boxstyle="round", fc="white", ec="0.5", alpha=0.85),
     )
 
-    ax.set_xlabel(f"X [m] ({ref})")
-    ax.set_ylabel(f"Y [m] ({ref})")
+    # A flipped view is the frame rotated -90°, so the screen axes are the frame's (Y, -X).
+    ax.set_xlabel(f"{'Y' if flip else 'X'} [m] ({ref})")
+    ax.set_ylabel(f"{'-X' if flip else 'Y'} [m] ({ref})")
     ax.set_aspect("equal", adjustable="box")
+    if view:
+        ax.set_xlim(view[0], view[1])
+        ax.set_ylim(view[2], view[3])
     ax.grid(True, linestyle="--", alpha=0.5)
 
     handles, _ = ax.get_legend_handles_labels()
     handles += [
-        Line2D(
-            [0],
-            [0],
-            marker="o",
-            color="w",
-            markerfacecolor=_C_START,
-            markersize=10,
-            label="Start",
-        ),
-        Line2D(
-            [0],
-            [0],
-            marker="o",
-            color="w",
-            markerfacecolor=_C_END,
-            markersize=10,
-            label="End",
-        ),
+        _endpoint_handle(ENDPOINT_MARKER, _C_START, "Início (Semântico)"),
+        _endpoint_handle(ENDPOINT_MARKER, _C_END, "Fim (Semântico)"),
     ]
+    if reference:
+        handles += [
+            _endpoint_handle(REFERENCE_ENDPOINT_MARKER, _C_START, "Início (Geométrico)"),
+            _endpoint_handle(REFERENCE_ENDPOINT_MARKER, _C_END, "Fim (Geométrico)"),
+        ]
     ax.legend(handles=handles, loc="upper right")
     plt.tight_layout()
 
     mission_dir = os.path.dirname(os.path.abspath(bag_path.rstrip("/")))
     png = os.path.join(mission_dir, "mission_report.png")
     js = os.path.join(mission_dir, "mission_stats.json")
-    fig.savefig(png, dpi=150)
+    fig.savefig(png, dpi=150, bbox_inches="tight")
     plt.close(fig)
     with open(js, "w") as f:
         json.dump(stats, f, indent=2)
