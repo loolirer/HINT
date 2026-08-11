@@ -8,7 +8,6 @@ import matplotlib
 
 matplotlib.use("Agg")  # headless — we only save a PNG
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle
 from matplotlib.lines import Line2D
 
 import rclpy
@@ -17,7 +16,6 @@ from rosidl_runtime_py.utilities import get_message
 from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
 
 # action_msgs/msg/GoalStatus constants
-_STATUS_ACTIVE = (1, 2)  # ACCEPTED, EXECUTING
 _STATUS_TERMINAL = (4, 5, 6)  # SUCCEEDED, CANCELED, ABORTED
 
 _VLM_STATUS = (
@@ -30,26 +28,15 @@ _MOVE_STATUS = (
     "/path_projector_node/follow_visual_path/_action/status",
     "/spin/_action/status",
 )
-_PLAN_STATUS = "/path_planner/visual_reason/_action/status"  # footprint anchors
-_SPIN_STATUS = "/spin/_action/status"  # turn markers
+_PLAN_STATUS = "/path_planner/visual_reason/_action/status"  # one window per planned move
+_SPIN_STATUS = "/spin/_action/status"  # the BT sends one per cycle, 0 deg included
 
 _PATH_TOPIC = "/path_projector_node/path"
 
-_ROBOT_RADIUS = 0.20  # local_costmap robot_radius (footprint circle)
-
-PATH_ALPHA = 0.70  # Opacity of ALL displayed paths (actual + truncated), shared
-ROBOT_MARKER_SIZE = 90  # The marker inside each robot footprint
-ROBOT_LINE_WIDTH = 2.6  # Footprint circle border + heading-line width
-ROBOT_LINE_COLOR = "black"  # Footprint circle outline
-ROBOT_MARKER_COLOR = "black"
+PATH_ALPHA = 0.70  # Opacity of ALL displayed paths, shared
+ENDPOINT_MARKER_SIZE = 90  # start/end dot
 ENDPOINT_MARKER = "o"  # start/end marker on the driven path
 REFERENCE_ENDPOINT_MARKER = "s"  # start/end on the reference path — a square tells the two apart
-IN_PLACE_TURN_COLOR = "#c02060"
-ROBOT_FILL = False  # fill the footprint circle? (False = hollow outline)
-ROBOT_FILL_COLOR = "#8a8a8a"  # footprint circle fill — grey (used when ROBOT_FILL)
-SHOW_ROBOT = False  # draw the robot glyph (footprint circle + arrival/spin heading lines) at each
-#                    stop; False keeps only the numbered sequence labels
-SHOW_CALL_NUMBERS = False  # number each VLM plan-call stop with its 0-based sequence index
 
 LENGTH_STEP = 0.05  # m — hops shorter than this don't extend the measured length, so the pose
 #                     jitter every AMCL correction injects can't accumulate into phantom distance
@@ -64,18 +51,14 @@ FIG_WIDTH = 11.0  # in — figure width; the height follows the cropped view, so
 
 Z_REFERENCE = 3.4  # reference Nav2 GoToGoal path — below the actual path
 Z_ACTUAL = 3.5  # actual driven path
-Z_TRAJ = 3.6  # VLM (followed) path — dashed, above the actual path
-Z_HEADING = 3.7  # arrival heading line (above paths, below the circle)
-Z_SPIN_HEADING = 3.8  # in-place post-spin heading line
-Z_CIRCLE = 4.0  # footprint circle
-Z_MARKER = 6.0  # centre marker (always on top of the circle)
-Z_LABEL = 10.0  # stop-sequence-index label
+Z_TRAJ = 3.6  # VLM (planned) path — dashed, above the actual path
+Z_MARKER = 6.0  # start/end markers, on top of every path
 
 _C_ACTUAL = "#1f4fd8"  # blue — the path actually driven
 _C_REFERENCE = "#0a8f4f"  # green — the Nav2 GoToGoal reference (target) trajectory
 _C_CLIP = "#bd5b00"  # amber — vlm path
-_C_START = "green"  # start: centre marker of the first stopped position
-_C_END = "red"  # end: centre marker of the last stopped position
+_C_START = "green"  # start: first point of a trajectory
+_C_END = "red"  # end: last point of a trajectory
 
 
 def yaw_from_quat(q):
@@ -202,9 +185,12 @@ def read_bag(bag_path):
             for gs in arr.status_list:
                 gid = bytes(gs.goal_info.goal_id.uuid)
                 slot = win.setdefault(gid, [None, None, None])
-                if gs.status in _STATUS_ACTIVE and slot[0] is None:
+                if slot[0] is None:
+                    # First sight, whatever the status: a goal that accepts and finishes between
+                    # two publications is never observed active, and keying the window's start on
+                    # an active status would drop it from every duration and count.
                     slot[0] = t
-                elif gs.status in _STATUS_TERMINAL and slot[1] is None:
+                if gs.status in _STATUS_TERMINAL and slot[1] is None:
                     slot[1] = t
                     slot[2] = gs.status  # SUCCEEDED (4) vs CANCELED/ABORTED (5/6)
 
@@ -318,13 +304,6 @@ def moving_time(samples):
     return total
 
 
-def pose_at(actual, t_sec):
-    if not actual:
-        return None
-    arr = min(actual, key=lambda s: abs(_t_seconds(s[0]) - t_sec))
-    return arr[1], arr[2], arr[3]
-
-
 def draw_map(occ, ax, flip=False):
     res = occ.info.resolution
     w, h = occ.info.width, occ.info.height
@@ -340,64 +319,13 @@ def draw_map(occ, ax, flip=False):
     ax.imshow(disp, cmap="gray", origin="lower", zorder=1, extent=extent)
 
 
-def _heading_line(x, y, yaw, ax, color, zorder):
-    ax.plot(
-        [x, x + _ROBOT_RADIUS * math.cos(yaw)],
-        [y, y + _ROBOT_RADIUS * math.sin(yaw)],
-        color=color,
-        lw=ROBOT_LINE_WIDTH,
-        alpha=1.0,
-        zorder=zorder,
-        solid_capstyle="round",
-    )
-
-
-def _number_label(x, y, text, ax):
-    ax.text(
-        x,
-        y,
-        text,
-        fontsize=11,
-        color="black",
-        ha="center",
-        va="center",
-        zorder=Z_LABEL,
-        fontweight="bold",
-        bbox=dict(
-            boxstyle="circle,pad=0.35", fc="white", ec="black", lw=1.4, alpha=0.95
-        ),
-    )
-
-
-def draw_footprint(x, y, ax, marker_color=ROBOT_MARKER_COLOR, label=None, marker=True):
-    if SHOW_ROBOT:
-        ax.add_patch(
-            Circle(
-                (x, y),
-                _ROBOT_RADIUS,
-                facecolor=ROBOT_FILL_COLOR if ROBOT_FILL else "none",
-                edgecolor=ROBOT_LINE_COLOR,
-                lw=ROBOT_LINE_WIDTH,
-                alpha=1.0,
-                zorder=Z_CIRCLE,
-            )
-        )
-    if marker:
-        ax.scatter(
-            x, y, color=marker_color, s=ROBOT_MARKER_SIZE, marker="o", zorder=Z_MARKER
-        )
-    if label is not None:
-        label_y = y + _ROBOT_RADIUS + 0.10 if (SHOW_ROBOT or marker) else y
-        _number_label(x, label_y, label, ax)
-
-
 def draw_endpoints(samples, ax, marker):
     for sample, color in ((samples[0], _C_START), (samples[-1], _C_END)):
         ax.scatter(
             sample[1],
             sample[2],
             color=color,
-            s=ROBOT_MARKER_SIZE,
+            s=ENDPOINT_MARKER_SIZE,
             marker=marker,
             zorder=Z_MARKER,
         )
@@ -496,7 +424,7 @@ def build_report(bag_path, reference_path=None):
     move_time = _union_windows(status, _MOVE_STATUS)
     plan_wins = windows(status, _PLAN_STATUS)
     n_plans = len(plan_wins)
-    turn_wins = windows(status, _SPIN_STATUS)
+    spin_goals = len(windows(status, _SPIN_STATUS))
     vlm_ok, vlm_total = hit_rate(status, _VLM_STATUS)
 
     stats = {
@@ -513,7 +441,7 @@ def build_report(bag_path, reference_path=None):
         "vlm_successful_calls": vlm_ok,
         "vlm_total_calls": vlm_total,
         "plan_calls": n_plans,
-        "turns": len(turn_wins),
+        "spin_goals": spin_goals,  # Spin actions sent, not turns actually made
     }
 
     fig_height = FIG_WIDTH * (view[3] - view[2]) / (view[1] - view[0]) if view else FIG_WIDTH
@@ -548,62 +476,6 @@ def build_report(bag_path, reference_path=None):
             label="Caminho (Semântico)",
         )
 
-    IN_PLACE_EPS = (
-        _ROBOT_RADIUS / 2
-    )  # VLM calls within this of the cluster are the "same place"
-    vlm_calls = sorted(w for topic in _VLM_STATUS for w in windows(status, topic))
-    clusters = (
-        []
-    )  # each: {"x", "y", "yaw" (first-call heading), "arrive_yaw", "spin_yaw"}
-    for t0, _t1 in vlm_calls:
-        p = pose_at(actual, t0)
-        if p is None:
-            continue
-        x, y, yaw = p
-        if (
-            clusters
-            and math.hypot(x - clusters[-1]["x"], y - clusters[-1]["y"]) < IN_PLACE_EPS
-        ):
-            continue  # same stop — no new footprint, no sequence advance
-        clusters.append(
-            {"x": x, "y": y, "yaw": yaw, "arrive_yaw": None, "spin_yaw": None}
-        )
-
-    for s0, s1 in sorted(turn_wins):
-        pe = pose_at(actual, s1)
-        if pe is None:
-            continue
-        ex, ey, eyaw = pe
-        near = min(
-            clusters, key=lambda c: math.hypot(ex - c["x"], ey - c["y"]), default=None
-        )
-        if near is None or math.hypot(ex - near["x"], ey - near["y"]) >= IN_PLACE_EPS:
-            continue
-        near["spin_yaw"] = eyaw
-        if near["arrive_yaw"] is None:
-            ps = pose_at(actual, s0)
-            near["arrive_yaw"] = ps[2] if ps is not None else None
-
-    for i, c in enumerate(clusters):
-        arrive_yaw = c["arrive_yaw"] if c["arrive_yaw"] is not None else c["yaw"]
-        if SHOW_ROBOT:
-            _heading_line(c["x"], c["y"], arrive_yaw, ax, ROBOT_MARKER_COLOR, Z_HEADING)
-
-            if c["spin_yaw"] is not None and abs(
-                wrap(c["spin_yaw"] - arrive_yaw)
-            ) > math.radians(5):
-                _heading_line(
-                    c["x"], c["y"], c["spin_yaw"], ax, IN_PLACE_TURN_COLOR, Z_SPIN_HEADING
-                )
-        draw_footprint(
-            c["x"],
-            c["y"],
-            ax,
-            ROBOT_MARKER_COLOR,
-            label=str(i) if SHOW_CALL_NUMBERS else None,
-            marker=SHOW_ROBOT,
-        )
-
     if reference:
         draw_endpoints(reference, ax, REFERENCE_ENDPOINT_MARKER)
     if actual:
@@ -622,8 +494,6 @@ def build_report(bag_path, reference_path=None):
         lines.append(
             f"Comprimento (Geométrico): {stats['geometric_path_length_m']:.2f} m"
         )
-    if paths:
-        lines.append(f"Comprimento (VLM): {stats['vlm_path_length_m']:.2f} m")
     box = "\n".join(lines)
     ax.text(
         0.02,
