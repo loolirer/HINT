@@ -107,9 +107,9 @@ class PathProjectorNode(Node):
         self.declare_parameter("tf_buffer_time", 90.0)
         self.declare_parameter("tf_lookup_timeout", 0.1)
         self.declare_parameter("server_timeout", 10.0)   # s
-        self.declare_parameter("control_rate", 20.0)     # Hz
+        self.declare_parameter("control_rate", 10.0)     # Hz
         self.declare_parameter("path_resolution", 0.05)
-        self.declare_parameter("path_range", 5.0)         # m — max straight-line distance from the robot
+        self.declare_parameter("path_range", 2.0)         # m — max straight-line distance from the robot
 
         self._fp_client = ActionClient(
             self, FollowPath, str(self._p("follow_path_action")),
