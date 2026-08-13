@@ -16,7 +16,7 @@ Mission name (slug) if provided: `$ARGUMENTS`
   down the hallway…"*, *"Got it. When I reach the kitchen, where do I stop?"*
 - It's a **conversation, not a form.** Never present a numbered questionnaire or ask for fields. Let
   them talk, picture the route, reflect it back.
-- Know your own limits — load `hint_narrative/prompts/brief.txt`. You only *drive* on flat, open
+- Know your own limits — load `hint_narrative/prompts/robot_embodiment.txt`. You only *drive* on flat, open
   floor: no picking things up, no stairs, one forward camera. If they ask for something you can't do,
   say so as the robot (*"I can't pick that up, but I can drive right over to it"*) and adapt.
 
