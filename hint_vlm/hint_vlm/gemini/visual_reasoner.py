@@ -37,8 +37,10 @@ class ReasonerNode(GeminiActionNode):
             else:
                 prompt = (
                     f"{goal.prompt}\n\n"
-                    "Respond with JSON only — no prose, no markdown fencing — "
-                    f"matching this shape:\n{goal.schema}"
+                    "Respond with JSON only — no prose, no markdown fencing. Reply with an "
+                    "instance that validates against the JSON Schema below: the data it "
+                    "describes, filled in with my own answer. Never reply with the schema "
+                    f"itself.\n{goal.schema}"
                 )
                 json_output = (mode == "json")
 
@@ -74,6 +76,12 @@ class ReasonerNode(GeminiActionNode):
                 return self._abort(
                     goal_handle, f"Unparseable JSON response: {raw!r}"
                 )
+            missing = self._missing_required(data, goal.schema)
+            if missing:
+                return self._abort(
+                    goal_handle,
+                    f"Response is missing required field(s) {missing}: {raw!r}",
+                )
             response = json.dumps(data)
         else:
             response = raw.strip()
@@ -86,6 +94,23 @@ class ReasonerNode(GeminiActionNode):
             result.stamp = goal.images[-1].header.stamp
         goal_handle.succeed()
         return result
+
+    @staticmethod
+    def _missing_required(data, schema_str):
+        """JSON mode enforces valid JSON but not structure, and a JSON Schema is itself valid
+        JSON — so a reply can parse cleanly and still be the schema echoed back rather than an
+        answer. Reports the `required` keys the reply doesn't carry; a schema that names none
+        (a loose shape hint) enforces nothing."""
+        try:
+            schema = json.loads(schema_str)
+        except (json.JSONDecodeError, TypeError):
+            return []
+        if not isinstance(schema, dict) or not isinstance(data, dict):
+            return []
+        required = schema.get("required")
+        if not isinstance(required, list):
+            return []
+        return [key for key in required if key not in data]
 
     @staticmethod
     def _as_response_schema(schema_str):

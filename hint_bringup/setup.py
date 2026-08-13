@@ -13,7 +13,6 @@ setup(
         ("share/" + package_name, ["package.xml"]),
         ("share/" + package_name + "/launch", glob("launch/*.launch.py")),
         ("share/" + package_name + "/viz",    glob("viz/*.rviz")),
-        ("share/" + package_name + "/config", glob("config/*.yaml") + glob("config/*.lua")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,

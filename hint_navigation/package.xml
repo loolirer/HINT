@@ -23,12 +23,17 @@
   <exec_depend>hint_interfaces</exec_depend>
   <exec_depend>nav2_msgs</exec_depend>
 
-  <!-- Nav2 stack brought up by launch/nav2.launch.py (mapless FollowPath + MPPI). -->
   <exec_depend>nav2_controller</exec_depend>
   <exec_depend>nav2_mppi_controller</exec_depend>
   <exec_depend>nav2_costmap_2d</exec_depend>
   <exec_depend>nav2_behaviors</exec_depend>
   <exec_depend>nav2_lifecycle_manager</exec_depend>
+
+  <exec_depend>teleop_twist_joy</exec_depend>
+  <exec_depend>turtlebot3_cartographer</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_map_server</exec_depend>
+  <exec_depend>nav2_amcl</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

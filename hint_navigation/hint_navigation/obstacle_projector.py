@@ -28,7 +28,6 @@ class ObstacleProjectorNode(Node):
         CameraRig.declare(self)
 
         self.declare_parameter("bev_range", 3.0)        # m forward coverage
-        self.declare_parameter("bev_half_width", 1.5)   # m lateral each side
         self.declare_parameter("bev_resolution", 0.05)  # m per cell (~ costmap res)
         self.declare_parameter("obstacle_frame", "base_link")
         self.declare_parameter("mask_topic", "/camera/ground")
@@ -45,10 +44,13 @@ class ObstacleProjectorNode(Node):
     def _p(self, name):
         return self.get_parameter(name).value
 
-    def _bev_geom(self):
+    def _bev_geom(self, rig):
         res = max(1e-3, float(self._p("bev_resolution")))
         rng = float(self._p("bev_range"))
-        half = float(self._p("bev_half_width"))
+        half = math.tan(math.radians(rig.hfov_deg) / 2.0) * (
+            math.cos(rig.tilt) * (rng - rig.forward_offset)
+            + math.sin(rig.tilt) * rig.height
+        )
         return (max(2, int(round(rng / res))), max(2, int(round(2 * half / res))),
                 res, rng, half)
 
@@ -56,7 +58,7 @@ class ObstacleProjectorNode(Node):
         return (rng - x) / res - 0.5, (half - y) / res - 0.5  # (row, col)
 
     def _mask_to_obstacle_cells(self, rig, ground, w, h):
-        rows, cols, res, rng, half = self._bev_geom()
+        rows, cols, res, rng, half = self._bev_geom(rig)
         x_off = rig.forward_offset
         x_near = max(0.25 * rng, x_off + 0.2)
         gx = np.array([[rng, half], [rng, -half], [x_near, half], [x_near, -half]])

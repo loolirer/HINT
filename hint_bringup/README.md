@@ -8,8 +8,10 @@ in one place. It has no nodes of its own; `launch/bringup.launch.py` starts the 
 | Path | Purpose |
 |---|---|
 | `launch/bringup.launch.py` | Main bringup (see below) |
-| `config/teleop.yaml` | `teleop_twist_joy` parameters (axes, scales, enable button) |
-| `viz/hint.rviz` | RViz2 layout (ego view — `base_link` fixed frame) |
+| `viz/hint.rviz` | RViz2 layout (`map` fixed frame, so the saved map + localized run render) |
+
+The `teleop_twist_joy` parameters live in `hint_navigation/config/teleop.yaml` (teleop is
+also used by that package's mapping phase); bringup loads them from there.
 
 ## What it launches
 
@@ -18,7 +20,7 @@ in one place. It has no nodes of its own; `launch/bringup.launch.py` starts the 
 - `obstacle_projector` (`hint_navigation`) — ground mask → obstacle `PointCloud2` on `/obstacles`
 - `path_projector` (`hint_navigation`) — grounds VLM waypoints → `odom` path → Nav2 `follow_path`
 - `visual_debug` (`hint_navigation`) — composes one `/debug` image (mask overlay + projector paths + BT state)
-- the mapless Nav2 stack via `hint_navigation/launch/nav2.launch.py`: `controller_server` (FollowPath + MPPI), `behavior_server` (Spin), `nav2_lifecycle_manager`
+- the mapless Nav2 semantic stack via `hint_navigation/launch/nav2_semantic.launch.py` (passed the `region` launch arg): `controller_server` (FollowPath + MPPI), `behavior_server` (Spin), `nav2_lifecycle_manager`, and — as part of that Nav2 stack — **localization** (`localization.launch.py`): `map_server` + `amcl` on the saved map (`hint_navigation/maps/<region>/map.yaml`). Localization is a **Nav2** concern owned by the stack, not by this bringup; it publishes `map→odom` so the mission's actual trajectory lands in the map frame — it is **localization only**, HINT still drives with the mapless stack. (SLAM is no longer run here; mapping moved to `hint_navigation`'s reference phase — see its README.)
 - `visual_reasoner` (`hint_vlm`) — generic text/vision → JSON reasoner, launched **twice**: as `visual_reasoner` (the narrative director, temp 0) and as `path_planner` (the ground-path planner, temp 1.0). Both serve `VisualReason`; the prompt + schema that make one a director and the other a planner are owned by `hint_narrative`
 - `narrative_navigation` (`hint_narrative`) — semantic mission planner
 - `behavior_server` (`hint_behavior`; runtime node `hint_behavior_server`) — the BT executor running `RunMission`
@@ -38,17 +40,29 @@ call **and** the planner call before `path_projector` grounds it, so its stamp c
 ~2× a single call old — the TF buffer must be large enough that the stamped `odom ← base_link`
 lookup still resolves. Bumping `vlm_timeout` can't silently outrun the buffer.
 
+`path_projector`'s `path_range` (max straight-line distance from the robot the grounded path is
+clipped to) is set here too, default `5.0` m. It is kept **independent** of `obstacle_projector`'s
+`bev_range` (the sensed horizon): you can set them equal, but the default leaves `path_range` a
+little beyond `bev_range` so a move can reach just past the current obstacle window. See
+`hint_navigation`'s `path_projector` docs for what the clip guards against.
+
 ## Usage
 
 ```bash
 colcon build --symlink-install
 source install/setup.bash
-ros2 launch hint_bringup bringup.launch.py
+ros2 launch hint_bringup bringup.launch.py region:=<region>
 ```
+
+`region` (default `default`) selects the saved map at `hint_navigation/maps/<region>/map.yaml`
+that `map_server` + AMCL localize against — it must exist first (build it in the reference phase;
+see `hint_navigation`'s README). After launch, set the robot's initial pose in RViz (2D Pose
+Estimate) so AMCL converges.
 
 ## Teleop configuration
 
-`config/teleop.yaml` is passed to `teleop_twist_joy` at launch. Current mapping (Xbox controller):
+`hint_navigation/config/teleop.yaml` is passed to `teleop_twist_joy` at launch (the same file
+the mapping phase uses). Current mapping (Xbox controller):
 
 | Parameter | Value | Effect |
 |---|---|---|
@@ -62,8 +76,10 @@ ros2 launch hint_bringup bringup.launch.py
 
 ## RViz2 layout
 
-`viz/hint.rviz` opens in an **ego view** (`base_link` fixed frame). Useful displays for this
-stack: `/local_costmap/costmap`, `/obstacles` (PointCloud2, Decay Time 0),
-`/path_projector_node/path`, and — with MPPI `visualize` on —
-`/controller_server/trajectories` + `/controller_server/transformed_global_plan`. Adjust and
-save; the file is used on the next launch.
+`viz/hint.rviz` opens with the **`map` fixed frame** so the saved map (`/map`, a **transient-local**
+topic — the Map display must use `Durability Policy: Transient Local` or it silently receives
+nothing) and the AMCL-localized run render in the map frame. Set the initial pose (2D Pose Estimate)
+so `map→odom` publishes and the odom-frame displays line up. Useful displays for this stack:
+`/local_costmap/costmap`, `/obstacles` (PointCloud2, Decay Time 0), `/path_projector_node/path`,
+and — with MPPI `visualize` on — `/controller_server/trajectories` +
+`/controller_server/transformed_global_plan`. Adjust and save; the file is used on the next launch.

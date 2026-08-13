@@ -17,7 +17,12 @@ path in `odom`, and the costmap is a short-lived rolling window.
 | `path_projector` (node) | Exposes the `hint_interfaces/FollowVisualPath` action the BT calls, grounds the VLM's normalized waypoints into a metric `odom` `nav_msgs/Path`, and drives Nav2's `follow_path` (MPPI) |
 | `obstacle_projector` (node) | Streams `hint_perception`'s ground mask (`/camera/ground`) → obstacle `PointCloud2` (`/obstacles`) for the local costmap, via the ground-plane BEV homography |
 | `visual_debug` (node) | Composes one `/debug` image from the system's real outputs (mask overlay + projector paths + BT state) |
-| `launch/nav2.launch.py` + `config/nav2_local.yaml` | Brings up the mapless Nav2 stack: `controller_server` (FollowPath + MPPI, rolling local costmap) + `behavior_server` (Spin) + `nav2_lifecycle_manager` |
+| `launch/nav2_semantic.launch.py` + `config/nav2_common.yaml` + `config/nav2_semantic.yaml` | Brings up the mapless Nav2 semantic stack: `controller_server` (FollowPath + MPPI, rolling local costmap) + `behavior_server` (Spin) + `nav2_lifecycle_manager`, and includes the **shared `localization.launch.py`** (map_server + AMCL) on the saved map via a `region`/`map` arg — the same localization the geometric stack uses. The MPPI controller comes from the shared `nav2_common.yaml`; the mapless local costmap (`/obstacles`) + Spin from `nav2_semantic.yaml`. This is what `hint_bringup` includes for the HINT run |
+| `launch/mapping.launch.py` | **Reference phase step 1** — Cartographer SLAM + occupancy grid (stock `turtlebot3_cartographer` config) + `teleop_twist_joy` (you drive the region). Self-contained: a background `map_autosaver` re-saves `maps/<region>/map` every `save_interval` s (default 5) while the graph is alive, so a valid map is always on disk — no second terminal. Ctrl+C stops; the last autosave is your map |
+| `config/teleop.yaml` | `teleop_twist_joy` parameters (axes, scales, enable button) — used by both `mapping.launch.py` here and `hint_bringup`'s bringup |
+| `launch/nav2_geometric.launch.py` + `config/nav2_common.yaml` + `config/nav2_geometric.yaml` | **Reference phase step 2** — a lean Nav2 stack composed directly (A* planner + MPPI controller + behavior_server + bt_navigator under a private lifecycle manager; no `nav2_bringup` bringup, no phantom nodes) plus the **shared `localization.launch.py`** (the same map_server + AMCL layer the HINT/semantic run uses), on the saved map, to drive an operator-clicked GoToGoal and record a ground-truth trajectory. Loads the **shared MPPI controller from `nav2_common.yaml`** (same as HINT) then `nav2_geometric.yaml` on top (global costmap + A* + long-distance overrides), so a HINT run and its reference differ only by the navigation approach (geometric A* plan here vs the VLM path in HINT). Routes Nav2 through the robot's `twist_mux` (`/cmd_vel → /cmd_vel_nav2`, priority 50) and adds `teleop_twist_joy` (`/cmd_vel → /cmd_vel_teleop`, priority 100) so the operator can nudge the robot to seed/converge AMCL and override or e-stop mid-goal |
+| `launch/localization.launch.py` + `config/nav2_localization.yaml` | **Shared localization** — AMCL + map_server on the saved map (one amcl config), on a `region`/`map` arg. Publishes `map→odom` so a run's trajectory lands in the map frame. Included by **both** nav2 stacks — `nav2_semantic.launch.py` (the HINT run — not used for navigation, HINT drives with the mapless stack) **and** `nav2_geometric.launch.py` (the reference GoToGoal) — so both localize identically on the same map. Localization is a **Nav2** concern owned by each stack, never a top-level `hint_bringup` include |
+| `maps/<region>/` | Saved occupancy map (`map.pgm` + `map.yaml`) and the reference trajectory bag (`reference.bag`) per environment |
 
 ```bash
 colcon build --symlink-install --packages-select hint_interfaces hint_navigation
@@ -54,14 +59,7 @@ chain stays action-based.
 
 Per goal it:
 
-0. **Ground-clips** the VLM pixel path: each normalized waypoint is tested against
-   `hint_perception`'s binary ground mask (`/camera/ground`, matched to the goal's frame
-   stamp); the **leading run** of on-ground waypoints is kept, and the **first waypoint that
-   leaves the ground is dropped along with every waypoint after it** — so the robot never
-   follows a path that runs off the floor. No fresh mask → the path passes through
-   unclipped. If nothing survives (all off-ground, or the VLM sent none), the goal succeeds
-   as a no-op so the BT's Spin still runs.
-1. **Grounds** the surviving waypoints (`x`/`y ∈ [-1, 1]`, nearest-first) onto the ground plane
+1. **Grounds** the VLM waypoints (`x`/`y ∈ [-1, 1]`, nearest-first) onto the ground plane
    in `base_link` via `CameraRig.pixels_to_ground`, then re-expresses them in **`odom`** using
    the robot pose at the goal's stamp — looked up from **TF** (`odom → base_link` at that
    stamp), the same transform the costmap and MPPI use. So the path is anchored once in the
@@ -71,6 +69,16 @@ Per goal it:
    calls), the TF buffer's `cache_time` (`tf_buffer_time`) must cover that latency, or the
    stamped lookup falls out of the buffer and the goal aborts. Prepends the robot's own pose
    so the path starts at the robot; each pose's yaw is the path tangent.
+1. **Distance-clips** the grounded path where it first leaves a circle of radius `path_range` m
+   around the robot, interpolating the segment–circle crossing so the endpoint stays clean
+   (`path_range ≤ 0` disables it). The bound is **straight-line distance from the robot**, not
+   path length, because that is what projection error tracks: `pixels_to_ground` error grows with
+   range (the horizon clamp sends a near-horizon waypoint on legitimately open floor to a wildly
+   far, unreliable point), so a radial cutoff bounds *how unreliable* the farthest retained point
+   can be. It is not obstacle safety — the costmap + MPPI handle that — but a guardrail against
+   that projection blow-up and against a long move committing the robot to a big uncorrected drive
+   past the sensed window (against the re-plan-every-cycle cadence). Independent of
+   `obstacle_projector`'s `bev_range` (the sensed horizon); default `5.0` sits a little beyond it.
 1. **Smooths + densifies** the grounded points before handing them to MPPI: a **centripetal
    Catmull-Rom** spline is fit through the (few, far-apart) waypoints and resampled at
    `path_resolution` m (default `0.05`, ≈ costmap resolution). MPPI's path critics
@@ -85,13 +93,14 @@ Per goal it:
 3. Handles the **turn-only** move: an empty `waypoints` goal succeeds immediately (nothing to
    follow), so the BT's `SpinAction` that runs next performs the rotation.
 
-It also republishes two grounded paths (re-stamped, at control rate) purely for RViz —
-re-stamping is what lets them render correctly in an **ego (`base_link`) view** instead of
-freezing at plan time:
-- **`~/path`** — the ground-clipped path actually handed to MPPI.
-- **`~/path_raw`** — the **full VLM path** as grounded (never followed), so you can
-  see what the model intended vs what survived the clip. When nothing is clipped the two
-  coincide.
+It also republishes the grounded path purely for RViz, from a **`control_rate` timer that runs
+continuously** — not only while a follow is active, but through the end-of-move Spin and idle,
+until the next path replaces it. Each tick re-stamps the path to *now*, which is what lets RViz
+transform it against the **live** `odom → base_link` and render it correctly in an **ego
+(`base_link`) view**. (Republishing only inside the follow action froze the stamp the moment the
+follow ended, so during the Spin RViz used a stale transform and the path rotated rigidly with
+the robot instead of staying put in the world.)
+- **`~/path`** — the VLM-projected path, both handed to MPPI and republished for RViz.
 
 ### Interfaces
 
@@ -99,10 +108,8 @@ freezing at plan time:
 |---|---|---|
 | `~/follow_visual_path` | `hint_interfaces/FollowVisualPath` | Action server (BT-facing) |
 | `follow_path` (see `follow_path_action`) | `nav2_msgs/FollowPath` | Action client (Nav2 controller) |
-| `/camera/ground` (see `mask_topic`) | `sensor_msgs/Image` (`mono8`) | Sub — ground mask for clipping the pixel path |
 | `/tf`, `/tf_static` | `tf2_msgs/TFMessage` | Sub (TF listener) — `path_frame ← robot_frame` at the goal stamp, the world anchor for grounding |
-| `~/path` | `nav_msgs/Path` (latched) | Pub — the ground-clipped path handed to MPPI, for RViz |
-| `~/path_raw` | `nav_msgs/Path` (latched) | Pub — the full VLM path grounded (debug; never followed) |
+| `~/path` | `nav_msgs/Path` (latched) | Pub — the VLM-projected path handed to MPPI, for RViz |
 
 ### Key parameters
 
@@ -116,7 +123,10 @@ this package; injected by bringup — see [camera_rig](#camera_rig-camera_rigpy)
 + planner calls, so bringup derives it from `vlm_timeout`) and `tf_lookup_timeout` (`0.1` s —
 brief blocking wait on the stamped lookup); `server_timeout`, `control_rate`;
 `path_resolution` (`0.05` m — Catmull-Rom smooth-densification spacing for the path handed to
-MPPI; live-adjustable).
+MPPI; live-adjustable); `path_range` (`5.0` m — max straight-line distance from the robot before the
+grounded path is distance-clipped; `≤ 0` disables it. Deliberately independent of
+`obstacle_projector`'s `bev_range`, though bringup can set them equal; the `5.0` default sits a
+little beyond the sensed horizon).
 
 ## obstacle_projector
 
@@ -151,10 +161,16 @@ Rig (see [camera_rig](#camera_rig-camera_rigpy)), plus the BEV grid geometry:
 | Parameter | Default | Effect |
 |---|---|---|
 | `bev_range` | `3.0` | Forward extent of the BEV window (m) |
-| `bev_half_width` | `1.5` | Lateral extent each side (m) |
 | `bev_resolution` | `0.05` | BEV cell size (m) — one obstacle point per cell (~ costmap resolution) |
 | `obstacle_frame` | `base_link` | Frame the obstacle cloud is published in |
 | `mask_topic` | `/camera/ground` | Ground-mask input topic |
+
+The window's **lateral** half-width is not a parameter — it is derived from the rig
+(`camera_hfov_deg`, `camera_tilt`, `camera_height`, `camera_forward_offset`) and `bev_range` as
+the lateral extent the camera actually sees at the far range. Widening it independently would only
+add columns the camera never images (masked out as unknown); narrowing it would discard obstacle
+pixels at the far sides. So `bev_range` is the single forward horizon, and the sides follow from
+the FOV.
 
 ## visual_debug
 
@@ -167,9 +183,9 @@ because it needs the rig to re-project the projector's odom paths onto the frame
 Layers (each toggled by a `show_*` param):
 1. **Backdrop** — the camera frame.
 2. **Ground overlay** — the binary mask tinted (muted green = ground, coral = not), alpha-blended.
-3. **Paths** — the projector's `~/path_raw` (full VLM intent) and `~/path` (followed, ground-clipped),
-   each transformed `odom → current base_link` (via `CameraRig.ground_to_pixels`) and projected
-   onto the frame, so they track as the robot moves. Amber = intent, teal = followed.
+3. **Path** — the projector's `~/path` (the VLM-projected path), transformed
+   `odom → current base_link` (via `CameraRig.ground_to_pixels`) and projected onto the frame,
+   so it tracks as the robot moves. Teal.
 4. **BT state** — the mission tree's live state (`/hint_behavior_server/state`) as text, top-left.
 
 ```bash
@@ -183,8 +199,7 @@ ros2 param set /visual_debug_node show_mask false        # toggle any layer live
 |---|---|---|
 | `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | Sub — backdrop, drives the render |
 | `/camera/ground` (see `mask_topic`) | `sensor_msgs/Image` (`mono8`) | Sub — ground overlay |
-| `/path_projector_node/path` | `nav_msgs/Path` | Sub — followed (clipped) path |
-| `/path_projector_node/path_raw` | `nav_msgs/Path` | Sub — full VLM-intent path |
+| `/path_projector_node/path` | `nav_msgs/Path` | Sub — the VLM-projected path |
 | `/odom` | `nav_msgs/Odometry` | Sub — pose for re-projecting the paths |
 | `/hint_behavior_server/state` | `std_msgs/String` | Sub — mission-tree state text |
 | `/debug` | `sensor_msgs/Image` (`bgr8`) | Pub — the single composited debug image |
@@ -192,25 +207,111 @@ ros2 param set /visual_debug_node show_mask false        # toggle any layer live
 ### Parameters
 
 Rig (see [camera_rig](#camera_rig-camera_rigpy)); layer toggles `show_mask` / `show_path` /
-`show_path_raw` / `show_bt_state` (all default true); `overlay_alpha` (0.35); and a `*_topic`
+`show_bt_state` (all default true); `overlay_alpha` (0.35); and a `*_topic`
 name per input (`mask_topic` defaults to `/camera/ground`).
 
-## Nav2 config (`config/nav2_local.yaml`)
+## Nav2 config (`config/nav2_common.yaml` + `nav2_semantic.yaml` / `nav2_geometric.yaml`)
 
-- **`controller_server`** — `FollowPath` = `nav2_mppi_controller::MPPIController`
+The **`controller_server`** MPPI controller and its kinematic envelope live once in
+**`nav2_common.yaml`** and are loaded by *both* the mapless HINT stack and the geometric reference,
+so the two drive with identical dynamics (the fairness invariant for the mission test protocol).
+Each stack then loads its own file **after** common (last file wins per parameter):
+**`nav2_semantic.yaml`** (mapless HINT) and **`nav2_geometric.yaml`** (reference — see
+[reference phase](#reference-phase--localization-the-mission-test-protocol)).
+
+`nav2_semantic.launch.py` loads `[nav2_common.yaml, nav2_semantic.yaml]`:
+
+- **`controller_server`** — from common: `FollowPath` = `nav2_mppi_controller::MPPIController`
   (`motion_model: DiffDrive`, forward-only `vx_min: 0`, Waffle-Pi limits). `SimpleProgressChecker`
   (the unreachable-goal backstop → `follow_path` ABORTs) and `SimpleGoalChecker` (positional
   arrival; yaw effectively ignored). `enable_stamped_cmd_vel: true` (TB3 consumes stamped
-  `/cmd_vel`). `FollowPath.visualize` publishes MPPI's `trajectories` /
-  `transformed_global_plan` markers for RViz.
-- **`local_costmap`** — rolling, `global_frame: odom`, `robot_base_frame: base_link`,
-  `obstacle_layer` fed by `/obstacles` (`PointCloud2`) + `inflation_layer` (the keep-out
-  margin). No static/voxel layer, no global costmap.
-- **`behavior_server`** — the `spin` behavior only, mapless (its `global_*` costmap topics
-  point at the local costmap). Drives the BT's end-of-move / scan turn via the `/spin` action.
+  `/cmd_vel`).
+- **`local_costmap`** — the rolling window MPPI plans against (`global_frame: odom`, `width/height:
+  6`, `inflation_layer`) is **shared in common**, identical in both stacks; `nav2_semantic.yaml`
+  adds only the `obstacle_layer` source — the `/obstacles` `PointCloud2` from `obstacle_projector`
+  (the reference adds `/scan` instead). No static/voxel layer, no global costmap on the HINT side.
+- **`behavior_server`** — from semantic: the `spin` behavior only, mapless (its `global_*` costmap
+  topics point at the local costmap). Drives the BT's end-of-move / scan turn via the `/spin` action.
 
-Lifecycle order in `nav2.launch.py` is `["controller_server", "behavior_server"]` (controller
-first, so its local costmap is up before the Spin server subscribes to it).
+Lifecycle order in `nav2_semantic.launch.py` is `["controller_server", "behavior_server"]` (controller
+first, so its local costmap is up before the Spin server subscribes to it). The stack also includes
+`localization.launch.py` (its own `map_server` + `amcl` under `lifecycle_manager_localization`) on
+the `region`/`map` arg, so localization ships with the Nav2 stack rather than the HINT bringup.
+
+## Reference phase & localization (the mission test protocol)
+
+A HINT mission is evaluated by **replicating a Nav2 ground-truth run**: map the region, drive an
+arbitrary Nav2 GoToGoal on it (the *reference*), then describe that route semantically and have
+HINT reproduce it — and finally overlay HINT's actual path against the reference on the same map
+(`hint_narrative`'s `mission_report --reference`). This is a **two-session** protocol so the
+reference and HINT trajectories share one fixed map frame: both localize with AMCL on the **same
+saved map**.
+
+Maps live in `hint_navigation/maps/<region>/` (one `<region>` per physical environment; several
+missions can reuse a map). The `map`/`region` launch args resolve there by default; the reference
+bag is a sibling (`reference.bag`).
+
+**Step 1 — build + save the map** (Cartographer SLAM). Drive the region with teleop; a background
+autosaver writes `maps/<region>/map` every `save_interval` s (default 5) so the map is always on
+disk (self-contained — no second terminal). Ctrl+C to stop — the last autosave is your map, so
+pause driving a moment before quitting:
+
+```bash
+ros2 launch hint_navigation mapping.launch.py region:=<region>
+```
+
+**Step 2 — record the reference GoToGoal** (full Nav2 on the saved map):
+
+```bash
+ros2 launch hint_navigation nav2_geometric.launch.py region:=<region>
+# autostart is on — the whole Nav2 stack activates itself. Do NOT click the RViz panel's
+#   "Startup" (it re-triggers lifecycle transitions and aborts the bringup). Just:
+# 1. set the initial pose (2D Pose Estimate) FIRST — until then there is no map→odom TF,
+#    so RViz shows "map frame doesn't exist" and the global costmap can't come up.
+# 2. nudge the robot with teleop so AMCL converges (the scan snaps onto the walls);
+#    verify with: ros2 run tf2_ros tf2_echo map odom
+# 3. use the "Nav2 Goal" tool to click a goal — it drives there (teleop overrides Nav2
+#    for a nudge or e-stop).
+ros2 bag record --storage mcap -o hint_navigation/maps/<region>/reference.bag /tf /tf_static /odom
+```
+
+> `nav2_geometric.launch.py` composes only the nodes a Waffle Pi go-to-goal needs, each under a
+> private `nav2_lifecycle_manager` (mirroring `nav2_semantic.launch.py`), rather than pulling in
+> `nav2_bringup`'s do-everything `bringup_launch.py`. That launch hardcodes a lifecycle list with
+> nodes the robot doesn't have (`collision_monitor`, `docking_server`, `route_server`,
+> `waypoint_follower`); any of them lacking params fails to configure and aborts the **entire**
+> bringup. The lean set is **localization** — included from the shared `localization.launch.py`
+> (`map_server` + `amcl` → `lifecycle_manager_localization`, the same layer the HINT run uses) —
+> and **navigation** (`controller_server` MPPI + `planner_server` A* + `behavior_server` recoveries +
+> `bt_navigator` → `lifecycle_manager_navigation`) — no smoother/velocity_smoother (the default
+> go-to-goal BT uses neither) and no phantom nodes. The MPPI controller and kinematic envelope come
+> from the **shared `nav2_common.yaml`** (loaded before `nav2_geometric.yaml`), the same file the
+> HINT stack loads, so the reference and a HINT run drive with identical dynamics and differ only in
+> how the path is produced (A* on the map here; VLM waypoints in HINT), in local sensing (lidar
+> `/scan` here; camera `/obstacles` in HINT), and in `nav2_geometric.yaml`'s long-distance overrides
+> (looser progress checker, longer MPPI `prune_distance`, wider local window). `controller_server` and `behavior_server` remap
+> `cmd_vel → cmd_vel_nav2` (one hop, no chain) so it reaches the robot's `twist_mux` (priority 50);
+> teleop is `cmd_vel_teleop` (priority 100). Both lifecycle managers `autostart`, so the stack
+> self-activates — don't click the RViz panel's Startup.
+
+**Step 3 — run HINT** and compare: `hint_bringup`'s bringup includes `nav2_semantic.launch.py`,
+which itself brings up `localization.launch.py` (AMCL + map_server on the same
+`maps/<region>/map.yaml`, selected by its `region` arg), so the mission bag records the actual
+trajectory in the map frame. Then:
+
+```bash
+ros2 run hint_narrative mission_report missions/<name>/mission.bag \
+  --reference hint_navigation/maps/<region>/reference.bag
+```
+
+Requires (beyond the mapless-stack deps): `turtlebot3_cartographer`, `nav2_map_server`,
+`nav2_amcl`, `nav2_planner`, `nav2_bt_navigator` (and `nav2_bringup` only for the RViz config).
+`nav2_geometric.launch.py` composes these nodes directly under private lifecycle managers (it does
+**not** use `nav2_bringup`'s `bringup_launch.py`); `localization.launch.py` likewise composes
+`map_server` + `amcl` + their lifecycle manager directly, setting `map_server`'s `yaml_filename`
+as a plain parameter — `nav2_bringup`'s `localization_launch.py` was dropped because its
+`{yaml_filename: <map>}` override silently didn't apply in this nav2 build, leaving `map_server`
+with no map loaded.
 
 ## Notes
 

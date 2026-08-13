@@ -1,6 +1,5 @@
 import math
 import threading
-from collections import deque
 
 import numpy as np
 import rclpy
@@ -13,10 +12,8 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from rclpy.time import Time as RclpyTime
 
-from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path
-from sensor_msgs.msg import Image
 
 from tf2_ros import Buffer, TransformException, TransformListener
 
@@ -35,6 +32,24 @@ def _yaw_from_quat(q):
 
 def _quat_from_yaw(yaw):
     return (0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0))  # (x, y, z, w)
+
+
+def _clip_range(pts, max_range):
+    pts = np.asarray(pts, dtype=np.float64)
+    if len(pts) < 2 or max_range <= 0.0:
+        return pts
+    origin = pts[0]  # the robot; index 0 is its prepended pose
+    dist = np.hypot(*(pts - origin).T)
+    outside = np.nonzero(dist > max_range)[0]
+    if len(outside) == 0:
+        return pts
+    # First point beyond the radius; interpolate the segment–circle crossing before it.
+    i = int(outside[0])
+    a, d, f = pts[i - 1], pts[i] - pts[i - 1], pts[i - 1] - origin
+    A, B, C = d @ d, 2.0 * (f @ d), f @ f - max_range * max_range
+    t = (-B + math.sqrt(max(B * B - 4.0 * A * C, 0.0))) / (2.0 * A)
+    cross = a + t * d
+    return np.vstack([pts[:i], cross])
 
 
 def _smooth_resample(pts, spacing, samples_per_seg=24):
@@ -91,11 +106,10 @@ class PathProjectorNode(Node):
         self.declare_parameter("robot_frame", "base_link")
         self.declare_parameter("tf_buffer_time", 90.0)
         self.declare_parameter("tf_lookup_timeout", 0.1)
-        self.declare_parameter("mask_topic", "/camera/ground")
-        self.declare_parameter("mask_timeout", 5.0)      # s
         self.declare_parameter("server_timeout", 10.0)   # s
-        self.declare_parameter("control_rate", 20.0)     # Hz
+        self.declare_parameter("control_rate", 10.0)     # Hz
         self.declare_parameter("path_resolution", 0.05)
+        self.declare_parameter("path_range", 2.0)         # m — max straight-line distance from the robot
 
         self._fp_client = ActionClient(
             self, FollowPath, str(self._p("follow_path_action")),
@@ -107,17 +121,15 @@ class PathProjectorNode(Node):
         )
         self._tf_listener = TransformListener(self._tf_buffer, self)
 
-        self._bridge = CvBridge()
-        self._mask_buf = deque(maxlen=30)  # (stamp seconds, mask HxW uint8)
-        self._last_mask_recv = None        # local receipt clock, for staleness
-        self._mask_lock = threading.Lock()
-        self.create_subscription(
-            Image, str(self._p("mask_topic")), self._mask_cb, 5
-        )
-
         _latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        self._path_pub = self.create_publisher(Path, "~/path", _latched)        # driven path
-        self._raw_path_pub = self.create_publisher(Path, "~/path_raw", _latched)  # full VLM intent
+        self._path_pub = self.create_publisher(Path, "~/path", _latched)
+
+        self._last_path = None
+        self.create_timer(
+            1.0 / max(1.0, float(self._p("control_rate"))),
+            self._republish_path,
+            callback_group=ReentrantCallbackGroup(),
+        )
 
         self._goal_lock = threading.Lock()
 
@@ -174,53 +186,6 @@ class PathProjectorNode(Node):
         t = tf.transform.translation
         return (t.x, t.y, _yaw_from_quat(tf.transform.rotation))
 
-    def _mask_cb(self, msg):
-        try:
-            mask = self._bridge.imgmsg_to_cv2(msg, desired_encoding="mono8")
-        except Exception as e:
-            self.get_logger().warn(f"Ground mask decode failed: {e}",
-                                   throttle_duration_sec=5.0)
-            return
-        t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        with self._mask_lock:
-            self._mask_buf.append((t, mask))
-            self._last_mask_recv = self.get_clock().now().nanoseconds * 1e-9
-
-    def _mask_at(self, stamp):
-        now = self.get_clock().now().nanoseconds * 1e-9
-        with self._mask_lock:
-            if not self._mask_buf or self._last_mask_recv is None:
-                return None
-            if (now - self._last_mask_recv) > float(self._p("mask_timeout")):
-                return None
-            buf = list(self._mask_buf)
-        if stamp is None or (stamp.sec == 0 and stamp.nanosec == 0):
-            return buf[-1][1]
-        key = stamp.sec + stamp.nanosec * 1e-9
-        return min(buf, key=lambda e: abs(e[0] - key))[1]
-
-    def _clip_to_ground(self, waypoints, stamp):
-        mask = self._mask_at(stamp)
-        if mask is None:
-            self.get_logger().warn(
-                "No fresh ground mask — following the VLM path unclipped.",
-                throttle_duration_sec=5.0)
-            return list(waypoints)
-        h, w = mask.shape[:2]
-        kept = []
-        for p in waypoints:
-            u = min(max(int(round((p.x + 1.0) * 0.5 * (w - 1))), 0), w - 1)
-            v = min(max(int(round((p.y + 1.0) * 0.5 * (h - 1))), 0), h - 1)
-            if mask[v, u] > 0:
-                kept.append(p)
-            else:                         # off ground -> drop this and all subsequent
-                break
-        if len(kept) < len(waypoints):
-            self.get_logger().info(
-                f"Ground-clip: kept {len(kept)}/{len(waypoints)} waypoints "
-                "(rest fell off the ground mask).")
-        return kept
-
     def _build_path(self, waypoints, stamp):
         if not waypoints:
             return None
@@ -253,6 +218,7 @@ class PathProjectorNode(Node):
         if len(odom_pts) < 2:
             return None
 
+        odom_pts = _clip_range(odom_pts, float(self._p("path_range")))
         odom_pts = _smooth_resample(odom_pts, float(self._p("path_resolution")))
 
         path = Path()
@@ -277,25 +243,18 @@ class PathProjectorNode(Node):
     def _run(self, goal_handle):
         goal = goal_handle.request
 
-        raw_path = self._build_path(goal.waypoints, goal.stamp)
-        wps = self._clip_to_ground(goal.waypoints, goal.stamp)
-
-        # No path left (turn-only move, or the whole path fell off the ground): succeed so
-        # the BT's SpinAction still runs. A grounding failure with waypoints present aborts below.
-        if not wps:
-            if raw_path is not None:
-                self._publish_path(raw_path, self._raw_path_pub)
+        # Empty waypoints = turn-only move: succeed so the BT's SpinAction still runs.
+        if not goal.waypoints:
             result = FollowVisualPath.Result()
-            result.message = "No drivable path (turn-only or clipped off-ground)"
+            result.message = "No drivable path (turn-only move)"
             goal_handle.succeed()
             return result
 
-        path = raw_path if len(wps) == len(goal.waypoints) else self._build_path(wps, goal.stamp)
+        path = self._build_path(goal.waypoints, goal.stamp)
         if path is None:
             return self._abort(goal_handle, "Could not ground path (no pose at the frame "
                                             "stamp — TF unavailable / tf_buffer_time too small)")
-        self._publish_path(path, self._path_pub)
-        self._publish_path(raw_path, self._raw_path_pub)
+        self._last_path = path
 
         if not self._fp_client.wait_for_server(
                 timeout_sec=float(self._p("server_timeout"))):
@@ -314,8 +273,6 @@ class PathProjectorNode(Node):
 
         send_future = self._fp_client.send_goal_async(fp_goal)
         while rclpy.ok() and not send_future.done():
-            self._publish_path(path, self._path_pub)
-            self._publish_path(raw_path, self._raw_path_pub)
             self._publish_feedback(goal_handle, "IDLE")
             rate.sleep()
         fp_handle = send_future.result()
@@ -328,10 +285,6 @@ class PathProjectorNode(Node):
             if goal_handle.is_cancel_requested and not canceling:
                 canceling = True
                 fp_handle.cancel_goal_async()
-            # Re-stamp each tick so RViz transforms the path against the current
-            # odom->base_link and it slides with the robot instead of freezing.
-            self._publish_path(path, self._path_pub)
-            self._publish_path(raw_path, self._raw_path_pub)
             self._publish_feedback(goal_handle, "WAITING" if canceling else "RUNNING")
             rate.sleep()
 
@@ -363,9 +316,14 @@ class PathProjectorNode(Node):
         self.get_logger().warn(f"FollowVisualPath aborted: {message}")
         return result
 
-    def _publish_path(self, path, pub):
+    def _republish_path(self):
+        path = self._last_path
+        if path is not None:
+            self._publish_path(path)
+
+    def _publish_path(self, path):
         path.header.stamp = self.get_clock().now().to_msg()
-        pub.publish(path)
+        self._path_pub.publish(path)
 
     def _publish_feedback(self, goal_handle, state):
         fb = FollowVisualPath.Feedback()

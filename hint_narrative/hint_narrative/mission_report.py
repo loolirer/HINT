@@ -8,7 +8,6 @@ import matplotlib
 
 matplotlib.use("Agg")  # headless — we only save a PNG
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle
 from matplotlib.lines import Line2D
 
 import rclpy
@@ -17,7 +16,6 @@ from rosidl_runtime_py.utilities import get_message
 from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
 
 # action_msgs/msg/GoalStatus constants
-_STATUS_ACTIVE = (1, 2)  # ACCEPTED, EXECUTING
 _STATUS_TERMINAL = (4, 5, 6)  # SUCCEEDED, CANCELED, ABORTED
 
 _VLM_STATUS = (
@@ -30,34 +28,37 @@ _MOVE_STATUS = (
     "/path_projector_node/follow_visual_path/_action/status",
     "/spin/_action/status",
 )
-_PLAN_STATUS = "/path_planner/visual_reason/_action/status"  # footprint anchors
-_SPIN_STATUS = "/spin/_action/status"  # turn markers
+_PLAN_STATUS = "/path_planner/visual_reason/_action/status"  # one window per planned move
+_SPIN_STATUS = "/spin/_action/status"  # the BT sends one per cycle, 0 deg included
 
 _PATH_TOPIC = "/path_projector_node/path"
 
-_ROBOT_RADIUS = 0.20  # local_costmap robot_radius (footprint circle)
+PATH_ALPHA = 0.70  # Opacity of ALL displayed paths, shared
+ENDPOINT_MARKER_SIZE = 90  # start/end dot
+ENDPOINT_MARKER = "o"  # start/end marker on the driven path
+REFERENCE_ENDPOINT_MARKER = "s"  # start/end on the reference path — a square tells the two apart
 
-PATH_ALPHA = 0.70  # Opacity of ALL displayed paths (actual + truncated), shared
-ROBOT_MARKER_SIZE = 90  # The marker inside each robot footprint
-ROBOT_LINE_WIDTH = 2.6  # Footprint circle border + heading-line width
-ROBOT_LINE_COLOR = "black"  # Footprint circle outline
-ROBOT_MARKER_COLOR = "black"
-IN_PLACE_TURN_COLOR = "#c02060"
-ROBOT_FILL = False  # fill the footprint circle? (False = hollow outline)
-ROBOT_FILL_COLOR = "#8a8a8a"  # footprint circle fill — grey (used when ROBOT_FILL)
+LENGTH_STEP = 0.05  # m — hops shorter than this don't extend the measured length, so the pose
+#                     jitter every AMCL correction injects can't accumulate into phantom distance
+MOVING_WINDOW = 0.25  # s — window a trajectory's speed is measured over when deciding "moving"
+MOVING_SPEED_EPS = 0.02  # m/s — slower than this over MOVING_WINDOW counts as stopped
+MOVING_YAW_RATE_EPS = 0.05  # rad/s — an in-place turn is still movement
 
+VIEW_PADDING = 1.0  # m of clear margin kept around the outermost trajectory point — the knob that
+#                     crops a map far larger than the run down to the run itself
+VIEW_MAX_ASPECT = 2.0  # widest the crop may run (width:height); a slimmer one grows its short side
+FIG_WIDTH = 11.0  # in — figure width; the height follows the cropped view, so the PNG is landscape
+
+Z_REFERENCE = 3.4  # reference Nav2 GoToGoal path — below the actual path
 Z_ACTUAL = 3.5  # actual driven path
-Z_TRAJ = 3.6  # VLM (followed) path — dashed, above the actual path
-Z_HEADING = 3.7  # arrival heading line (above paths, below the circle)
-Z_SPIN_HEADING = 3.8  # in-place post-spin heading line
-Z_CIRCLE = 4.0  # footprint circle
-Z_MARKER = 6.0  # centre marker (always on top of the circle)
-Z_LABEL = 10.0  # stop-sequence-index label
+Z_TRAJ = 3.6  # VLM (planned) path — dashed, above the actual path
+Z_MARKER = 6.0  # start/end markers, on top of every path
 
 _C_ACTUAL = "#1f4fd8"  # blue — the path actually driven
+_C_REFERENCE = "#0a8f4f"  # green — the Nav2 GoToGoal reference (target) trajectory
 _C_CLIP = "#bd5b00"  # amber — vlm path
-_C_START = "green"  # start: centre marker of the first stopped position
-_C_END = "red"  # end: centre marker of the last stopped position
+_C_START = "green"  # start: first point of a trajectory
+_C_END = "red"  # end: last point of a trajectory
 
 
 def yaw_from_quat(q):
@@ -184,9 +185,12 @@ def read_bag(bag_path):
             for gs in arr.status_list:
                 gid = bytes(gs.goal_info.goal_id.uuid)
                 slot = win.setdefault(gid, [None, None, None])
-                if gs.status in _STATUS_ACTIVE and slot[0] is None:
+                if slot[0] is None:
+                    # First sight, whatever the status: a goal that accepts and finishes between
+                    # two publications is never observed active, and keying the window's start on
+                    # an active status would drop it from every duration and count.
                     slot[0] = t
-                elif gs.status in _STATUS_TERMINAL and slot[1] is None:
+                if gs.status in _STATUS_TERMINAL and slot[1] is None:
                     slot[1] = t
                     slot[2] = gs.status  # SUCCEEDED (4) vs CANCELED/ABORTED (5/6)
 
@@ -262,14 +266,45 @@ def _union_windows(status, topics):
     return float(total)
 
 
-def pose_at(actual, t_sec):
-    if not actual:
-        return None
-    arr = min(actual, key=lambda s: abs(_t_seconds(s[0]) - t_sec))
-    return arr[1], arr[2], arr[3]
+def _xy(samples):
+    return [(x, y) for _, x, y, _ in samples]
 
 
-def draw_map(occ, ax):
+def path_length(points, step=0.0):
+    """Arc length of an (x, y) polyline; `step` drops sub-`step` hops before they accumulate."""
+    total, anchor = 0.0, None
+    for p in points:
+        if anchor is None:
+            anchor = p
+            continue
+        d = math.hypot(p[0] - anchor[0], p[1] - anchor[1])
+        if d >= step:
+            total += d
+            anchor = p
+    return total
+
+
+def moving_time(samples):
+    """Seconds a trajectory was actually in motion — derived from the poses themselves, since a
+    reference bag carries no action topics to take windows from."""
+    total, anchor = 0.0, None
+    for s in samples:
+        t = _t_seconds(s[0])
+        if anchor is None:
+            anchor = (t, s[1], s[2], s[3])
+            continue
+        dt = t - anchor[0]
+        if dt < MOVING_WINDOW:
+            continue
+        moved = math.hypot(s[1] - anchor[1], s[2] - anchor[2])
+        turned = abs(wrap(s[3] - anchor[3]))
+        if moved / dt >= MOVING_SPEED_EPS or turned / dt >= MOVING_YAW_RATE_EPS:
+            total += dt
+        anchor = (t, s[1], s[2], s[3])
+    return total
+
+
+def draw_map(occ, ax, flip=False):
     res = occ.info.resolution
     w, h = occ.info.width, occ.info.height
     ox, oy = occ.info.origin.position.x, occ.info.origin.position.y
@@ -277,61 +312,29 @@ def draw_map(occ, ax):
     disp = np.full((h, w), 200, dtype=np.uint8)  # unknown -> mid gray
     known = grid >= 0
     disp[known] = (255 - grid[known] * 2.55).astype(np.uint8)
-    ax.imshow(
-        disp,
-        cmap="gray",
-        origin="lower",
-        zorder=1,
-        extent=[ox, ox + w * res, oy, oy + h * res],
-    )
+    extent = [ox, ox + w * res, oy, oy + h * res]
+    if flip:
+        disp = np.rot90(disp)
+        extent = [extent[2], extent[3], -extent[1], -extent[0]]
+    ax.imshow(disp, cmap="gray", origin="lower", zorder=1, extent=extent)
 
 
-def _heading_line(x, y, yaw, ax, color, zorder):
-    ax.plot(
-        [x, x + _ROBOT_RADIUS * math.cos(yaw)],
-        [y, y + _ROBOT_RADIUS * math.sin(yaw)],
-        color=color,
-        lw=ROBOT_LINE_WIDTH,
-        alpha=1.0,
-        zorder=zorder,
-        solid_capstyle="round",
-    )
-
-
-def _number_label(x, y, text, ax):
-    ax.text(
-        x,
-        y,
-        text,
-        fontsize=11,
-        color="black",
-        ha="center",
-        va="center",
-        zorder=Z_LABEL,
-        fontweight="bold",
-        bbox=dict(
-            boxstyle="circle,pad=0.35", fc="white", ec="black", lw=1.4, alpha=0.95
-        ),
-    )
-
-
-def draw_footprint(x, y, ax, marker_color=ROBOT_MARKER_COLOR, label=None):
-    ax.add_patch(
-        Circle(
-            (x, y),
-            _ROBOT_RADIUS,
-            facecolor=ROBOT_FILL_COLOR if ROBOT_FILL else "none",
-            edgecolor=ROBOT_LINE_COLOR,
-            lw=ROBOT_LINE_WIDTH,
-            alpha=1.0,
-            zorder=Z_CIRCLE,
+def draw_endpoints(samples, ax, marker):
+    for sample, color in ((samples[0], _C_START), (samples[-1], _C_END)):
+        ax.scatter(
+            sample[1],
+            sample[2],
+            color=color,
+            s=ENDPOINT_MARKER_SIZE,
+            marker=marker,
+            zorder=Z_MARKER,
         )
+
+
+def _endpoint_handle(marker, color, label):
+    return Line2D(
+        [0], [0], marker=marker, color="w", markerfacecolor=color, markersize=10, label=label
     )
-    ax.scatter(
-        x, y, color=marker_color, s=ROBOT_MARKER_SIZE, marker="o", zorder=Z_MARKER
-    )
-    if label is not None:
-        _number_label(x, y + _ROBOT_RADIUS + 0.10, label, ax)
 
 
 def draw_polylines(polys, ax, color, label, lw, alpha, linestyle="-"):
@@ -353,7 +356,46 @@ def draw_polylines(polys, ax, color, label, lw, alpha, linestyle="-"):
         first = False
 
 
-def build_report(bag_path):
+def _flip_point(x, y):
+    return y, -x
+
+
+def _flip_samples(samples):
+    return [(t, y, -x, wrap(yaw - math.pi / 2)) for t, x, y, yaw in samples]
+
+
+def _flip_polys(polys):
+    return [[_flip_point(x, y) for x, y in poly] for poly in polys]
+
+
+def _trajectory_points(actual, reference, polys):
+    pts = [(x, y) for _, x, y, _ in actual]
+    pts += [(x, y) for _, x, y, _ in (reference or ())]
+    for poly in polys:
+        pts.extend(poly)
+    return pts
+
+
+def _is_portrait(points):
+    xs, ys = [p[0] for p in points], [p[1] for p in points]
+    return (max(ys) - min(ys)) > (max(xs) - min(xs))
+
+
+def _view_box(points):
+    """Crop window: VIEW_PADDING around the outermost points, never slimmer than VIEW_MAX_ASPECT."""
+    xs, ys = [p[0] for p in points], [p[1] for p in points]
+    x0, x1 = min(xs) - VIEW_PADDING, max(xs) + VIEW_PADDING
+    y0, y1 = min(ys) - VIEW_PADDING, max(ys) + VIEW_PADDING
+    if x1 - x0 < 1.0:  # a run that never left one spot still needs a window to draw in
+        cx = (x0 + x1) / 2.0
+        x0, x1 = cx - 0.5, cx + 0.5
+    grow = ((x1 - x0) / VIEW_MAX_ASPECT - (y1 - y0)) / 2.0
+    if grow > 0.0:
+        y0, y1 = y0 - grow, y1 + grow
+    return x0, x1, y0, y1
+
+
+def build_report(bag_path, reference_path=None):
     if not rclpy.ok():
         rclpy.init()
 
@@ -362,13 +404,27 @@ def build_report(bag_path):
     actual = data["actual"]
     status = data["status"]
 
+    # The reference (Nav2 GoToGoal) run localizes AMCL on the SAME saved map as the HINT run,
+    # so its trajectory shares this report's map frame and overlays directly.
+    reference = read_bag(reference_path)["actual"] if reference_path else None
+    paths = data["paths"]
+
+    points = _trajectory_points(actual, reference, paths)
+    flip = bool(points) and _is_portrait(points)
+    if flip:
+        actual = _flip_samples(actual)
+        reference = _flip_samples(reference) if reference else reference
+        paths = _flip_polys(paths)
+        points = [_flip_point(x, y) for x, y in points]
+    view = _view_box(points) if points else None
+
     t_min, t_max = data["span"]
     duration = _t_seconds(t_max - t_min) if t_min is not None else 0.0
     vlm_time = _union_windows(status, (_ADVANCE_STATUS,))
     move_time = _union_windows(status, _MOVE_STATUS)
     plan_wins = windows(status, _PLAN_STATUS)
     n_plans = len(plan_wins)
-    turn_wins = windows(status, _SPIN_STATUS)
+    spin_goals = len(windows(status, _SPIN_STATUS))
     vlm_ok, vlm_total = hit_rate(status, _VLM_STATUS)
 
     stats = {
@@ -376,19 +432,37 @@ def build_report(bag_path):
         "mission_duration_s": round(duration, 2),
         "vlm_processing_s": round(vlm_time, 2),
         "movement_s": round(move_time, 2),
+        "geometric_movement_s": round(moving_time(reference), 2) if reference else None,
+        "semantic_path_length_m": round(path_length(_xy(actual), LENGTH_STEP), 2),
+        "geometric_path_length_m": (
+            round(path_length(_xy(reference), LENGTH_STEP), 2) if reference else None
+        ),
+        "vlm_path_length_m": round(sum(path_length(p) for p in paths), 2),
         "vlm_successful_calls": vlm_ok,
         "vlm_total_calls": vlm_total,
         "plan_calls": n_plans,
-        "turns": len(turn_wins),
+        "spin_goals": spin_goals,  # Spin actions sent, not turns actually made
     }
 
-    fig, ax = plt.subplots(figsize=(11, 11))
+    fig_height = FIG_WIDTH * (view[3] - view[2]) / (view[1] - view[0]) if view else FIG_WIDTH
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH, fig_height))
     if data["occ"] is not None:
-        draw_map(data["occ"], ax)
+        draw_map(data["occ"], ax, flip)
 
-    draw_polylines(
-        data["paths"], ax, _C_CLIP, "VLM path", 2.2, PATH_ALPHA, linestyle="--"
-    )
+    draw_polylines(paths, ax, _C_CLIP, "Caminho (VLM)", 2.2, PATH_ALPHA, linestyle="--")
+
+    if reference:
+        r = np.array([(x, y) for _, x, y, _ in reference])
+        ax.plot(
+            r[:, 0],
+            r[:, 1],
+            color=_C_REFERENCE,
+            lw=2.4,
+            alpha=PATH_ALPHA,
+            zorder=Z_REFERENCE,
+            linestyle=":",
+            label="Caminho (Nav2)",
+        )
 
     if actual:
         a = np.array([(x, y) for _, x, y, _ in actual])
@@ -399,86 +473,28 @@ def build_report(bag_path):
             lw=2.4,
             alpha=PATH_ALPHA,
             zorder=Z_ACTUAL,
-            label="Actual path",
+            label="Caminho (Semântico)",
         )
 
-    IN_PLACE_EPS = (
-        _ROBOT_RADIUS / 2
-    )  # VLM calls within this of the cluster are the "same place"
-    vlm_calls = sorted(w for topic in _VLM_STATUS for w in windows(status, topic))
-    clusters = (
-        []
-    )  # each: {"x", "y", "yaw" (first-call heading), "arrive_yaw", "spin_yaw"}
-    for t0, _t1 in vlm_calls:
-        p = pose_at(actual, t0)
-        if p is None:
-            continue
-        x, y, yaw = p
-        if (
-            clusters
-            and math.hypot(x - clusters[-1]["x"], y - clusters[-1]["y"]) < IN_PLACE_EPS
-        ):
-            continue  # same stop — no new footprint, no sequence advance
-        clusters.append(
-            {"x": x, "y": y, "yaw": yaw, "arrive_yaw": None, "spin_yaw": None}
+    if reference:
+        draw_endpoints(reference, ax, REFERENCE_ENDPOINT_MARKER)
+    if actual:
+        draw_endpoints(actual, ax, ENDPOINT_MARKER)
+
+    lines = [
+        f"Tempo de Cognição (Semântico): {stats['vlm_processing_s']:.1f} s",
+        f"Tempo de Movimento (Semântico): {stats['movement_s']:.1f} s",
+    ]
+    if reference:
+        lines.append(
+            f"Tempo de Movimento (Geométrico): {stats['geometric_movement_s']:.1f} s"
         )
-
-    for s0, s1 in sorted(turn_wins):
-        pe = pose_at(actual, s1)
-        if pe is None:
-            continue
-        ex, ey, eyaw = pe
-        near = min(
-            clusters, key=lambda c: math.hypot(ex - c["x"], ey - c["y"]), default=None
+    lines.append(f"Comprimento (Semântico): {stats['semantic_path_length_m']:.2f} m")
+    if reference:
+        lines.append(
+            f"Comprimento (Geométrico): {stats['geometric_path_length_m']:.2f} m"
         )
-        if near is None or math.hypot(ex - near["x"], ey - near["y"]) >= IN_PLACE_EPS:
-            continue
-        near["spin_yaw"] = eyaw
-        if near["arrive_yaw"] is None:
-            ps = pose_at(actual, s0)
-            near["arrive_yaw"] = ps[2] if ps is not None else None
-
-    if not clusters and actual:
-        clusters = [
-            {
-                "x": actual[0][1],
-                "y": actual[0][2],
-                "yaw": actual[0][3],
-                "arrive_yaw": actual[0][3],
-                "spin_yaw": None,
-            },
-            {
-                "x": actual[-1][1],
-                "y": actual[-1][2],
-                "yaw": actual[-1][3],
-                "arrive_yaw": actual[-1][3],
-                "spin_yaw": None,
-            },
-        ]
-
-    for i, c in enumerate(clusters):
-        marker_color = (
-            _C_START
-            if i == 0
-            else _C_END if i == len(clusters) - 1 else ROBOT_MARKER_COLOR
-        )
-        arrive_yaw = c["arrive_yaw"] if c["arrive_yaw"] is not None else c["yaw"]
-        _heading_line(c["x"], c["y"], arrive_yaw, ax, ROBOT_MARKER_COLOR, Z_HEADING)
-
-        if c["spin_yaw"] is not None and abs(
-            wrap(c["spin_yaw"] - arrive_yaw)
-        ) > math.radians(5):
-            _heading_line(
-                c["x"], c["y"], c["spin_yaw"], ax, IN_PLACE_TURN_COLOR, Z_SPIN_HEADING
-            )
-        draw_footprint(c["x"], c["y"], ax, marker_color, label=str(i))
-
-    box = (
-        f"Duration: {stats['mission_duration_s']:.1f} s\n"
-        f"VLM processing: {stats['vlm_processing_s']:.1f} s\n"
-        f"Movement: {stats['movement_s']:.1f} s\n"
-        f"VLM Hit Rate: {vlm_ok}/{vlm_total}"
-    )
+    box = "\n".join(lines)
     ax.text(
         0.02,
         0.98,
@@ -492,39 +508,32 @@ def build_report(bag_path):
         bbox=dict(boxstyle="round", fc="white", ec="0.5", alpha=0.85),
     )
 
-    ax.set_xlabel(f"X [m] ({ref})")
-    ax.set_ylabel(f"Y [m] ({ref})")
+    # A flipped view is the frame rotated -90°, so the screen axes are the frame's (Y, -X).
+    ax.set_xlabel(f"{'Y' if flip else 'X'} [m] ({ref})")
+    ax.set_ylabel(f"{'-X' if flip else 'Y'} [m] ({ref})")
     ax.set_aspect("equal", adjustable="box")
+    if view:
+        ax.set_xlim(view[0], view[1])
+        ax.set_ylim(view[2], view[3])
     ax.grid(True, linestyle="--", alpha=0.5)
 
     handles, _ = ax.get_legend_handles_labels()
     handles += [
-        Line2D(
-            [0],
-            [0],
-            marker="o",
-            color="w",
-            markerfacecolor=_C_START,
-            markersize=10,
-            label="Start",
-        ),
-        Line2D(
-            [0],
-            [0],
-            marker="o",
-            color="w",
-            markerfacecolor=_C_END,
-            markersize=10,
-            label="End",
-        ),
+        _endpoint_handle(ENDPOINT_MARKER, _C_START, "Início (Semântico)"),
+        _endpoint_handle(ENDPOINT_MARKER, _C_END, "Fim (Semântico)"),
     ]
+    if reference:
+        handles += [
+            _endpoint_handle(REFERENCE_ENDPOINT_MARKER, _C_START, "Início (Geométrico)"),
+            _endpoint_handle(REFERENCE_ENDPOINT_MARKER, _C_END, "Fim (Geométrico)"),
+        ]
     ax.legend(handles=handles, loc="upper right")
     plt.tight_layout()
 
     mission_dir = os.path.dirname(os.path.abspath(bag_path.rstrip("/")))
     png = os.path.join(mission_dir, "mission_report.png")
     js = os.path.join(mission_dir, "mission_stats.json")
-    fig.savefig(png, dpi=150)
+    fig.savefig(png, dpi=150, bbox_inches="tight")
     plt.close(fig)
     with open(js, "w") as f:
         json.dump(stats, f, indent=2)
@@ -539,10 +548,18 @@ def main():
         description="Compile a mission's MCAP rosbag into a path report + stats."
     )
     parser.add_argument("bag_path", help="Path to the mission.bag directory")
+    parser.add_argument(
+        "--reference",
+        default=None,
+        help="Optional reference Nav2 GoToGoal bag to overlay as the target trajectory "
+             "(sibling of the map, e.g. hint_navigation/maps/<region>/reference.bag)",
+    )
     args = parser.parse_args()
     if not os.path.isdir(args.bag_path):
         parser.error(f"Not a bag directory: {args.bag_path}")
-    build_report(args.bag_path)
+    if args.reference is not None and not os.path.isdir(args.reference):
+        parser.error(f"Not a bag directory: {args.reference}")
+    build_report(args.bag_path, args.reference)
 
 
 if __name__ == "__main__":

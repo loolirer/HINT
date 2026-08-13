@@ -115,7 +115,16 @@ narrative-heavy compile you may want a non-zero `thinking_budget`. Plus:
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `structured_output` | `json` | Output control when a `schema` is requested, live-adjustable. **`json`** = JSON mode (valid JSON, shape hinted in the prompt, reasoning freedom kept — the default). **`off`** = unconstrained (best quality; a reply can be unparseable → the call fails). **`schema`** = constrained decoding to the schema when it's real JSON (enum-enforced `environment_action`), but the hard grammar can cost reasoning quality. Invalid `environment_action` values are clamped to `stay` by the node regardless, so `json` is safe |
+| `structured_output` | `json` | Output control when a `schema` is requested, live-adjustable. **`json`** = JSON mode (valid JSON, shape hinted in the prompt, reasoning freedom kept — the node default). **`off`** = unconstrained (best quality; a reply can be unparseable → the call fails). **`schema`** = constrained decoding to the schema when it's real JSON, making its `required` fields binding at the decoder; the hard grammar can cost spatial-reasoning quality, so bringup uses it for the **director** and leaves the **planner** on `json` |
+
+> **A schema hint can be echoed back.** Under `json` the schema is pasted into the prompt, and a JSON
+> Schema is itself valid JSON — so the model can satisfy "reply with JSON" by returning *the schema*,
+> which parses cleanly yet carries none of the requested fields. The prompt says to reply with an
+> instance and never the schema, and any reply missing the schema's `required` keys is **aborted**
+> (`Response is missing required field(s) …`) so the caller's retry path runs rather than a
+> structurally wrong document reaching it. A `schema` with no `required` list (a loose shape hint)
+> enforces nothing, as before. `schema` mode avoids the failure outright — the decoder cannot emit
+> anything but an instance.
 
 ### Test
 

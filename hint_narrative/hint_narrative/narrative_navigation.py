@@ -278,7 +278,10 @@ class MissionPlannerNode(Node):
             return result
 
         self._narrative = {
-            "done": str(data.get("done", "")),
+            # `done` is the accumulated memory — a reply that omits it keeps what we already had,
+            # so no single compile can erase the mission's history. `next` is per-cycle and is
+            # taken as given (an empty one only reaches here once the mission is over).
+            "done": str(data.get("done", "")) or self._narrative.get("done", ""),
             "next": str(data.get("next", "")),
         }
         self._failed = bool(data.get("mission_failed", False))
@@ -363,7 +366,7 @@ class MissionPlannerNode(Node):
         attempt = 0
         while True:
             data = self._call_reasoner(prompt, NARRATIVE_SCHEMA, images, goal_handle)
-            if isinstance(data, dict):
+            if self._usable_compile(data):
                 return data
             if goal_handle is not None and goal_handle.is_cancel_requested:
                 return None
@@ -410,6 +413,31 @@ class MissionPlannerNode(Node):
             )
             if not self._interruptible_sleep(delay, goal_handle):
                 return None
+
+    def _usable_compile(self, data):
+        """`NARRATIVE_SCHEMA`'s `required` is only a prompt hint under `structured_output: json`,
+        so a reply can parse yet carry no narrative. Committing one erases the memory it was meant
+        to extend, so it counts as a failed call and goes down the retry-and-wait path instead."""
+        if not isinstance(data, dict):
+            return False
+        done = str(data.get("done", "")).strip()
+        instruction = str(data.get("next", "")).strip()
+        over = bool(data.get("mission_complete", False)) or bool(
+            data.get("mission_failed", False)
+        )
+        if not over and not instruction:
+            self.get_logger().warn(
+                "Compile carried no next instruction and did not end the mission — "
+                "rejecting (planning on it would drive an empty instruction)."
+            )
+            return False
+        if not done and self._narrative.get("done", "").strip():
+            self.get_logger().warn(
+                "Compile dropped the narrative it was handed — rejecting (committing it "
+                "would wipe what the mission has done so far)."
+            )
+            return False
+        return True
 
     def _narrative_text(self):
         return self._narrative.get("done", "") or "(nothing yet)"

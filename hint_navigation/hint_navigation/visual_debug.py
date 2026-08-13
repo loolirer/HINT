@@ -21,8 +21,7 @@ _LATCHED = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 _C_GROUND = (120, 190, 120)      # soft green
 _C_NONGROUND = (110, 110, 215)   # soft coral
-_C_PATH_RAW = (70, 170, 235)     # amber — the full VLM intent
-_C_PATH = (190, 190, 90)         # teal — the followed (clipped) path
+_C_PATH = (190, 190, 90)         # teal — the VLM-projected path
 _C_TEXT = (240, 240, 240)
 
 
@@ -40,27 +39,22 @@ class VisualDebugNode(Node):
         CameraRig.declare(self)
         self.declare_parameter("show_mask", True)
         self.declare_parameter("show_path", True)
-        self.declare_parameter("show_path_raw", True)
         self.declare_parameter("show_bt_state", True)
         self.declare_parameter("overlay_alpha", 0.35)
         self.declare_parameter("image_topic", "/camera/image_raw/compressed")
         self.declare_parameter("mask_topic", "/camera/ground")
         self.declare_parameter("path_topic", "/path_projector_node/path")
-        self.declare_parameter("path_raw_topic", "/path_projector_node/path_raw")
         self.declare_parameter("odom_topic", "/odom")
         self.declare_parameter("bt_state_topic", "/hint_behavior_server/state")
 
         self._lock = threading.Lock()
         self._mask = None
         self._path = None          # list of (x, y) in odom
-        self._path_raw = None
         self._pose = None          # (x, y, yaw) latest odom
         self._bt_state = "IDLE"
 
         self.create_subscription(Image, str(self._p("mask_topic")), self._mask_cb, _LATEST)
         self.create_subscription(Path, str(self._p("path_topic")), self._path_cb, _LATCHED)
-        self.create_subscription(
-            Path, str(self._p("path_raw_topic")), self._path_raw_cb, _LATCHED)
         self.create_subscription(Odometry, str(self._p("odom_topic")), self._odom_cb, 20)
         self.create_subscription(String, str(self._p("bt_state_topic")), self._bt_cb, _LATCHED)
         # The camera frame drives the render loop; subscribe last.
@@ -85,11 +79,6 @@ class VisualDebugNode(Node):
         pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
         with self._lock:
             self._path = pts
-
-    def _path_raw_cb(self, msg):
-        pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
-        with self._lock:
-            self._path_raw = pts
 
     def _odom_cb(self, msg):
         p = msg.pose.pose.position
@@ -123,7 +112,7 @@ class VisualDebugNode(Node):
             return
         h, w = frame.shape[:2]
         with self._lock:
-            mask, path, path_raw = self._mask, self._path, self._path_raw
+            mask, path = self._mask, self._path
             pose, bt = self._pose, self._bt_state
 
         if bool(self._p("show_mask")) and mask is not None:
@@ -133,9 +122,6 @@ class VisualDebugNode(Node):
             frame[:] = ((1.0 - a) * frame.astype(np.float32) + a * tint).astype(np.uint8)
 
         rig = CameraRig.from_node(self)
-        # Raw (intent) first, followed (clipped) on top.
-        if bool(self._p("show_path_raw")) and path_raw:
-            self._draw_polyline(frame, self._project_path(rig, path_raw, pose, w, h), _C_PATH_RAW)
         if bool(self._p("show_path")) and path:
             self._draw_polyline(
                 frame, self._project_path(rig, path, pose, w, h), _C_PATH, dots=True)
