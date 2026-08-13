@@ -26,7 +26,7 @@ def generate_launch_description():
         "camera_hfov_deg": 62.2,
     }
 
-    vlm_timeout = 60.0
+    vlm_timeout = 120.0
     tf_buffer_time = 2.0 * vlm_timeout + 10.0
 
     camera_remap = (
@@ -135,7 +135,7 @@ def generate_launch_description():
         output="screen",
         parameters=[
             {
-                "history_frames": 1,
+                "history_frames": 2,
                 "reasoner_timeout": vlm_timeout,
                 "planner_timeout": vlm_timeout,
             }
